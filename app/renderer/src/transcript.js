@@ -256,7 +256,8 @@ export function toolSummary(calls) {
   const editedPaths = [...new Set(calls.filter(c => c.name === 'edit' || c.name === 'write').map(c => c.arguments?.path ?? c.arguments?.file_path).filter(Boolean))];
   const editedLabel = editedPaths.length === 1 ? editedPaths[0].split('/').pop() : plural(edited, 'file', 'files');
   if (edited) parts.push(`${parts.length ? 'edited' : 'Edited'} ${editedLabel}`);
-  if (counts.read) parts.push(`${parts.length ? 'read' : 'Read'} ${plural(counts.read, 'file', 'files')}`);
+  const readPaths = [...new Set(calls.filter(c => c.name === 'read').map(c => c.arguments?.path ?? c.arguments?.file_path).filter(Boolean))];
+  if (counts.read) parts.push(`${parts.length ? 'read' : 'Read'} ${readPaths.length === 1 ? readPaths[0].split('/').pop() : plural(counts.read, 'file', 'files')}`);
   const searched = (counts.grep ?? 0) + (counts.find ?? 0) + (counts.ls ?? 0);
   if (searched) parts.push(`${parts.length ? 'searched' : 'Searched'} ${plural(searched, 'time', 'times')}`);
   const other = calls.length - (counts.bash ?? 0) - edited - (counts.read ?? 0) - searched;

@@ -3,6 +3,6 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Later versions install themselves: an **Update** button appears next to Settings.
 
 **In this release**
-- No more Keychain password prompt after every update: API keys are now encrypted with a key kept in a Keychain item that stays readable across updates. This update asks one last time while it moves your saved keys over; choose Always Allow.
-- Folded steps now match Claude: only reasoning and tool calls fold; what Pi writes to you always stays in the conversation. Rows are plain text with an inline triangle, no icons, no hover highlight; the summary names a single edited file and shows "(N failed)" and +/− line counts.
-- Speed and "Last turn" in Usage are per turn again, where a turn is one model call, and update as each call finishes.
+- Commands read like Claude's: Pi now gives each command a short description ("Run the tests", "检查构建输出"), shown in place of the raw command; a group with one step is titled by that step. The command itself is one click away.
+- New conversations are named by the model, as in Claude: the first line shows at once, then a short title replaces it. Titles you set yourself are kept.
+- Roomier step rows.

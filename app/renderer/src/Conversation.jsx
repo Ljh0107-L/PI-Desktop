@@ -15,7 +15,7 @@ function describeCall(call) {
   const a = call.arguments ?? {};
   const path = a.path ?? a.file_path ?? '';
   switch (call.name) {
-    case 'bash': return { subject: a.command ?? '', mono: true };
+    case 'bash': return a.description?.trim() ? { subject: a.description.trim(), title: a.command } : { subject: a.command ?? '', mono: true };
     case 'read': return { icon: 'fileText', verb: 'Read', subject: baseOf(path), detail: dirOf(path) };
     case 'write': return { icon: 'fileEdit', verb: 'Wrote', subject: baseOf(path), detail: dirOf(path) };
     case 'edit': return { icon: 'fileEdit', verb: 'Edited', subject: baseOf(path), detail: dirOf(path) };
@@ -47,7 +47,7 @@ const outputText = text => text.length > 8000 ? text.slice(0, 8000) + '\n…' : 
 
 function ToolCall({ call, tool }) {
   const [open, setOpen] = useState(false);
-  const { verb, subject, detail, mono } = describeCall(call);
+  const { verb, subject, detail, mono, title } = describeCall(call);
   const status = tool?.status ?? 'pending';
   const output = textOf(tool?.result);
   const filePath = ['read', 'edit', 'write'].includes(call.name) && status !== 'error' ? (call.arguments?.path ?? call.arguments?.file_path) : null;
@@ -59,7 +59,7 @@ function ToolCall({ call, tool }) {
         {status === 'running' && <Spinner size={12} />}
         <span className="step-text">
           {verb && <span className="step-verb">{verb}</span>}
-          <span className={`step-subject ${mono ? 'mono' : ''}`} title={filePath ?? undefined}
+          <span className={`step-subject ${mono ? 'mono' : ''}`} title={title ?? filePath ?? undefined}
             onDoubleClick={filePath ? e => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: filePath })); } : undefined}>{subject}</span>
           {detail && <span className="step-dir">{detail}</span>}
         </span>
@@ -131,7 +131,8 @@ function WorkGroup({ items, tools, live }) {
   const failed = calls.filter(c => tools[c.id]?.status === 'error').length;
   const thinkMs = items.reduce((n, i) => n + (i.kind === 'thinking' ? i.durationMs ?? 0 : 0), 0);
   const edits = changesOf([{ role: 'assistant', content: calls }], tools).map(changeStats).reduce((t, c) => ({ added: t.added + c.added, removed: t.removed + c.removed }), { added: 0, removed: 0 });
-  const summary = toolSummary(calls) || (running ? '' : thoughtLabel(thinkMs));
+  const only = calls.length === 1 ? describeCall(calls[0]) : null;
+  const summary = (only && !only.mono ? [only.verb, only.subject].filter(Boolean).join(' ') : toolSummary(calls)) || (running ? '' : thoughtLabel(thinkMs));
   const latest = items.at(-1);
   const thinkingNow = running && latest?.kind === 'thinking' && latest.streaming;
   return (

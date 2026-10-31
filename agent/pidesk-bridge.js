@@ -11,7 +11,12 @@
 //    marks it complete (or blocked) with `update_goal`, the user pauses or clears it, or the run is
 //    interrupted. State is persisted in the session file and published to the desktop through the
 //    `pidesk-goal` status key. Because this runs inside Pi, goals keep going while the desktop is away.
+// 4. The bash tool takes a short `description` (as in Claude Code), which the desktop shows instead of
+//    the raw command; the command itself runs through Pi's own bash implementation unchanged.
+// 5. `/pidesk-title` names a new conversation with the session's model (as Claude does) and publishes
+//    the title through the `pidesk-title` status key.
 import { Type } from 'typebox';
+import { createBashToolDefinition } from '@earendil-works/pi-coding-agent';
 
 function literalKey(key) {
   // Pi treats "$NAME" and "!command" specially; "$$" and a leading "$!" are the documented escapes.
@@ -32,6 +37,9 @@ function modelDefaults(model) {
 }
 
 const BOOT = Symbol.for('pidesk.boot');
+
+const TITLE_PROMPT = `You name conversations. Reply with a title for the conversation that starts with the user's message below: 2 to 6 words, in the language of the message, sentence case, no quotes, no trailing punctuation. Reply with the title only.`;
+const cleanTitle = value => String(value ?? '').split('\n').map(l => l.trim()).find(Boolean)?.replace(/^["'“”‘’#*\s]+|["'“”‘’.。!！\s*]+$/g, '').replace(/^title:\s*/i, '').slice(0, 60) ?? '';
 const text = value => ({ content: [{ type: 'text', text: value }], details: {} });
 
 const MAX_GOAL_TURNS = 200;
@@ -91,6 +99,42 @@ export default function pideskBridge(pi) {
         globalThis[BOOT] = { ...(globalThis[BOOT] ?? {}), providers };
       }
       catch { process.stderr.write('pidesk: ignoring malformed provider update\n'); }
+    },
+  });
+
+  // ---------------------------------------------------------------- bash with a description
+  const bash = createBashToolDefinition(process.cwd());
+  pi.registerTool({
+    ...bash,
+    parameters: Type.Object({
+      ...bash.parameters.properties,
+      description: Type.Optional(Type.String({ description: 'What this command does, in 3 to 8 words, in the language of the conversation (e.g. "Check the build output", "运行测试"). Shown to the user in place of the command.' })),
+    }),
+    async execute(id, params, signal, onUpdate, ctx) {
+      const { description: _description, ...args } = params ?? {};
+      const tool = ctx?.cwd && ctx.cwd !== process.cwd() ? createBashToolDefinition(ctx.cwd) : bash;
+      return tool.execute(id, args, signal, onUpdate, ctx);
+    },
+  });
+
+  // ---------------------------------------------------------------- titles
+  pi.registerCommand?.('pidesk-title', {
+    description: 'Pi Desktop: name the conversation',
+    handler: async (args, ctx) => {
+      const message = Buffer.from(String(args ?? '').trim(), 'base64').toString('utf8').slice(0, 4000);
+      const model = ctx?.model;
+      if (!message || !model || !ctx.modelRegistry?.streamSimple) return;
+      // In the background: the command returns at once, the title follows when the model answers.
+      (async () => {
+        try {
+          const reply = await ctx.modelRegistry.streamSimple(model, {
+            systemPrompt: TITLE_PROMPT,
+            messages: [{ role: 'user', content: [{ type: 'text', text: message }], timestamp: Date.now() }],
+          }, { maxTokens: 400, signal: AbortSignal.timeout(30000) }).result();
+          const title = cleanTitle((reply?.content ?? []).filter(c => c.type === 'text').map(c => c.text).join(''));
+          if (title && reply?.stopReason !== 'error') ctx.ui?.setStatus('pidesk-title', title);
+        } catch { /* keep the provisional title */ }
+      })();
     },
   });
 

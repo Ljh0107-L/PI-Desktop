@@ -863,14 +863,15 @@ a[href], .markdown a { cursor: pointer; }
 .tool-group-head .plus, .tool-group-head .minus { font-variant-numeric: tabular-nums; }
 .step-caret { flex-shrink: 0; color: var(--faint); }
 
-.work-body { display: grid; grid-template-columns: minmax(0, 1fr); margin: 8px 0 10px; border: 0.5px solid var(--border); border-radius: 16px; background: rgba(255, 255, 255, .02); overflow: hidden; }
+.work-body { display: grid; grid-template-columns: minmax(0, 1fr); margin: 6px 0 14px; border: 0.5px solid var(--border); border-radius: 16px; background: rgba(255, 255, 255, .02); overflow: hidden; }
 .work-body > .step + .step { border-top: 0.5px solid var(--border); }
-.step-head { display: flex; align-items: center; gap: 8px; min-height: 46px; padding: 10px 20px; font-size: 14.5px; color: var(--muted); cursor: default; }
+.step-head { display: flex; align-items: center; gap: 8px; min-height: 48px; padding: 12px 22px; font-size: 14.5px; color: var(--muted); cursor: default; }
 .step.static .step-head { cursor: default; }
 .step-text { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .step-verb { color: var(--muted); margin-right: 8px; }
-.step-subject { color: var(--text-2); }
-.step-subject.mono { font: 13px/1.4 var(--mono); color: var(--muted); }
+.step-subject { color: var(--muted); }
+.step-verb + .step-subject { color: var(--text-2); }
+.step-subject.mono { font: 12.5px/1.4 var(--mono); color: var(--faint); }
 .step-dir { margin-left: 8px; font-size: 13px; color: var(--faint); }
 .step-stats { display: inline-flex; gap: 6px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
 .step-failed { flex-shrink: 0; color: var(--red); }

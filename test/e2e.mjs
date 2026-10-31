@@ -158,6 +158,9 @@ try {
   await page.click('.tool-group-head:has-text("Ran 1 command")');
   await page.click('.tool-call-head');
   check('tool output visible when expanded', (await page.locator('.tool-output').last().innerText()).includes(localProject.replace('/tmp', '')));
+  await waitNew('.markdown', 'Tool result: described', () => send('[[bash:echo described]] [[desc:Say hello]]'));
+  check('a command with a description shows the description, not the raw command', await page.locator('.tool-group-head', { hasText: 'Say hello' }).count() >= 1);
+  check('the model names a new conversation (and the provisional title is replaced)', await page.locator('.session-row', { hasText: 'hello from the desktop (named)' }).count() === 1, (await page.locator('.session-row').allInnerTexts()).join(' | '));
   check('a reply\'s work folds into one line; the answer stays visible', await page.locator('.tool-group.work', { hasText: 'Ran 1 command' }).count() >= 1 && await page.locator('.markdown', { hasText: 'Tool result: hi-from-pi' }).count() >= 1);
   check('long tool rows never scroll the conversation sideways', await page.evaluate(() => { const t = document.querySelector('.transcript'); return t.scrollWidth <= t.clientWidth + 1; }));
   // numbered lists continue on Shift+Enter, and an empty item ends the list

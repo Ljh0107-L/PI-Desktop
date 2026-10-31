@@ -413,6 +413,13 @@ export class SessionManager extends EventEmitter {
       return;
     }
     if (request.method === 'notify') this.emit('notice', { id: record.id, level: request.notifyType ?? 'info', message: request.message });
+    if (request.method === 'setStatus' && request.statusKey === 'pidesk-title' && request.statusText) {
+      if (record.autoTitle && record.title === record.autoTitle && request.statusText !== record.title) {
+        this.#save(record, { title: request.statusText, autoTitle: request.statusText });
+        runtime.session?.request('set_session_name', { name: request.statusText }).catch(() => {});
+      }
+      return;
+    }
     if (request.method === 'setStatus' && request.statusKey === 'pidesk-goal') {
       try { runtime.goal = request.statusText ? JSON.parse(request.statusText) : null; } catch { runtime.goal = null; }
       this.emit('goal', { id: record.id, goal: runtime.goal });
@@ -425,10 +432,14 @@ export class SessionManager extends EventEmitter {
     const record = this.record(id);
     const session = await this.ensureStarted(id);
     await this.#syncProviders(this.runtimes.get(id)).catch(() => {});
+    // The first message names the conversation at once (its first line), and the model then suggests a
+    // better title, as Claude does; a title the user set by hand is never replaced.
+    let nameIt = null;
     if (record.title === 'New session' && text.trim()) {
       const title = titleFrom(text);
-      this.#save(record, { title });
+      this.#save(record, { title, autoTitle: title });
       session.request('set_session_name', { name: title }).catch(() => {});
+      nameIt = text.trim().replace(/^\/goal\s+/, '');
     }
     const images = attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }));
     const files = attachments.filter(a => a.kind === 'file');
@@ -438,7 +449,9 @@ export class SessionManager extends EventEmitter {
       message = `${text}${text ? '\n\n' : ''}Attached files:\n${paths.map(p => `- ${p}`).join('\n')}`;
     }
     const runtime = this.runtimes.get(id);
-    return session.prompt(message, { ...(images.length ? { images } : {}), ...(runtime.streaming && !message.startsWith('/') ? { streamingBehavior: 'followUp' } : {}) });
+    const sent = await session.prompt(message, { ...(images.length ? { images } : {}), ...(runtime.streaming && !message.startsWith('/') ? { streamingBehavior: 'followUp' } : {}) });
+    if (nameIt && !nameIt.startsWith('/')) session.prompt(`/pidesk-title ${Buffer.from(nameIt).toString('base64')}`).catch(() => {});
+    return sent;
   }
 
   // Put attached files where the session's Pi can read them: as-is on this machine, uploaded to the host.

@@ -39,11 +39,19 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
     }) + '\n\n'));
     const finish = reason => {
       send({}, reason);
-      res.write('data: ' + JSON.stringify({ id, object: 'chat.completion.chunk', model: payload.model, choices: [], usage: (() => { const prompt = Math.max(10, Math.round(JSON.stringify(payload.messages ?? []).length / 4)); const completion = Math.max(1, Math.round(sentChars / 4)); const cached = (payload.messages?.length ?? 0) > 2 ? Math.floor(prompt * 0.8) : 0; const reasoning = hiddenThink ? 400 : 0; return { prompt_tokens: prompt, completion_tokens: completion + reasoning, total_tokens: prompt + completion + reasoning, prompt_tokens_details: { cached_tokens: cached }, completion_tokens_details: { reasoning_tokens: reasoning } }; })() }) + '\n\n');
+      res.write('data: ' + JSON.stringify({ id, object: 'chat.completion.chunk', model: payload.model, choices: [], usage: (() => { const prompt = Math.max(10, Math.round(JSON.stringify(payload.messages ?? []).length / 4)); const completion = Math.max(1, Math.round(sentChars / 4)); const cached = (payload.messages?.length ?? 0) > 2 ? Math.floor(prompt * 0.8) : 0; const reasoning = titleRequest || !hiddenThink ? 0 : 400; return { prompt_tokens: prompt, completion_tokens: completion + reasoning, total_tokens: prompt + completion + reasoning, prompt_tokens_details: { cached_tokens: cached }, completion_tokens_details: { reasoning_tokens: reasoning } }; })() }) + '\n\n');
       res.end('data: [DONE]\n\n');
     };
 
     const messages = payload.messages ?? [];
+    // Naming a conversation (Pi Desktop's title request): answer with the start of the user's message.
+    const titleRequest = /^You name conversations/.test(textOf(messages[0]?.content));
+    if (titleRequest) {
+      send({ role: 'assistant', content: '' });
+      send({ content: '"' + textOf(messages.at(-1)?.content).split('\n')[0].slice(0, 50).trim() + ' (named)"' });
+      finish('stop');
+      return;
+    }
     const last = messages[messages.length - 1] ?? {};
     const lastUser = [...messages].reverse().find(message => message.role === 'user');
     const userText = textOf(lastUser?.content);
@@ -78,7 +86,8 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
       return;
     }
     if (toolMatch) {
-      const args = JSON.stringify({ command: toolMatch[1] });
+      const desc = /\[\[desc:([^\]]+)\]\]/.exec(userText)?.[1];
+      const args = JSON.stringify({ command: toolMatch[1], ...(desc ? { description: desc } : {}) });
       send({ tool_calls: [{ index: 0, id: 'call_' + requests.length, type: 'function', function: { name: 'bash', arguments: '' } }] });
       for (let i = 0; i < args.length; i += 12) { await sleep(chunkDelay); send({ tool_calls: [{ index: 0, function: { arguments: args.slice(i, i + 12) } }] }); }
       finish('tool_calls');
