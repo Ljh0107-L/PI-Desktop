@@ -284,7 +284,7 @@ app.whenReady().then(() => {
     },
   });
   manager.on('environments-changed', () => send('environments', environments()));
-  for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'notice', 'environment', 'goal']) manager.on(channel, payload => send(channel, payload));
+  for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'rewound', 'notice', 'environment', 'goal']) manager.on(channel, payload => send(channel, payload));
   manager.on('sessions', () => send('sessions', manager.list()));
   createWindow();
   updater.start();

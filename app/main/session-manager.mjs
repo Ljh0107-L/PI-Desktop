@@ -617,7 +617,7 @@ export class SessionManager extends EventEmitter {
     if (result?.cancelled) throw new Error('Editing was cancelled.');
     const state = await session.state();
     this.#save(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId });
-    this.emit('resync', { id });
+    this.emit('rewound', { id }); // the desktop already shows the rewound conversation
     return this.prompt(id, text, attachments);
   }
 

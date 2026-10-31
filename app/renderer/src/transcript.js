@@ -114,6 +114,8 @@ export function applyEvent(t, event) {
         const timing = t.live?.__t0 ? { start: t.live.__t0, first: t.live.__tFirst ?? null, end: now, last: t.live.__tLast ?? null, chars: t.live.__chars ?? 0, est: t.live.__est ?? null, think: t.live.__thinkStart ? (t.live.__thinkEnd ?? now) - t.live.__thinkStart : null } : null;
         return { ...t, live: null, messages: [...t.messages, timing ? { ...message, __timing: timing } : message] };
       }
+      // Your message arrived from Pi: it replaces the optimistic copy shown while editing.
+      if (message.role === 'user') return { ...t, messages: [...t.messages.filter(m => !m.__optimistic), message] };
       return { ...t, messages: [...t.messages, message] };
     }
     case 'compaction_start': return { ...t, compacting: true };
@@ -258,4 +260,18 @@ export function changesOf(messages, tools = {}) {
     }
   }
   return [...byPath.values()];
+}
+
+const userText = m => (typeof m.content === 'string' ? m.content : (m.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n'));
+// Editing your ordinal-th message: keep everything before it and show the new text in its place at once,
+// so the conversation never blanks while Pi branches and reloads.
+export function rewindTo(t, ordinal, text, images = []) {
+  let seen = 0, cut = -1;
+  t.messages.forEach((m, i) => {
+    if (cut !== -1 || m.role !== 'user' || userText(m).startsWith('/pidesk-')) return;
+    if (seen++ === ordinal) cut = i;
+  });
+  if (cut === -1) return t;
+  const content = [{ type: 'text', text }, ...images.map(img => ({ type: 'image', data: img.data, mimeType: img.mimeType }))];
+  return { ...t, live: null, rewinding: true, messages: [...t.messages.slice(0, cut), { role: 'user', content, timestamp: Date.now(), __optimistic: true }] };
 }

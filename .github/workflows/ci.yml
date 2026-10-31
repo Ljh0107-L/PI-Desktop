@@ -51,12 +51,14 @@ jobs:
           set +e
           node test/protocol.mjs --ssh-host pidesk-test --ssh-config /tmp/pidesk-sshd/ssh_config > /tmp/protocol.log 2>&1 & P1=$!
           node test/relay.mjs --ssh-config /tmp/pidesk-sshd/ssh_config > /tmp/relay.log 2>&1 & P2=$!
+          node test/latency.mjs --ssh-config /tmp/pidesk-sshd/ssh_config > /tmp/latency.log 2>&1 & P3=$!
           node test/e2e.mjs --ssh-config /tmp/pidesk-e2e/ssh_config; E=$?
-          wait $P1; R1=$?; wait $P2; R2=$?
+          wait $P1; R1=$?; wait $P2; R2=$?; wait $P3; R3=$?
           echo "::group::protocol ($R1)"; cat /tmp/protocol.log; echo "::endgroup::"
           echo "::group::relay ($R2)"; cat /tmp/relay.log; echo "::endgroup::"
-          grep -h "checks passed" /tmp/protocol.log /tmp/relay.log || true
-          exit $(( E || R1 || R2 ))
+          echo "::group::latency ($R3)"; cat /tmp/latency.log; echo "::endgroup::"
+          grep -h "checks passed\|within budget" /tmp/protocol.log /tmp/relay.log /tmp/latency.log || true
+          exit $(( E || R1 || R2 || R3 ))
 
       - name: Upload screenshots
         if: always()

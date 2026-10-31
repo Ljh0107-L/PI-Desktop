@@ -1,6 +1,6 @@
 // Client-side state for the renderer: one immutable snapshot, updated from IPC events.
 import { useRef, useSyncExternalStore } from 'react';
-import { applyEvent, emptyTranscript, fromHistory } from './transcript.js';
+import { applyEvent, emptyTranscript, fromHistory, rewindTo } from './transcript.js';
 
 // Generation timing per reply (Pi's history keeps token counts but not timing), so tok/s survives reloads.
 const TIMING_KEY = 'pidesk.timings.v1';
@@ -75,6 +75,7 @@ export function notify(message, level = 'info') {
 window.pidesk.subscribe(({ channel, payload }) => {
   switch (channel) {
     case 'event': {
+      if (transcriptOf(payload.id).rewinding) break; // old branch, superseded by an edit
       { const next = applyEvent(transcriptOf(payload.id), payload.event);
         setTranscript(payload.id, next);
         if (payload.event.type === 'message_end' && payload.event.message?.role === 'assistant') saveTiming(payload.id, next.messages.at(-1));
@@ -104,6 +105,9 @@ window.pidesk.subscribe(({ channel, payload }) => {
       break;
     case 'questions-cleared':
       set(s => ({ questions: { ...s.questions, [payload.id]: [] } }));
+      break;
+    case 'rewound':
+      setTranscript(payload.id, { ...transcriptOf(payload.id), rewinding: false });
       break;
     case 'resync':
       reloadTranscript(payload.id);
@@ -262,7 +266,11 @@ export async function deleteSession(id) {
 }
 
 export async function editMessage(id, ordinal, originalText, text, attachments = []) {
-  await api('editMessage', id, ordinal, originalText, text, attachments);
+  // Show the rewound conversation immediately; events from the old branch (an aborted reply) are
+  // ignored until Pi reports the branch switch.
+  setTranscript(id, rewindTo(transcriptOf(id), ordinal, text, attachments.filter(a => a.kind === 'image')));
+  try { await api('editMessage', id, ordinal, originalText, text, attachments); }
+  catch (error) { reloadTranscript(id); throw error; }
 }
 
 export function newSession() { navigate({ view: 'new', activeId: null }); set({ view: 'new', activeId: null, paletteOpen: false }); }
