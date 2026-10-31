@@ -9,20 +9,44 @@ import { Composer } from './Composer.jsx';
 const textOf = result => (result?.content ?? []).map(c => c.text ?? '').join('').replace(/\s+$/, '');
 
 const baseOf = path => String(path ?? '').split('/').filter(Boolean).pop() ?? '';
-const dirOf = path => { const p = String(path ?? ''); const i = p.lastIndexOf('/'); return i > 0 ? p.slice(0, i) : ''; };
+// A command without a description, as a readable line: no leading "cd …;" / exports, no heredoc bodies.
+const shortCommand = command => {
+  const full = String(command ?? '').trim();
+  const parts = full.split(/<<-?\s*['"]?\w+['"]?/);
+  let c = parts[0].replace(/\s+/g, ' ').trim();
+  if (parts.length > 1) c = c.replace(/\s+-$/, '') + ' script'; // "python3 - <<'EOF' …" reads "python3 script"
+  c = c.replace(/^(?:(?:cd\s+(?:"[^"]*"|'[^']*'|\S+)|export\s+[^;&]+|set\s+-\w+)\s*(?:&&|;)\s*)+/, '');
+  return c || full;
+};
+// Text that fades out at the right edge when it does not fit (as in Claude), instead of an ellipsis.
+function FadeText({ className = '', children, title }) {
+  const ref = useRef(null);
+  const [clipped, setClipped] = useState(false);
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    const measure = () => setClipped(el.scrollWidth > el.clientWidth + 1);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [children]);
+  return <span ref={ref} className={`fade-text ${clipped ? 'clipped' : ''} ${className}`} title={title}>{children}</span>;
+}
+
 // How a step reads in a row: an icon, a short sentence, and (for files) the folder in grey.
 function describeCall(call) {
   const a = call.arguments ?? {};
   const path = a.path ?? a.file_path ?? '';
   switch (call.name) {
-    case 'bash': return a.description?.trim() ? { subject: a.description.trim(), title: a.command } : { subject: a.command ?? '', mono: true };
-    case 'read': return { icon: 'fileText', verb: 'Read', subject: baseOf(path), detail: dirOf(path) };
-    case 'write': return { icon: 'fileEdit', verb: 'Wrote', subject: baseOf(path), detail: dirOf(path) };
-    case 'edit': return { icon: 'fileEdit', verb: 'Edited', subject: baseOf(path), detail: dirOf(path) };
-    case 'grep': return { icon: 'search', verb: 'Searched for', subject: a.pattern ?? '', mono: true, detail: a.path };
-    case 'find': return { icon: 'search', verb: 'Found files', subject: a.pattern ?? a.path ?? '', mono: true };
-    case 'ls': return { icon: 'folder', verb: 'Listed', subject: a.path ?? '.', mono: true };
-    default: return { icon: 'wrench', verb: call.name, subject: JSON.stringify(a).slice(0, 160), mono: true };
+    case 'bash': return a.description?.trim() ? { subject: a.description.trim(), title: a.command } : { subject: shortCommand(a.command), title: a.command, raw: true };
+    case 'read': return { verb: 'Read', subject: baseOf(path), title: path };
+    case 'write': return { verb: 'Wrote', subject: baseOf(path), title: path };
+    case 'edit': return { verb: 'Edited', subject: baseOf(path), title: path };
+    case 'grep': return { verb: 'Searched for', subject: a.pattern ?? '', detail: a.path };
+    case 'find': return { verb: 'Found files', subject: a.pattern ?? a.path ?? '' };
+    case 'ls': return { verb: 'Listed', subject: a.path ?? '.' };
+    default: return { verb: call.name, subject: JSON.stringify(a).slice(0, 160), raw: true };
   }
 }
 
@@ -57,12 +81,11 @@ function ToolCall({ call, tool }) {
     <div className={`step tool-call ${status} ${open ? 'open' : ''}`}>
       <div className="step-head tool-call-head" role="button" tabIndex={0} onClick={() => setOpen(o => !o)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
         {status === 'running' && <Spinner size={12} />}
-        <span className="step-text">
+        <FadeText className="step-text" title={title ?? filePath ?? undefined}>
           {verb && <span className="step-verb">{verb}</span>}
-          <span className={`step-subject ${mono ? 'mono' : ''}`} title={title ?? filePath ?? undefined}
-            onDoubleClick={filePath ? e => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: filePath })); } : undefined}>{subject}</span>
+          <span className={`step-subject ${mono ? 'mono' : ''}`}>{subject}</span>
           {detail && <span className="step-dir">{detail}</span>}
-        </span>
+        </FadeText>
         {stats && <span className="step-stats">{stats.added > 0 && <span className="plus">+{stats.added}</span>}{stats.removed > 0 && <span className="minus">−{stats.removed}</span>}</span>}
         {status === 'error' && <span className="step-failed">Failed</span>}
         <Caret open={open} />
@@ -114,7 +137,7 @@ function WorkNote({ item }) {
     <div className={`step thought ${open ? 'open' : ''}`}>
       <div className="step-head" role="button" tabIndex={0} onClick={() => setOpen(o => !o)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
         {item.streaming && <Spinner size={12} />}
-        <span className="step-text">{open ? thoughtLabel(item.durationMs) : firstLine(item.text) || 'Thought'}</span>
+        <FadeText className="step-text">{open ? thoughtLabel(item.durationMs) : firstLine(item.text) || 'Thought'}</FadeText>
         <Caret open={open} />
       </div>
       {open && <div className="step-detail step-markdown"><Markdown text={item.text} /></div>}
@@ -132,14 +155,14 @@ function WorkGroup({ items, tools, live }) {
   const thinkMs = items.reduce((n, i) => n + (i.kind === 'thinking' ? i.durationMs ?? 0 : 0), 0);
   const edits = changesOf([{ role: 'assistant', content: calls }], tools).map(changeStats).reduce((t, c) => ({ added: t.added + c.added, removed: t.removed + c.removed }), { added: 0, removed: 0 });
   const only = calls.length === 1 ? describeCall(calls[0]) : null;
-  const summary = (only && !only.mono ? [only.verb, only.subject].filter(Boolean).join(' ') : toolSummary(calls)) || (running ? '' : thoughtLabel(thinkMs));
+  const summary = (only && !only.mono && !only.raw ? [only.verb, only.subject].filter(Boolean).join(' ') : toolSummary(calls)) || (running ? '' : thoughtLabel(thinkMs));
   const latest = items.at(-1);
   const thinkingNow = running && latest?.kind === 'thinking' && latest.streaming;
   return (
     <div className={`tool-group work ${open ? 'open' : ''}`}>
       <div className="tool-group-head" role="button" tabIndex={0} onClick={() => setOpen(o => !o)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
         {running && <Spinner size={12} />}
-        <span className={`group-summary ${thinkingNow ? 'shimmer' : ''}`}>{thinkingNow ? firstLine(latest.text) || 'Thinking' : summary || 'Working'}</span>
+        <FadeText className={`group-summary ${thinkingNow ? 'shimmer' : ''}`}>{thinkingNow ? firstLine(latest.text) || 'Thinking' : summary || 'Working'}</FadeText>
         {failed > 0 && <span className="group-failed">({failed} failed)</span>}
         {edits.added > 0 && <span className="plus">+{edits.added}</span>}
         {edits.removed > 0 && <span className="minus">−{edits.removed}</span>}
