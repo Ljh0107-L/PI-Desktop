@@ -102,6 +102,7 @@ try {
   // ---- no folder: a session in the default workspace, like Codex and Claude
   check('new sessions default to "No folder"', (await page.locator('.folder-trigger').innerText()).includes('No folder'));
   await waitNew('.markdown', 'Tool result', () => send('[[bash:pwd]]'));
+  await page.locator('.markdown', { hasText: 'pidesk-e2e/Pi' }).last().waitFor({ timeout: 15000 }).catch(() => {});
   const nfReply = await page.locator('.markdown', { hasText: 'Tool result' }).last().innerText();
   const nfGroups = await page.locator('.group-head').allInnerTexts();
   check('a session without a folder runs in the default workspace', nfReply.includes('/Pi') && nfGroups.some(g => g.includes('No folder')), JSON.stringify({ nfReply, nfGroups }));
