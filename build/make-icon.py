@@ -1,77 +1,69 @@
-# Generates build/icon.png (1024px) and build/icon.icns for Pi Desktop on macOS.
-# Design: Big Sur-style squircle in Claude's coral (#E8714E → #EC5F38), white serif "π" (New York, heavy).
-# Run with any Python that has Pillow:  python3 build/make-icon.py
+# Generates build/icon.png (1024px), build/icon.icns and the in-app copy from build/icon-source.png.
+# The source art is a full-bleed 1024px tile; this recentres its π (bounding box at the optical centre,
+# slightly above the middle), rebuilds the tile background as a smooth gradient fitted to the art, and
+# places it on the macOS Big Sur grid: an 824px squircle with a soft drop shadow inside a 1024px canvas.
+# Run with any Python that has Pillow and NumPy:  python3 build/make-icon.py
 import math, os, subprocess
-from PIL import Image, ImageChops, ImageDraw, ImageFilter, ImageFont
+import numpy as np
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 S, BODY = 1024, 824
 here = os.path.dirname(os.path.abspath(__file__))
+src = Image.open(os.path.join(here, 'icon-source.png')).convert('RGB').resize((S, S), Image.LANCZOS)
+a = np.asarray(src).astype(float)
+
+# the white glyph, and everything near it (its own soft shadow)
+r, g, b = a[..., 0], a[..., 1], a[..., 2]
+glyph = ((r > 225) & (g > 215) & (b > 200)).astype(np.uint8) * 255
+near = np.asarray(Image.fromarray(glyph).filter(ImageFilter.MaxFilter(91))) > 0
+
+# background: a smooth cubic surface fitted to the tile away from the glyph and the source's rim
+yy, xx = np.mgrid[0:S, 0:S]
+def features(x, y):
+    x, y = (x - S / 2) / (S / 2), (y - S / 2) / (S / 2)
+    return np.stack([np.ones_like(x), x, y, x * x, x * y, y * y, x ** 3, x * x * y, x * y * y, y ** 3], -1)
+sample = (xx > 60) & (xx < S - 60) & (yy > 60) & (yy < S - 60) & ~near
+background = np.zeros_like(a)
+for c in range(3):
+    coef, *_ = np.linalg.lstsq(features(xx[sample], yy[sample]), a[..., c][sample], rcond=None)
+    background[..., c] = features(xx, yy) @ coef
+
+# move the glyph (with its shadow) so its bounding box is centred, a touch above the middle
+ys, xs = np.where(glyph > 0)
+dx, dy = S / 2 - (xs.min() + xs.max()) / 2, S / 2 - 4 - (ys.min() + ys.max()) / 2
+shift = (1, 0, -dx, 0, 1, -dy)
+feather = Image.fromarray((near * 255).astype(np.uint8)).filter(ImageFilter.GaussianBlur(14))
+content = Image.fromarray(np.clip(background, 0, 255).astype(np.uint8))
+content.paste(src.transform(src.size, Image.AFFINE, shift, resample=Image.BICUBIC), (0, 0), feather.transform(src.size, Image.AFFINE, shift, resample=Image.BICUBIC))
 
 def squircle_mask(n=5.0, scale=4):
     big = S * scale
     mask = Image.new('L', (big, big), 0)
-    c, a = big / 2, BODY * scale / 2
+    c, half = big / 2, BODY * scale / 2
     pts = []
     for i in range(1440):
         t = 2 * math.pi * i / 1440
         x, y = math.cos(t), math.sin(t)
-        pts.append((c + a * abs(x) ** (2 / n) * (1 if x >= 0 else -1), c + a * abs(y) ** (2 / n) * (1 if y >= 0 else -1)))
+        pts.append((c + half * abs(x) ** (2 / n) * (1 if x >= 0 else -1), c + half * abs(y) ** (2 / n) * (1 if y >= 0 else -1)))
     ImageDraw.Draw(mask).polygon(pts, fill=255)
     return mask.resize((S, S), Image.LANCZOS)
 
-def gradient(c1, c2, angle=90):
-    ramp = Image.new('RGB', (1, 256))
-    for i in range(256):
-        t = i / 255
-        ramp.putpixel((0, i), tuple(int(c1[k] + (c2[k] - c1[k]) * t) for k in range(3)))
-    g = ramp.resize((S * 2, S * 2)).rotate(90 - angle, resample=Image.BICUBIC)
-    return g.crop((S // 2, S // 2, S // 2 + S, S // 2 + S))
-
-def variable_font(path, size, **wanted):
-    font = ImageFont.truetype(path, size)
-    try:
-        values = []
-        for axis in font.get_variation_axes():
-            name = axis['name'].decode() if isinstance(axis['name'], bytes) else axis['name']
-            values.append(wanted.get(name.lower(), axis.get('default', axis['minimum'])))
-        font.set_variation_by_axes(values)
-    except Exception:
-        pass
-    return font
-
-def glyph_mask(text, font, center):
-    mask = Image.new('L', (S, S), 0)
-    draw = ImageDraw.Draw(mask)
-    box = draw.textbbox((0, 0), text, font=font, anchor='ls')
-    w, h = box[2] - box[0], box[3] - box[1]
-    draw.text((center[0] - w / 2 - box[0], center[1] + h / 2 - box[3]), text, font=font, fill=255, anchor='ls')
-    return mask
-
 mask = squircle_mask()
+tile = Image.new('RGB', (S, S))
+tile.paste(content.resize((BODY, BODY), Image.LANCZOS), ((S - BODY) // 2, (S - BODY) // 2))
+
 img = Image.new('RGBA', (S, S), (0, 0, 0, 0))
-
-# drop shadow under the tile
 shadow = Image.new('RGBA', (S, S), (0, 0, 0, 0))
-shadow.paste((0, 0, 0, 255), (0, 18), mask.point(lambda v: v * 0.55))
-img = Image.alpha_composite(img, shadow.filter(ImageFilter.GaussianBlur(22)))
-
-# tile: Claude's coral, top to bottom
-img.paste(gradient((232, 113, 78), (236, 95, 56), angle=90).convert('RGBA'), (0, 0), mask)
-
-# inner rim highlight, strongest at the top
-ring = ImageChops.subtract(mask, mask.filter(ImageFilter.MinFilter(7)))
-ring = ImageChops.multiply(ring, gradient((255, 255, 255), (0, 0, 0)).convert('L').point(lambda v: int(v * 110 / 255)))
-img.paste((255, 214, 196, 255), (0, 0), ring)
-
-# white π with a light warm shadow
-serif = variable_font('/System/Library/Fonts/NewYork.ttf', 600, weight=860, **{'optical size': 72})
-pi = glyph_mask('π', serif, (512, 500))
-glyph_shadow = Image.new('RGBA', (S, S), (0, 0, 0, 0))
-glyph_shadow.paste((150, 45, 15, 255), (0, 10), pi.point(lambda v: v * 70 // 255))
-img = Image.alpha_composite(img, glyph_shadow.filter(ImageFilter.GaussianBlur(14)))
-img.paste((255, 255, 255, 255), (0, 0), pi)
+shadow.paste((0, 0, 0, 255), (0, 14), mask.point(lambda v: v * 0.45))
+img = Image.alpha_composite(img, shadow.filter(ImageFilter.GaussianBlur(20)))
+img.paste(tile.convert('RGBA'), (0, 0), mask)
+# hairline highlight along the top edge
+ring = ImageChops.subtract(mask, mask.filter(ImageFilter.MinFilter(5)))
+fade = Image.linear_gradient('L').rotate(180).resize((S, S)).point(lambda v: v * 90 // 255)
+img.paste((255, 226, 208, 255), (0, 0), ImageChops.multiply(ring, fade))
 
 img.save(os.path.join(here, 'icon.png'))
+img.resize((256, 256), Image.LANCZOS).save(os.path.join(here, '..', 'app', 'renderer', 'public', 'app-icon.png'))
 iconset = os.path.join(here, 'icon.iconset')
 os.makedirs(iconset, exist_ok=True)
 for size in [16, 32, 128, 256, 512]:
@@ -81,4 +73,4 @@ subprocess.run(['iconutil', '-c', 'icns', iconset, '-o', os.path.join(here, 'ico
 for name in os.listdir(iconset):
     os.remove(os.path.join(iconset, name))
 os.rmdir(iconset)
-print('wrote build/icon.png and build/icon.icns')
+print('wrote build/icon.png, build/icon.icns and app/renderer/public/app-icon.png')
