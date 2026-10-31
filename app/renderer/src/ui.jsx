@@ -53,9 +53,9 @@ export function Popover({ anchor, open, onClose, children, placement = 'top-star
   );
 }
 
-export function MenuItem({ icon, label, detail, checked, onClick, trailing, disabled, className = '' }) {
+export function MenuItem({ icon, label, detail, checked, onClick, trailing, disabled, title, className = '' }) {
   return (
-    <button type="button" className={`menu-item ${className}`} onClick={onClick} disabled={disabled}>
+    <button type="button" className={`menu-item ${className}`} onClick={onClick} disabled={disabled} title={title}>
       {icon && <span className="menu-icon">{typeof icon === 'string' ? <Icon name={icon} size={17} /> : icon}</span>}
       <span className="menu-text"><span className="menu-label">{label}</span>{detail && <span className="menu-detail">{detail}</span>}</span>
       {trailing}

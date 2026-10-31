@@ -108,14 +108,14 @@ function RemoteBrowser({ environmentId, start, onPick, onClose }) {
 
 function FolderMenu({ environmentId, value, onChange, close, onBrowse }) {
   const recents = useStore(s => s.settings?.recentFolders?.[environmentId] ?? []);
-  const home = useStore(s => s.home);
   const env = useStore(s => s.environments.find(e => e.id === environmentId));
   const local = env?.kind !== 'ssh';
   return <>
+    <MenuItem icon="chat" label="No folder" checked={!value} onClick={() => { onChange(null); close(); }} />
     {recents.length > 0 && <MenuSection title="Recent folders">
-      {recents.map(path => <MenuItem key={path} icon="folder" label={baseName(path)} detail={local ? shortPath(path, home) : path} checked={value === path} onClick={() => { onChange(path); close(); }} />)}
+      {recents.map(path => <MenuItem key={path} icon="folder" label={baseName(path)} title={path} checked={value === path} onClick={() => { onChange(path); close(); }} />)}
     </MenuSection>}
-    <div className={recents.length ? 'menu-foot' : ''}>
+    <div className="menu-foot">
       <MenuItem icon="plus" label={local ? 'Choose a folder…' : `Browse ${env?.label ?? 'host'}…`} onClick={async () => {
         close();
         if (local) { const path = await api('pickLocalFolder'); if (path) onChange(path); }
@@ -327,9 +327,9 @@ export function ComposerBar({ session }) {
           <Trigger className="env-trigger" width={330} placement="top-start" label="Environment" menu={close => <EnvironmentMenu value={environmentId} onChange={changeEnv} close={close} />}>
             <Icon name={envIcon(env)} size={16} /><span>{env.label}</span>
           </Trigger>
-          <Trigger className={`folder-trigger ${cwd ? '' : 'attention'}`} width={330} placement="top-start" label="Folder" title={cwd ? shortPath(cwd, home) : undefined}
+          <Trigger className="folder-trigger" width={300} placement="top-start" label="Folder" title={cwd ? shortPath(cwd, home) : undefined}
             menu={close => <FolderMenu environmentId={environmentId} value={cwd} onChange={path => setDraft({ cwd: path })} close={close} onBrowse={() => setBrowsing(true)} />}>
-            <Icon name="folder" size={16} /><span>{cwd ? baseName(cwd) : 'Choose folder'}</span>
+            <Icon name={cwd ? 'folder' : 'chat'} size={16} /><span>{cwd ? baseName(cwd) : 'No folder'}</span>
           </Trigger>
           {prep?.status === 'preparing' && <span className="bar-status"><Spinner size={12} /> {prep.message}</span>}
           {prep?.status === 'error' && <button type="button" className="bar-status error" title={prep.message} onClick={() => api('prepareEnvironment', environmentId, true)}>

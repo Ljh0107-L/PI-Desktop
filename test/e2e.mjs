@@ -30,7 +30,8 @@ const check = (name, ok, detail = '') => { results.push(ok); console.log(`${ok ?
 const mock = await startMockLlm({ chunkDelay: 25 });
 const attachFile = join(work, 'attach-notes.txt');
 writeFileSync(attachFile, 'notes for Pi\n');
-const env = { PIDESK_SSH_CONFIG: opts['ssh-config'], PIDESK_TEST_PICK_FOLDER: localProject, PIDESK_TEST_PICK_FILES: attachFile };
+const defaultWorkspace = join(work, 'Pi');
+const env = { PIDESK_SSH_CONFIG: opts['ssh-config'], PIDESK_TEST_PICK_FOLDER: localProject, PIDESK_TEST_PICK_FILES: attachFile, PIDESK_DEFAULT_WORKSPACE: defaultWorkspace };
 // 1×1 PNG
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 const profile = join(work, 'profile');
@@ -98,8 +99,16 @@ try {
   await S('03c-connections');
   await page.click('.nav-item.back');
 
+  // ---- no folder: a session in the default workspace, like Codex and Claude
+  check('new sessions default to "No folder"', (await page.locator('.folder-trigger').innerText()).includes('No folder'));
+  await waitNew('.markdown', 'Tool result', () => send('[[bash:pwd]]'));
+  check('a session without a folder runs in the default workspace', (await page.locator('.markdown', { hasText: 'Tool result' }).last().innerText()).includes('/Pi') && await page.locator('.group-head', { hasText: 'No folder' }).count() === 1);
+  await page.locator('.session-row', { hasText: '[[bash:pwd]]' }).click({ button: 'right' });
+  await page.click('.popover .menu-item:has-text("Archive")');
+  await page.locator('.session-row', { hasText: '[[bash:pwd]]' }).waitFor({ state: 'detached' });
+
   // ---- local session
-  await page.click('.trigger:has-text("Choose folder")');
+  await page.click('.folder-trigger');
   await page.click('.menu-item:has-text("Choose a folder")');
   await page.locator('.trigger', { hasText: 'demo-app' }).waitFor();
   check('model chip shows first model', await page.locator('.model-trigger').innerText() === 'alpha-1');
@@ -261,7 +270,7 @@ try {
   await page.locator('.bar-status').waitFor({ state: 'detached', timeout: 300000 }).catch(() => {});
   const prep = await page.evaluate(() => window.pidesk.invoke('prepareEnvironment', 'ssh:pidesk-test'));
   check('SSH host prepared (Pi installed under ~/.pidesk)', prep.ok, prep.ok ? `${prep.facts.hostname}, Node ${prep.facts.nodeVersion}, Pi ${prep.facts.piVersion}` : prep.error);
-  await page.click('.trigger:has-text("Choose folder")');
+  await page.click('.folder-trigger');
   await page.click('.menu-item:has-text("Browse pidesk-test")');
   await page.locator('.browse-item').first().waitFor({ timeout: 30000 });
   await page.fill('.browse-path input', remoteProject);

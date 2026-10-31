@@ -45,7 +45,7 @@ function NewSessionView() {
   const draft = useStore(s => s.draft);
   // Start a Pi in the chosen place ahead of time, so the first message doesn't wait for it.
   useEffect(() => {
-    if (!draft.cwd || !draft.model) return;
+    if (!draft.model) return;
     const t = setTimeout(() => api('prewarm', { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel }).catch(() => {}), 400);
     return () => clearTimeout(t);
   }, [draft.environmentId, draft.cwd, draft.model?.provider, draft.model?.id]);

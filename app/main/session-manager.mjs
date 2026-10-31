@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { execFile } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
+import { homedir } from 'node:os';
 import { PiSession } from '../../core/pi-session.mjs';
 import { egressEnv, localRelayTransport, localTransport, relaySpawnSpec, shellQuote, sshRelayTransport } from '../../core/transports.mjs';
 import { startEgressProxy, hostPortOf } from '../../core/egress-proxy.mjs';
@@ -187,8 +188,10 @@ export class SessionManager extends EventEmitter {
   // While the user is on the new-session screen with an environment and folder chosen, start a Pi there
   // in advance; the first message then adopts it instead of waiting for SSH + Pi start-up.
   spares = new Map(); // `${environmentId}\n${cwd}` -> { id, record, timer }
-  prewarm({ environmentId, cwd, model, thinkingLevel }) {
-    if (!environmentId || !cwd) return false;
+  async prewarm({ environmentId, cwd: chosen, model, thinkingLevel }) {
+    if (!environmentId) return false;
+    const { cwd } = await this.workspace(environmentId, chosen).catch(() => ({}));
+    if (!cwd) return false;
     const key = `${environmentId}\n${cwd}`;
     for (const [k] of this.spares) if (k !== key) this.#dropSpare(k);
     const existing = this.spares.get(key);
@@ -218,18 +221,36 @@ export class SessionManager extends EventEmitter {
     if (env && runtime) this.stopRelay(env, spare.id).catch(() => {});
   }
 
-  async create({ environmentId, cwd, model, thinkingLevel }) {
+  // "No folder": sessions work in a default workspace, ~/Pi on this Mac and ~/pi on a host.
+  async workspace(environmentId, cwd) {
+    if (cwd) return { cwd, noFolder: false };
     const env = this.env(environmentId);
-    const spareKey = `${environmentId}\n${cwd}`;
+    if (env.kind === 'local') {
+      const dir = process.env.PIDESK_DEFAULT_WORKSPACE ?? join(homedir(), 'Pi');
+      mkdirSync(dir, { recursive: true });
+      return { cwd: dir, noFolder: true };
+    }
+    this.defaultDirs ??= new Map();
+    if (!this.defaultDirs.has(env.id)) {
+      const out = await runSsh(env, 'mkdir -p "$HOME/pi" && cd "$HOME/pi" && pwd', { timeout: 30000 });
+      this.defaultDirs.set(env.id, out.trim().split('\n').pop());
+    }
+    return { cwd: this.defaultDirs.get(env.id), noFolder: true };
+  }
+
+  async create({ environmentId, cwd: chosen, model, thinkingLevel }) {
+    const env = this.env(environmentId);
+    const { cwd, noFolder } = await this.workspace(environmentId, chosen);
+    const spareKey = `${environmentId}\n${cwd}`; // cwd is the resolved workspace
     const spare = this.spares.get(spareKey);
     if (spare) {
       // Adopt the warm Pi: same id, so its relay session and runtime carry over.
       this.spares.delete(spareKey);
       clearTimeout(spare.timer);
-      const record = Object.assign(spare.record, { spare: undefined, environmentLabel: env.label, project: env.kind === 'local' ? basename(cwd) : remoteBase(cwd), createdAt: Date.now(), updatedAt: Date.now() });
+      const record = Object.assign(spare.record, { spare: undefined, environmentLabel: env.label, project: noFolder ? 'No folder' : env.kind === 'local' ? basename(cwd) : remoteBase(cwd), noFolder: noFolder || undefined, createdAt: Date.now(), updatedAt: Date.now() });
       delete record.spare;
       this.store.sessions.unshift(record);
-      this.store.touchRecent(environmentId, cwd);
+      if (!noFolder) this.store.touchRecent(environmentId, cwd);
       this.store.saveSessions();
       this.emit('sessions');
       try {
@@ -246,12 +267,12 @@ export class SessionManager extends EventEmitter {
     }
     const record = {
       id: randomUUID(), title: 'New session', environmentId, environmentLabel: env.label, cwd,
-      project: env.kind === 'local' ? basename(cwd) : remoteBase(cwd),
+      project: noFolder ? 'No folder' : env.kind === 'local' ? basename(cwd) : remoteBase(cwd), noFolder: noFolder || undefined,
       model, thinkingLevel: thinkingLevel ?? 'medium',
       createdAt: Date.now(), updatedAt: Date.now(),
     };
     this.store.sessions.unshift(record);
-    this.store.touchRecent(environmentId, cwd);
+    if (!noFolder) this.store.touchRecent(environmentId, cwd);
     this.store.saveSessions();
     this.emit('sessions');
     await this.ensureStarted(record.id);

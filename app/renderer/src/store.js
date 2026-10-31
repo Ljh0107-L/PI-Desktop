@@ -214,7 +214,6 @@ export async function refreshStats(id) {
 
 export async function startSession(text, attachments = []) {
   const { draft } = state;
-  if (!draft.cwd) throw new Error('Choose a project folder first.');
   if (!draft.model) throw new Error('Add a model provider in Settings first.');
   const pendingId = 'pending';
   set({ view: 'session', activeId: pendingId, transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: [{ role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] } } });
