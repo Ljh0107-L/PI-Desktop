@@ -820,20 +820,6 @@ a[href], .markdown a { cursor: pointer; }
 .update-fill { position: absolute; inset: 0 auto 0 0; background: linear-gradient(180deg, #ee7c58, var(--accent-2)); transition: width .3s ease; }
 .update-label { position: relative; }
 
-/* ------------------------------------------------------------ folded work (Claude-style) */
-.work-body { grid-template-columns: minmax(0, 1fr); min-width: 0; margin: 6px 0 8px; border: 0.5px solid var(--border); border-radius: 14px; overflow: hidden; background: rgba(255, 255, 255, .015); display: grid; }
-.work-body > * + * { border-top: 0.5px solid var(--hairline); }
-.work-body .tool-call-head { border-radius: 0; min-height: 40px; padding: 7px 14px; }
-.work-body .tool-detail { margin: 0 14px 12px 39px; }
-.work-note-head, .work-note.static { display: flex; align-items: center; gap: 8px; width: 100%; min-height: 40px; padding: 7px 14px; text-align: left; font-size: 13.5px; color: var(--text-2); transition: background .12s; }
-.work-note-head:hover { background: rgba(255, 255, 255, .04); color: var(--text); }
-.work-note.static { color: var(--muted); }
-.work-note.thought .work-note-line { color: var(--muted); font-style: italic; }
-.work-note-line { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.work-note-body { padding: 0 16px 10px; }
-.work-note-body .markdown { font-size: 14px; color: var(--text-2); }
-.work-note.thought .work-note-body .markdown { color: var(--muted); }
-
 /* ------------------------------------------------------------ Settings → Usage */
 .usage-loading { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13.5px; }
 .usage-stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; }
@@ -867,9 +853,73 @@ a[href], .markdown a { cursor: pointer; }
 .model-rank-tokens { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-2); }
 .model-rank-share { text-align: right; font-variant-numeric: tabular-nums; color: var(--faint); font-size: 12.5px; }
 
-/* Long commands never widen the conversation: rows truncate, the expanded command wraps in full. */
+/* ------------------------------------------------------------ folded work (Claude-style) */
 .tool-group, .tool-call, .work-note { min-width: 0; max-width: 100%; }
-.tool-detail { min-width: 0; }
-.tool-command { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; overflow-x: hidden; }
 .tool-group-head:not(.static) { padding: 0 8px; margin-left: -8px; transition: color .12s, background .12s; }
 .tool-group-head:not(.static):hover { background: rgba(255, 255, 255, .05); }
+.rot-caret { color: var(--faint); flex-shrink: 0; transition: transform .15s var(--ease); }
+.rot-caret.down { transform: rotate(90deg); }
+.tool-group-head .tool-failed::before { content: '·'; margin-right: 6px; color: var(--faint); }
+
+.work-body { display: grid; grid-template-columns: minmax(0, 1fr); margin: 6px 0 10px; padding: 4px; border: 0.5px solid var(--hairline); border-radius: 14px; background: rgba(255, 255, 255, .025); }
+.work-body .tool-call-head, .work-note-head, .work-note.static {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 36px; padding: 6px 10px; border-radius: 10px;
+  text-align: left; font-size: 13.5px; color: var(--text-2); transition: background .12s, color .12s;
+}
+.work-body .tool-call-head:hover, .work-note-head:hover { background: rgba(255, 255, 255, .045); color: var(--text); }
+.work-body .tool-call.open > .tool-call-head, .work-note.open > .work-note-head { background: rgba(255, 255, 255, .035); }
+.work-body .tool-status { width: 16px; height: 16px; color: var(--faint); }
+.work-body .tool-call.error .tool-status { color: var(--faint); }
+.work-body .tool-verb { color: var(--muted); }
+.tool-subject { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; color: var(--text-2); }
+.tool-subject.mono { font: 12.5px/1.4 var(--mono); color: var(--text-2); }
+.tool-dir { margin-left: 8px; font-size: 12.5px; color: var(--faint); font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
+.tool-stats { display: inline-flex; gap: 6px; font-size: 12.5px; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.tool-call .tool-failed { font-size: 12.5px; flex-shrink: 0; }
+.tool-call .tool-caret { transition: transform .15s var(--ease); opacity: 0; }
+.tool-call-head:hover .tool-caret, .work-note-head:hover .tool-caret, .tool-call.open .tool-caret, .work-note.open .tool-caret { opacity: 1; }
+.tool-call.open .tool-caret, .work-note.open .tool-caret { transform: rotate(90deg); }
+.work-note-line { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.work-note.static { color: var(--muted); }
+.work-note.thought .work-note-line { color: var(--muted); }
+.work-note-body { padding: 2px 12px 8px 36px; }
+.work-note-body .markdown { font-size: 14px; color: var(--text-2); }
+.work-note.thought .work-note-body .markdown { color: var(--muted); }
+.work-body .tool-detail { margin: 4px 6px 10px 36px; min-width: 0; display: grid; gap: 8px; }
+
+/* a command and its output, as one console */
+.tool-console { border: 0.5px solid var(--border); border-radius: 10px; background: #141414; overflow: hidden; }
+.tool-console .tool-command, .tool-console .tool-output { margin: 0; border: 0; border-radius: 0; background: none; padding: 10px 14px; max-height: 320px; overflow: auto; font: 12px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; }
+.tool-console .tool-command { color: var(--text); }
+.tool-console .tool-command .prompt { color: var(--faint); user-select: none; }
+.tool-console .tool-output { border-top: 0.5px solid var(--hairline); color: var(--muted); }
+.tool-console.error .tool-output { color: #ff9b94; }
+.tool-console .tool-running { padding: 8px 14px; border-top: 0.5px solid var(--hairline); }
+.tool-command { white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; overflow-x: hidden; }
+
+/* diffs: clear, saturated red and green */
+.diff { background: #141414; border: 0.5px solid var(--border); border-radius: 10px; padding: 6px 0; font: 12px/1.6 var(--mono); max-height: 360px; overflow: auto; }
+.diff-line { padding: 0 14px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; color: var(--text-2); }
+.diff-line .diff-sign, .diff-row .diff-sign { display: inline-block; width: 28px; text-align: center; user-select: none; color: var(--faint); }
+.diff-line.add { background: rgba(46, 160, 67, .22); color: #d2f8d9; }
+.diff-line.del { background: rgba(248, 81, 73, .22); color: #ffd7d4; }
+.diff-line.add .diff-sign, .diff-row.add .diff-sign { color: #56d364; }
+.diff-line.del .diff-sign, .diff-row.del .diff-sign { color: #ff7b72; }
+.diff-line.gap { color: var(--faint); padding-left: 28px; }
+.diff-row.add { background: rgba(46, 160, 67, .22); color: #d2f8d9; }
+.diff-row.del { background: rgba(248, 81, 73, .22); color: #ffd7d4; }
+.plus { color: #56d364; }
+.minus { color: #ff7b72; }
+
+/* your messages: list items hang-indented by level */
+.ub-line { min-height: 1.55em; }
+.ub-li { position: relative; padding-left: calc(var(--depth) * 1.4em + 1.7em); }
+.ub-marker { position: absolute; left: calc(var(--depth) * 1.4em); width: 1.4em; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* reply actions: shown on the latest reply, and on hover elsewhere */
+.turn-foot .turn-action { opacity: 0; transition: opacity .15s; }
+.turn-foot.last .turn-action, .turn-foot:hover .turn-action { opacity: 1; }
+.turn-foot.last .turn-action:not(:hover) { color: var(--faint); }
+
+/* message box without the paperclip: paste or drop files instead */
+.composer-row textarea { padding-left: 10px; }

@@ -10,7 +10,7 @@ function Card({ title, children, open: initial = true, aside }) {
     <section className="panel-card">
       <button className="panel-card-head" onClick={() => setOpen(o => !o)} aria-expanded={open}>
         <span>{title}</span>
-        {children && <Icon name={open ? 'caretDown' : 'caretRight'} size={13} className="muted" />}
+        {children && <Icon name="chevronRight" size={13} className={`rot-caret ${open ? 'down' : ''}`} />}
         {aside && <span className="panel-card-aside">{aside}</span>}
       </button>
       {open && children && <div className="panel-card-body">{children}</div>}
@@ -20,10 +20,14 @@ function Card({ title, children, open: initial = true, aside }) {
 
 const fmtTps = v => v == null ? '—' : v >= 100 ? String(Math.round(v)) : v.toFixed(1);
 
-// Speed and token usage: the live/last reply's speed with a trend of recent replies, and input / cached /
-// output tokens for the last reply and the whole session.
-function UsageCard({ transcript }) {
-  const turns = turnUsages(transcript?.messages ?? []);
+// Speed and token usage: the last turn's speed with a trend of recent turns, and input / cached /
+// output tokens for the last turn and the whole session.
+// Figures are per turn (your message → every model call that answered it) and change only when a turn
+// finishes: mid-turn, the previous turn's numbers stay up instead of jumping with each model call.
+function UsageCard({ transcript, streaming }) {
+  const all = turnUsages(transcript?.messages ?? []);
+  const lastMessage = transcript?.messages?.findLast(m => m.role === 'user' || m.role === 'assistant');
+  const turns = streaming && lastMessage?.role === 'assistant' ? all.slice(0, -1) : all;
   if (!turns.length) return null;
   const last = turns.at(-1);
   const total = usageOf(transcript.messages);
@@ -45,7 +49,7 @@ function UsageCard({ transcript }) {
           <div className="spark" aria-hidden="true">{recent.map((v, i) => <span key={i} style={{ height: `${Math.max(8, v / peak * 100)}%` }} />)}</div>
         </div>
         <div className="usage-table">
-          <span /><span className="th">Last reply</span><span className="th">Session</span>
+          <span /><span className="th">Last turn</span><span className="th">Session</span>
           {rows.flatMap(([label, a, b]) => [<span key={label} className="td-label">{label}</span>, <span key={label + 'a'}>{formatTokens(a)}</span>, <span key={label + 'b'}>{formatTokens(b)}</span>])}
           <span className="td-label">Cache hit</span><span>{last.cacheHit == null ? '—' : `${Math.round(last.cacheHit * 100)}%`}</span><span>{total.cacheHit == null ? '—' : `${Math.round(total.cacheHit * 100)}%`}</span>
         </div>
@@ -77,7 +81,7 @@ export function RightPanel({ session }) {
         <span className="muted">{stats?.contextUsage?.tokens != null ? `${formatTokens(stats.contextUsage.tokens)} / ${formatTokens(stats.contextUsage.contextWindow)}` : '—'}</span>
         <span className="meter" title={percent == null ? undefined : `${Math.round(percent)}% of the context window`}><span style={{ width: `${percent > 0 ? Math.max(6, Math.min(100, percent)) : 0}%` }} /></span>
       </>} />
-      <UsageCard transcript={transcript} />
+      <UsageCard transcript={transcript} streaming={!!session.streaming} />
       {files.length > 0 && <Card title="Outputs">
         {(showAll ? files : files.slice(0, 5)).map(f => (
           <button key={f.path} className="panel-row file" title={f.path} onClick={() => openFile(session.id, f.path)}>

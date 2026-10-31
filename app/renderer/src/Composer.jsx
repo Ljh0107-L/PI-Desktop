@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { MenuItem, MenuSection, Modal, Popover, Spinner, baseName, envIcon, shortPath } from './ui.jsx';
 import { api, getState, notify, openSettings, setDraft, setEnvironments, useStore } from './store.js';
@@ -190,30 +190,73 @@ async function attachmentFromFile(file) {
   return { kind: 'file', name: file.name || 'file', data: toBase64(await file.arrayBuffer()) };
 }
 
-// Lists while typing: Shift+Enter on a "1. …" (or "- …") line starts the next item; on an empty item it
-// ends the list. Returns the new text and caret, or null when the line is not a list item.
+// Lists while typing. Items sit indented (INDENT per level) so a list reads as one:
+// - typing "1. " or "- " at the start of a line indents it;
+// - Shift+Enter starts the next item (later numbers shift up); on an empty item it steps out a level,
+//   and at the top level ends the list;
+// - Tab / Shift+Tab nest an item one level deeper or shallower.
+export const INDENT = '   ';
+const ITEM = /^(\s*)(?:(\d+)([.)])|([-*\u2022]))(\s+)/;
+const lineBounds = (text, caret) => {
+  const start = text.lastIndexOf('\n', caret - 1) + 1;
+  const nl = text.indexOf('\n', caret);
+  return { start, end: nl === -1 ? text.length : nl };
+};
 export function continueList(text, caret) {
-  const lineStart = text.lastIndexOf('\n', caret - 1) + 1;
-  const lineEnd = text.indexOf('\n', caret) === -1 ? text.length : text.indexOf('\n', caret);
-  const m = /^(\s*)(?:(\d+)([.)])|([-*\u2022]))(\s+)/.exec(text.slice(lineStart, lineEnd));
-  if (!m || caret < lineStart + m[0].length) return null;
+  const { start, end } = lineBounds(text, caret);
+  const m = ITEM.exec(text.slice(start, end));
+  if (!m || caret < start + m[0].length) return null;
   const [marker, indent, num, delim, bullet, gap] = m;
-  // An empty item ends the list: remove its marker.
-  if (!text.slice(lineStart + marker.length, lineEnd).trim()) return { text: text.slice(0, lineStart) + text.slice(lineEnd), caret: lineStart };
+  if (!text.slice(start + marker.length, end).trim()) {
+    // Empty item: step out one level, or leave the list from the top level.
+    if (indent.length > INDENT.length) return nestItem(text, caret, -1);
+    return { text: text.slice(0, start) + text.slice(end), caret: start };
+  }
   const insert = `\n${indent}${num ? `${Number(num) + 1}${delim}` : bullet}${gap}`;
   let after = text.slice(caret);
   if (num) {
-    // Renumber the items right after this one, so inserting in the middle keeps 1. 2. 3. in order.
     const lines = after.split('\n');
     let n = Number(num) + 2;
     for (let i = 1; i < lines.length; i++) {
       const item = /^(\s*)(\d+)([.)])(\s.*)$/.exec(lines[i]);
-      if (!item || item[1] !== indent || item[3] !== delim) break;
+      if (!item || item[1].length < indent.length) break;
+      if (item[1] !== indent || item[3] !== delim) continue; // deeper items keep their own numbering
       lines[i] = `${indent}${n++}${delim}${item[4]}`;
     }
     after = lines.join('\n');
   }
   return { text: text.slice(0, caret) + insert + after, caret: caret + insert.length };
+}
+// Tab (dir 1) / Shift+Tab (dir -1) on a list item; a nested numbered item restarts at 1.
+export function nestItem(text, caret, dir) {
+  const { start, end } = lineBounds(text, caret);
+  const line = text.slice(start, end);
+  const m = ITEM.exec(line);
+  if (!m) return null;
+  const [marker, indent, num, delim, bullet, gap] = m;
+  if (dir < 0 && !indent) return null;
+  const nextIndent = dir > 0 ? indent + INDENT : indent.slice(0, Math.max(0, indent.length - INDENT.length));
+  let nextNum = num;
+  if (num) {
+    // Number it after the previous item at the new level, or 1.
+    let n = 1;
+    for (const prev of (start ? text.slice(0, start - 1).split('\n') : []).reverse()) {
+      const p = ITEM.exec(prev);
+      if (!p || p[1].length < nextIndent.length) break; // left the list, or reached the parent item
+      if (p[1].length === nextIndent.length) { if (p[2]) n = Number(p[2]) + 1; break; }
+    }
+    nextNum = String(n);
+  }
+  const nextMarker = `${nextIndent}${num ? nextNum + delim : bullet}${gap}`;
+  const nextLine = nextMarker + line.slice(marker.length);
+  return { text: text.slice(0, start) + nextLine + text.slice(end), caret: Math.max(start + nextMarker.length, caret + nextMarker.length - marker.length) };
+}
+// Typing the space after "1." or "-" at the very start of a line: indent the new item.
+export function autoIndent(prev, next, caret) {
+  if (next.length !== prev.length + 1 || next[caret - 1] !== ' ') return null;
+  const { start } = lineBounds(next, caret);
+  if (!/^(?:\d+[.)]|[-*]) $/.test(next.slice(start, caret))) return null;
+  return { text: next.slice(0, start) + INDENT + next.slice(start), caret: caret + INDENT.length };
 }
 
 function SlashMenu({ items, index, onPick }) {
@@ -257,10 +300,6 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
       catch (e) { notify(e.message, 'error'); }
     }
   };
-  const browse = async () => {
-    const paths = await api('pickFiles');
-    setAttachments(list => [...list, ...paths.map(path => ({ kind: 'file', name: path.split('/').pop(), path, key: path + Math.random() }))]);
-  };
   // Clear at once and let the backend work in the background: a slow command (e.g. /goal starting a
   // run) must not block the next message. The draft comes back if sending fails.
   const submit = async () => {
@@ -275,6 +314,13 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
     }
   };
   const canSend = !!(text.trim() || attachments.length);
+  // Where the caret goes after a list edit: set right after React writes the new text, before the next key.
+  const pendingCaret = useRef(null);
+  const placeCaret = pos => { pendingCaret.current = pos; };
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (el && pendingCaret.current != null) { el.selectionStart = el.selectionEnd = pendingCaret.current; pendingCaret.current = null; }
+  }, [text]);
   return (
     <div className={`composer ${dragging ? 'dragging' : ''} ${attachments.length ? 'has-attachments' : ''} ${compact ? 'compact' : ''}`}
       onClick={e => { if (e.target === e.currentTarget) ref.current?.focus(); }}
@@ -293,8 +339,11 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
         </div>
       )}
       <div className="composer-row">
-        <button type="button" className="composer-attach" onClick={browse} aria-label="Attach files" title="Attach files"><Icon name="paperclip" size={18} /></button>
-        <textarea ref={ref} rows={1} value={text} placeholder={placeholder} onChange={e => setText(e.target.value)} aria-label="Message"
+        <textarea ref={ref} rows={1} value={text} placeholder={placeholder} aria-label="Message"
+          onChange={e => {
+            const indented = autoIndent(text, e.target.value, e.target.selectionStart);
+            if (indented) { setText(indented.text); placeCaret(indented.caret); } else setText(e.target.value);
+          }}
           onPaste={e => { const files = [...e.clipboardData.files]; if (files.length) { e.preventDefault(); add(files); } }}
           onKeyDown={e => {
             if (commands.length) {
@@ -306,15 +355,10 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
               }
             }
             if (e.key === 'Escape' && onCancel) { e.preventDefault(); onCancel(); return; }
-            if (e.key === 'Enter' && e.shiftKey && !e.nativeEvent.isComposing && e.target.selectionStart === e.target.selectionEnd) {
-              const next = continueList(text, e.target.selectionStart);
-              if (next) {
-                e.preventDefault();
-                setText(next.text);
-                requestAnimationFrame(() => { const el = ref.current; if (el) el.selectionStart = el.selectionEnd = next.caret; });
-                return;
-              }
-            }
+            const collapsed = e.target.selectionStart === e.target.selectionEnd && !e.nativeEvent.isComposing;
+            const list = collapsed && e.key === 'Enter' && e.shiftKey ? continueList(text, e.target.selectionStart)
+              : collapsed && e.key === 'Tab' && !commands.length ? nestItem(text, e.target.selectionStart, e.shiftKey ? -1 : 1) : null;
+            if (list) { e.preventDefault(); setText(list.text); placeCaret(list.caret); return; }
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit(); }
           }} />
         {onCancel && <button type="button" className="button ghost small" onClick={onCancel}>Cancel</button>}

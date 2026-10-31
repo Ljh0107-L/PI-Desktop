@@ -167,6 +167,17 @@ try {
   await composer().press('Shift+Enter');
   const ended = await composer().inputValue();
   await composer().fill('');
+  await composer().pressSequentially('1. one');
+  await composer().press('Shift+Enter');
+  await composer().press('Tab');
+  await composer().pressSequentially('sub');
+  const nested = await composer().inputValue();
+  await composer().fill('');
+  check('list items indent as you type, Tab nests', nested === '   1. one\n      1. sub', JSON.stringify(nested));
+  await waitNew('.markdown', 'echo:', () => send('Plan:\n   1. one\n      1. sub\n   2. two'));
+  const levels = await page.locator('.user-bubble').last().locator('.ub-li').evaluateAll(els => els.map(el => getComputedStyle(el).getPropertyValue('--depth').trim()).join(','));
+  check('sent lists keep their levels in your message', levels === '0,1,0', levels);
+  await S('05b2-list-message');
   check('composer continues 1. 2. 3. lists', listed === '1. first\n2. ' && ended === '1. first\n', JSON.stringify({ listed, ended }));
 
   await waitNew('.markdown', 'Tool result', () => send('[[write:notes/plan.md|# Plan\n- ship M1]]'));
@@ -245,7 +256,12 @@ try {
   await S('05-local-session');
 
   // ---- attachments: a picked file and a dropped image
-  await page.click('.composer-attach');
+  // (no paperclip: files are pasted or dropped onto the message box)
+  await page.evaluate(() => {
+    const dt = new DataTransfer();
+    dt.items.add(new File(['notes for the model'], 'attach-notes.txt', { type: 'text/plain' }));
+    document.querySelector('.composer').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+  });
   await page.locator('.attachment.file', { hasText: 'attach-notes.txt' }).waitFor();
   await page.evaluate(png => {
     const bytes = Uint8Array.from(atob(png), c => c.charCodeAt(0));
@@ -258,7 +274,7 @@ try {
   await waitNew('.markdown', 'attach-notes.txt', () => send('look at these'));
   const attachReply = await page.locator('.markdown', { hasText: 'attach-notes.txt' }).last().innerText();
   const shownImages = await page.locator('.user-images img').count(), shownFiles = await page.locator('.user-files .attachment', { hasText: 'attach-notes.txt' }).count();
-  check('attachments: image reaches the model, file path is attached', attachReply.includes('[images:1]') && attachReply.includes(attachFile) && shownImages >= 1 && shownFiles >= 1, JSON.stringify({ path: attachReply.includes(attachFile), shownImages, shownFiles }));
+  check('attachments: image reaches the model, file path is attached', attachReply.includes('[images:1]') && /\/attach-notes\.txt/.test(attachReply) && shownImages >= 1 && shownFiles >= 1, JSON.stringify({ path: /\/attach-notes\.txt/.test(attachReply), shownImages, shownFiles }));
 
   // ---- /goal: Pi keeps going until the model marks the goal complete
   await send('/goal finish the demo [[goal-turns:2]]');

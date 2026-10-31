@@ -3,34 +3,38 @@ import { Icon } from './Icons.jsx';
 import { Markdown, Spinner } from './ui.jsx';
 import { displayBlocks, formatTokens, toolSummary } from './transcript.js';
 import { api, editMessage, notify, openChanges, useStore } from './store.js';
-import { changeStats } from './diffs.js';
+import { changeStats, hunkLines } from './diffs.js';
 import { Composer } from './Composer.jsx';
 
 const textOf = result => (result?.content ?? []).map(c => c.text ?? '').join('').replace(/\s+$/, '');
 
+const baseOf = path => String(path ?? '').split('/').filter(Boolean).pop() ?? '';
+const dirOf = path => { const p = String(path ?? ''); const i = p.lastIndexOf('/'); return i > 0 ? p.slice(0, i) : ''; };
+// How a step reads in a row: an icon, a short sentence, and (for files) the folder in grey.
 function describeCall(call) {
   const a = call.arguments ?? {};
+  const path = a.path ?? a.file_path ?? '';
   switch (call.name) {
-    case 'bash': return { verb: 'Ran', subject: a.command ?? '', mono: true };
-    case 'read': return { verb: 'Read', subject: a.path ?? a.file_path ?? '', mono: true };
-    case 'write': return { verb: 'Wrote', subject: a.path ?? a.file_path ?? '', mono: true };
-    case 'edit': return { verb: 'Edited', subject: a.path ?? a.file_path ?? '', mono: true };
-    case 'grep': return { verb: 'Searched for', subject: a.pattern ?? '', mono: true };
-    case 'find': return { verb: 'Found files', subject: a.pattern ?? a.path ?? '', mono: true };
-    case 'ls': return { verb: 'Listed', subject: a.path ?? '.', mono: true };
-    default: return { verb: call.name, subject: JSON.stringify(a).slice(0, 120), mono: true };
+    case 'bash': return { icon: 'console', subject: a.command ?? '', mono: true };
+    case 'read': return { icon: 'fileText', verb: 'Read', subject: baseOf(path), detail: dirOf(path) };
+    case 'write': return { icon: 'fileEdit', verb: 'Wrote', subject: baseOf(path), detail: dirOf(path) };
+    case 'edit': return { icon: 'fileEdit', verb: 'Edited', subject: baseOf(path), detail: dirOf(path) };
+    case 'grep': return { icon: 'search', verb: 'Searched for', subject: a.pattern ?? '', mono: true, detail: a.path };
+    case 'find': return { icon: 'search', verb: 'Found files', subject: a.pattern ?? a.path ?? '', mono: true };
+    case 'ls': return { icon: 'folder', verb: 'Listed', subject: a.path ?? '.', mono: true };
+    default: return { icon: 'wrench', verb: call.name, subject: JSON.stringify(a).slice(0, 160), mono: true };
   }
 }
 
-function EditDiff({ args }) {
-  const edits = args?.edits ?? (args?.oldText !== undefined || args?.old_string !== undefined ? [{ oldText: args.oldText ?? args.old_string, newText: args.newText ?? args.new_string }] : []);
-  if (!edits.length) return null;
+const editHunks = args => args?.edits ?? (args?.oldText !== undefined || args?.old_string !== undefined ? [{ oldText: args.oldText ?? args.old_string, newText: args.newText ?? args.new_string }] : []);
+function EditDiff({ hunks }) {
+  if (!hunks.length) return null;
   return (
     <div className="diff">
-      {edits.slice(0, 6).map((e, i) => (
+      {hunks.slice(0, 8).map((h, i) => (
         <div key={i} className="diff-hunk">
-          {String(e.oldText ?? '').split('\n').map((l, j) => <div key={'o' + j} className="diff-line del">- {l}</div>)}
-          {String(e.newText ?? '').split('\n').map((l, j) => <div key={'n' + j} className="diff-line add">+ {l}</div>)}
+          {hunkLines(h).map((l, j) => l.type === 'gap' ? <div key={j} className="diff-line gap">⋯</div>
+            : <div key={j} className={`diff-line ${l.type}`}><span className="diff-sign">{l.type === 'add' ? '+' : l.type === 'del' ? '−' : ' '}</span>{l.text}</div>)}
         </div>
       ))}
     </div>
@@ -39,26 +43,36 @@ function EditDiff({ args }) {
 
 function ToolCall({ call, tool }) {
   const [open, setOpen] = useState(false);
-  const { verb, subject } = describeCall(call);
+  const { icon, verb, subject, detail, mono } = describeCall(call);
   const status = tool?.status ?? 'pending';
   const output = textOf(tool?.result);
   const filePath = ['read', 'edit', 'write'].includes(call.name) && status !== 'error' ? (call.arguments?.path ?? call.arguments?.file_path) : null;
+  const hunks = call.name === 'edit' ? editHunks(call.arguments) : call.name === 'write' ? [{ oldText: null, newText: String(call.arguments?.content ?? '') }] : [];
+  const stats = hunks.length && status !== 'error' ? changeStats({ hunks }) : null;
   return (
-    <div className={`tool-call ${status}`}>
+    <div className={`tool-call ${status} ${open ? 'open' : ''}`}>
       <button className="tool-call-head" onClick={() => setOpen(o => !o)}>
-        <span className="tool-status">{status === 'running' ? <Spinner size={12} /> : status === 'error' ? <Icon name="x" size={13} /> : <Icon name="check" size={13} />}</span>
-        <span className="tool-verb">{verb}</span>
-        <code className="tool-subject">{subject}</code>
+        <span className="tool-status">{status === 'running' ? <Spinner size={12} /> : <Icon name={icon} size={15} />}</span>
+        {verb && <span className="tool-verb">{verb}</span>}
+        <span className={`tool-subject ${mono ? 'mono' : ''}`}>{subject}{detail && <span className="tool-dir">{detail}</span>}</span>
+        {stats && <span className="tool-stats"><span className="plus">+{stats.added}</span><span className="minus">−{stats.removed}</span></span>}
+        {status === 'error' && <span className="tool-failed">Failed</span>}
         {filePath && <span role="button" tabIndex={0} className="tool-open" title="Open file" onClick={e => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: filePath })); }}><Icon name="externalLink" size={13} /></span>}
-        <Icon name={open ? 'chevronDown' : 'chevronRight'} size={14} className="tool-caret" />
+        <Icon name="chevronRight" size={14} className="tool-caret" />
       </button>
       {open && (
         <div className="tool-detail">
-          {call.name === 'bash' && <pre className="tool-command">$ {call.arguments?.command}</pre>}
-          {call.name === 'edit' && <EditDiff args={call.arguments} />}
-          {call.name === 'write' && <pre className="tool-output">{String(call.arguments?.content ?? '').slice(0, 4000)}</pre>}
-          {output && call.name !== 'write' && <pre className={`tool-output ${status === 'error' ? 'error' : ''}`}>{output.length > 8000 ? output.slice(0, 8000) + '\n…' : output}</pre>}
-          {!output && status === 'running' && <div className="tool-running">Running…</div>}
+          {call.name === 'bash'
+            ? <div className={`tool-console ${status === 'error' ? 'error' : ''}`}>
+                <pre className="tool-command"><span className="prompt">$</span> {call.arguments?.command}</pre>
+                {output && <pre className="tool-output">{output.length > 8000 ? output.slice(0, 8000) + '\n…' : output}</pre>}
+                {!output && status === 'running' && <div className="tool-running">Running…</div>}
+              </div>
+            : <>
+                {hunks.length > 0 && <EditDiff hunks={hunks} />}
+                {output && call.name !== 'write' && (call.name !== 'edit' || status === 'error') && <pre className={`tool-output boxed ${status === 'error' ? 'error' : ''}`}>{output.length > 8000 ? output.slice(0, 8000) + '\n…' : output}</pre>}
+                {!output && status === 'running' && <div className="tool-running">Running…</div>}
+              </>}
         </div>
       )}
     </div>
@@ -75,7 +89,7 @@ function ToolGroup({ calls, tools, live }) {
         {running && <Spinner size={12} />}
         <span>{toolSummary(calls)}</span>
         {failed > 0 && <span className="tool-failed">{failed} failed</span>}
-        <Icon name={open ? 'caretDown' : 'caretRight'} size={14} />
+        <Icon name="chevronRight" size={14} className={`rot-caret ${open ? 'down' : ''}`} />
       </button>
       {open && <div className="tool-group-body">{calls.map(call => <ToolCall key={call.id} call={call} tool={tools[call.id]} />)}</div>}
     </div>
@@ -87,17 +101,17 @@ const firstLine = text => String(text ?? '').split('\n').map(l => l.replace(/[*_
 function WorkNote({ item }) {
   const [open, setOpen] = useState(false);
   const thinking = item.kind === 'thinking';
-  const body = item.text;
   if (thinking && (item.hidden || item.redacted || !item.text)) {
-    return <div className="work-note static"><span className="work-note-line">{item.durationMs > 800 ? `Thought for ${seconds(item.durationMs)}` : 'Thought'}</span></div>;
+    return <div className="work-note static"><span className="tool-status"><Icon name="brain" size={15} /></span><span className="work-note-line">{item.durationMs > 800 ? `Thought for ${seconds(item.durationMs)}` : 'Thought'}</span></div>;
   }
   return (
-    <div className={`work-note ${thinking ? 'thought' : ''}`}>
+    <div className={`work-note ${thinking ? 'thought' : ''} ${open ? 'open' : ''}`}>
       <button className="work-note-head" onClick={() => setOpen(o => !o)}>
-        <span className={`work-note-line ${item.streaming ? 'shimmer' : ''}`}>{firstLine(body) || (thinking ? 'Thought' : '')}</span>
-        <Icon name={open ? 'caretDown' : 'caretRight'} size={14} className="tool-caret" />
+        <span className="tool-status">{item.streaming ? <Spinner size={12} /> : <Icon name={thinking ? 'brain' : 'chat'} size={15} />}</span>
+        <span className="work-note-line">{open ? (thinking ? (item.durationMs > 800 ? `Thought for ${seconds(item.durationMs)}` : 'Thought') : 'Note') : firstLine(item.text) || 'Thought'}</span>
+        <Icon name="chevronRight" size={14} className="tool-caret" />
       </button>
-      {open && <div className="work-note-body"><Markdown text={body} /></div>}
+      {open && <div className="work-note-body"><Markdown text={item.text} /></div>}
     </div>
   );
 }
@@ -118,7 +132,7 @@ function WorkGroup({ items, tools, live }) {
         {running && !thinkingNow && <Spinner size={12} />}
         {thinkingNow ? <span className="shimmer thinking-latest">{firstLine(latest.text) || 'Thinking'}</span> : <span>{summary || 'Working'}</span>}
         {failed > 0 && <span className="tool-failed">{failed} failed</span>}
-        <Icon name={open ? 'caretDown' : 'caretRight'} size={14} />
+        <Icon name="chevronRight" size={14} className={`rot-caret ${open ? 'down' : ''}`} />
       </button>
       {open && <div className="work-body">
         {items.flatMap(item => item.kind === 'tools'
@@ -144,7 +158,7 @@ function Thinking({ text, streaming, redacted, hidden, durationMs }) {
     <div className="thinking">
       <button className="tool-group-head" onClick={() => setOpen(o => !o)}>
         {streaming ? <span className="shimmer thinking-latest">{latest || 'Thinking'}</span> : <span>{label}</span>}
-        <Icon name={open ? 'caretDown' : 'caretRight'} size={14} />
+        <Icon name="chevronRight" size={14} className={`rot-caret ${open ? 'down' : ''}`} />
       </button>
       {open && <div className="thinking-body"><Markdown text={text} /></div>}
     </div>
@@ -186,12 +200,12 @@ function QuestionCard({ sessionId, question }) {
 }
 
 // Under each finished reply: copy, and the files this turn changed (opens the change review).
-function TurnFooter({ text, changes, sessionId }) {
+function TurnFooter({ text, changes, sessionId, last }) {
   const [copied, setCopied] = useState(false);
   const totals = useMemo(() => (changes ?? []).map(changeStats).reduce((t, c) => ({ added: t.added + c.added, removed: t.removed + c.removed }), { added: 0, removed: 0 }), [changes]);
   if (!text && !changes?.length) return null;
   return (
-    <div className="turn-foot">
+    <div className={`turn-foot ${last ? 'last' : ''}`}>
       {text && <button className="turn-action" aria-label="Copy reply" title={copied ? 'Copied' : 'Copy'} onClick={() => { navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1200); }}>
         <Icon name={copied ? 'check' : 'copy'} size={14} /></button>}
       {changes?.length > 0 && <button className="changes-pill" onClick={() => openChanges(sessionId, changes)}>
@@ -205,6 +219,22 @@ function TurnFooter({ text, changes, sessionId }) {
 // Where /goal set an objective.
 function GoalMarker({ objective }) {
   return <div className="goal-marker"><Icon name="target" size={15} /><span className="goal-marker-label">Goal</span><span className="goal-marker-text">{objective}</span></div>;
+}
+
+// Your text as typed, with list items ("1. …", "- …") given a hanging indent per nesting level.
+const LIST_ITEM = /^(\s*)(\d+[.)]|[-*\u2022])\s+(.*)$/;
+function UserText({ text }) {
+  const lines = text.split('\n');
+  const width = m => m[1].replace(/\t/g, '   ').length;
+  const items = lines.map(l => LIST_ITEM.exec(l));
+  if (!items.some(Boolean)) return text;
+  const base = Math.min(...items.filter(Boolean).map(width)); // the shallowest item is the top level
+  return lines.map((line, i) => {
+    const m = items[i];
+    if (!m) return <div key={i} className="ub-line">{line || '\u00a0'}</div>;
+    const depth = Math.floor((width(m) - base) / 3);
+    return <div key={i} className="ub-li" style={{ '--depth': depth }}><span className="ub-marker">{/\d/.test(m[2]) ? m[2] : '•'}</span>{m[3]}</div>;
+  });
 }
 
 // A message you sent: images and files it carried, and (on hover) copy and edit.
@@ -229,7 +259,7 @@ function UserMessage({ block, sessionId, editable }) {
       <div className="user-stack">
         {block.images?.length > 0 && <div className="user-images">{block.images.map((img, i) => <img key={i} src={`data:${img.mimeType};base64,${img.data}`} alt="" />)}</div>}
         {block.files?.length > 0 && <div className="user-files">{block.files.map(path => <button key={path} className="attachment file" title={path} onClick={() => window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: path }))}><Icon name="fileAny" size={15} /><span>{path.split('/').pop()}</span></button>)}</div>}
-        {block.text && <div className="user-bubble">{block.text}</div>}
+        {block.text && <div className="user-bubble"><UserText text={block.text} /></div>}
         <div className="user-actions">
           <button className="turn-action" aria-label="Copy message" title={copied ? 'Copied' : 'Copy'} onClick={() => { navigator.clipboard.writeText(block.text); setCopied(true); setTimeout(() => setCopied(false), 1200); }}><Icon name={copied ? 'check' : 'copy'} size={14} /></button>
           {editable && <button className="turn-action" aria-label="Edit message" title="Edit" onClick={() => setEditing(true)}><Icon name="edit" size={14} /></button>}
@@ -246,7 +276,7 @@ function CompactionMarker({ summary, tokensBefore }) {
     <div className="compaction">
       <button className="compaction-line" onClick={() => setOpen(o => !o)}>
         <span className="compaction-rule" />
-        <span className="compaction-label"><Icon name="compact" size={14} /> Conversation compacted{tokensBefore ? ` · ${formatTokens(tokensBefore)} → summary` : ''}<Icon name={open ? 'caretDown' : 'caretRight'} size={13} /></span>
+        <span className="compaction-label"><Icon name="compact" size={14} /> Conversation compacted{tokensBefore ? ` · ${formatTokens(tokensBefore)} → summary` : ''}<Icon name="chevronRight" size={13} className={`rot-caret ${open ? 'down' : ''}`} /></span>
         <span className="compaction-rule" />
       </button>
       {open && <div className="compaction-body"><Markdown text={summary ?? ''} /></div>}
@@ -298,6 +328,7 @@ export function Transcript({ session, transcript, questions }) {
   const scroller = useRef(null);
   const stick = useRef(true);
   const blocks = useMemo(() => displayBlocks(transcript), [transcript]);
+  const lastUsage = blocks.findLast(b => b.kind === 'usage');
   const onScroll = () => {
     const el = scroller.current;
     stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
@@ -315,7 +346,7 @@ export function Transcript({ session, transcript, questions }) {
             case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!!session && session.id !== 'pending' && session.status === 'connected' && !block.text.startsWith('/')} />;
             case 'goal': return <GoalMarker key={block.key} objective={block.objective} />;
             case 'text': return <Markdown key={block.key} text={block.text} streaming={block.streaming} />;
-            case 'usage': return <TurnFooter key={block.key} text={block.text} changes={block.changes} sessionId={session?.id} />;
+            case 'usage': return <TurnFooter key={block.key} text={block.text} changes={block.changes} sessionId={session?.id} last={block === lastUsage} />;
             case 'compaction': return <CompactionMarker key={block.key} {...block} />;
             case 'thinking': return <Thinking key={block.key} {...block} />;
             case 'work': return <WorkGroup key={block.key} items={block.items} tools={transcript.tools} live={!!transcript.live} />;
