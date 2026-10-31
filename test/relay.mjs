@@ -1,7 +1,7 @@
 // Protocol-level test: Pi sessions survive SSH disconnects through the pidesk relay.
 //   sh test/sshd.sh &     then   node test/relay.mjs [--ssh-config /tmp/pidesk-sshd/ssh_config]
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -20,7 +20,10 @@ const key = 'sk-relay-' + Math.random().toString(36).slice(2);
 const work = mkdtempSync(join(tmpdir(), 'pidesk-relay-'));
 const project = join(work, 'project'), agentDir = join(work, 'agent'), runDir = join(work, 'run');
 for (const d of [project, agentDir]) mkdirSync(d);
-const relayPath = join(root, 'agent/pidesk-relay.mjs');
+// A private copy, so stopping this test's daemon never touches another relay on this machine
+// (the app under test in the end-to-end suite runs one from agent/).
+const relayPath = join(work, 'pidesk-relay.mjs');
+copyFileSync(join(root, 'agent/pidesk-relay.mjs'), relayPath);
 const spawnSpec = relaySpawnSpec({ cwd: project, node: process.execPath, piCli: join(root, 'node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'), agentDir, extensions: [join(root, 'agent/pidesk-bridge.js')] });
 const boot = { providers: [{ id: 'mock-a', api: 'openai-completions', baseUrl: mock.baseUrl('mock-a'), apiKey: key, models: [{ id: 'alpha-1' }] }] };
 const sessionId = 'relay-test-' + Date.now();

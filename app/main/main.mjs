@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, nativeTheme, safeStorage, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, safeStorage, shell } from 'electron';
 import { readFileSync, statSync } from 'node:fs';
 import { open, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -9,6 +9,8 @@ import { listRemoteDir, runSsh } from './remote-setup.mjs';
 import { execFile } from 'node:child_process';
 import { shellQuote } from '../../core/transports.mjs';
 import { SessionManager } from './session-manager.mjs';
+import { Terminals } from './terminals.mjs';
+import { Updater } from './updater.mjs';
 import { Store } from './store.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -70,6 +72,8 @@ function publicSettings() {
 }
 
 const send = (channel, payload) => { if (window && !window.isDestroyed()) window.webContents.send('pidesk:event', { channel, payload }); };
+const terminals = new Terminals({ send });
+let updater = null;
 
 const api = {
   async bootstrap() {
@@ -145,7 +149,6 @@ const api = {
     manager.providersChanged();
     return publicSettings();
   },
-  updateContext(patch) { store.settings.context = { ...store.settings.context, ...patch }; store.saveSettings(); return publicSettings(); },
   updateDefaults(patch) { Object.assign(store.settings.defaults, patch); store.saveSettings(); return publicSettings(); },
   listSessions: () => manager.list(),
   resumeRemote: () => manager.resumeRemote(),
@@ -153,7 +156,27 @@ const api = {
   warmSessions: () => [...manager.spares.values()].filter(sp => manager.runtimes.get(sp.id)?.status === 'connected').length,
   createSession: options => manager.create(options),
   openSession: id => manager.ensureStarted(id).then(() => true),
-  prompt: (id, text) => manager.prompt(id, text),
+  prompt: (id, text, attachments) => manager.prompt(id, text, attachments ?? []),
+  editMessage: (id, ordinal, originalText, text, attachments) => manager.editMessage(id, ordinal, originalText, text, attachments ?? []),
+  fork: id => manager.fork(id),
+  deleteSession: id => manager.delete(id),
+  commands: id => manager.commands(id),
+  goal: id => manager.goal(id),
+  // Updates
+  updateStatus: () => updater?.status ?? { state: 'idle' },
+  checkForUpdates: () => updater?.check({ manual: true }),
+  installUpdate: () => updater?.install(),
+  appVersion: () => app.getVersion(),
+  // Terminal panel
+  termOpen(id, cols, rows) { const record = manager.record(id); return terminals.open({ env: manager.env(record.environmentId), cwd: record.cwd, cols, rows }); },
+  termWrite: (termId, data) => terminals.write(termId, data),
+  termResize: (termId, cols, rows) => terminals.resize(termId, cols, rows),
+  termClose: termId => terminals.close(termId),
+  async pickFiles() {
+    if (process.env.PIDESK_TEST_PICK_FILES) return process.env.PIDESK_TEST_PICK_FILES.split(':');
+    const result = await dialog.showOpenDialog(window, { properties: ['openFile', 'multiSelections'] });
+    return result.canceled ? [] : result.filePaths;
+  },
   answer: (id, requestId, payload) => manager.answer(id, requestId, payload),
   abort: id => manager.abort(id),
   setModel: (id, provider, modelId) => manager.setModel(id, provider, modelId),
@@ -231,6 +254,19 @@ function createWindow() {
 
 app.whenReady().then(() => {
   nativeTheme.themeSource = 'dark'; // the UI is dark; keep native vibrancy and menus dark too
+  updater = new Updater({ app, net, cacheDir: join(app.getPath('userData'), 'updates'), send });
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    { label: app.name, submenu: [
+      { role: 'about' },
+      { label: 'Check for Updates…', click: () => updater.check({ manual: true }).then(st => { if (st.state === 'current') dialog.showMessageBox(window, { message: `Pi Desktop ${app.getVersion()} is up to date.` }); else if (st.state === 'error') dialog.showMessageBox(window, { type: 'warning', message: 'Couldn’t check for updates', detail: st.message }); }) },
+      { type: 'separator' },
+      { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => send('open-settings', {}) },
+      { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' },
+    ] },
+    { role: 'editMenu' },
+    { label: 'View', submenu: [{ role: 'reload', visible: !app.isPackaged }, { role: 'toggleDevTools' }, { type: 'separator' }, { role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }, { type: 'separator' }, { role: 'togglefullscreen' }] },
+    { role: 'windowMenu' },
+  ]));
   if (process.platform === 'darwin' && !app.isPackaged) app.dock?.setIcon(nativeImage.createFromPath(join(root, 'build/icon.png')));
   store = new Store(app.getPath('userData'), safeStorage, { insecureTestStorage: process.env.PIDESK_INSECURE_TEST_STORAGE === '1' });
   manager = new SessionManager({
@@ -242,13 +278,17 @@ app.whenReady().then(() => {
     local: {
       node: process.execPath, piCli: join(piPackage, 'dist/bundle/cli.js'),
       agentDir: join(app.getPath('userData'), 'agent'),
+      runDir: join(app.getPath('userData'), 'run'),
+      uploadDir: join(app.getPath('userData'), 'uploads'),
       extraEnv: { ELECTRON_RUN_AS_NODE: '1' },
     },
   });
   manager.on('environments-changed', () => send('environments', environments()));
-  for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'notice', 'environment']) manager.on(channel, payload => send(channel, payload));
+  for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'notice', 'environment', 'goal']) manager.on(channel, payload => send(channel, payload));
   manager.on('sessions', () => send('sessions', manager.list()));
   createWindow();
+  updater.start();
+  if (process.env.PIDESK_SMOKE_TEST) smokeTest();
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 
@@ -257,6 +297,23 @@ app.on('before-quit', event => {
   if (quitting || !manager) return;
   event.preventDefault();
   quitting = true;
+  terminals.closeAll();
   manager.shutdown().finally(() => app.quit());
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin' || process.env.PIDESK_QUIT_ON_CLOSE) app.quit(); });
+
+// Packaged-build check used by the release workflow: the UI loads, the native pty module loads, and
+// Pi starts with this app's Electron binary acting as Node (no Node install on the Mac).
+async function smokeTest() {
+  const fail = error => { console.error('PIDESK SMOKE FAILED:', error?.stack ?? error); app.exit(1); };
+  try {
+    await new Promise((resolve, reject) => { window.webContents.once('did-finish-load', resolve); window.webContents.once('did-fail-load', (_e, code, desc) => reject(new Error(`renderer: ${desc}`))); setTimeout(() => reject(new Error('renderer load timeout')), 30000); });
+    const title = await window.webContents.executeJavaScript('document.querySelector(".sidebar") ? "ok" : "missing"');
+    if (title !== 'ok') throw new Error('renderer did not mount');
+    const t = terminals.open({ env: { kind: 'local' }, cwd: app.getPath('home'), cols: 80, rows: 24 });
+    terminals.close(t);
+    const piState = await manager.piSelfTest();
+    console.log('PIDESK SMOKE OK', JSON.stringify({ version: app.getVersion(), pi: piState }));
+    app.exit(0);
+  } catch (error) { fail(error); }
+}

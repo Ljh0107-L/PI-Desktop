@@ -98,7 +98,7 @@ function ModelPicker({ available, selected, onDone, onClose }) {
       <div className="pick-list">
         {shown.map(m => (
           <label key={m.id} className={`pick-row ${picked.has(m.id) ? 'on' : ''}`}>
-            <span className="pick-text"><span className="pick-name">{m.name && m.name !== m.id ? m.name : m.id}</span>{m.name && m.name !== m.id && <span className="pick-detail">{m.id}</span>}</span>
+            <span className="pick-text" title={m.id}><span className="pick-name">{m.name && m.name !== m.id ? m.name : m.id}</span></span>
             {m.contextWindow && <span className="pick-meta">{formatTokens(m.contextWindow)}</span>}
             <input type="checkbox" checked={picked.has(m.id)} onChange={() => toggle(m.id)} />
           </label>
@@ -230,23 +230,6 @@ function ProviderEditor({ initial, onDone }) {
   );
 }
 
-// Prompt caching and context management.
-function ContextSection() {
-  const ctx = useStore(s => s.settings.context) ?? {};
-  const update = async patch => setSettings(await api('updateContext', patch));
-  return (
-    <section className="section">
-      <div className="section-head"><h2 className="section-title">Caching</h2></div>
-      <ul className="rows">
-        <li className="row-card"><div className="row-head">
-          <div className="setting-text"><span className="row-name">1-hour prompt cache</span></div>
-          <div className="row-actions"><Toggle on={ctx.longCache !== false} label="1-hour prompt cache" onChange={on => update({ longCache: on })} /></div>
-        </div></li>
-      </ul>
-    </section>
-  );
-}
-
 function ModelsPage() {
   const providers = useStore(s => s.settings.providers);
   const catalog = useStore(s => s.catalog);
@@ -308,11 +291,11 @@ function ConnectionCard({ env }) {
       <div className="row-head">
         <Toggle on={env.enabled} label={`Use ${env.label}`} onChange={async on => { setEnvironments(await api('setConnectionEnabled', env.id, on)); if (on) api('prepareEnvironment', env.id); }} />
         <div className="connection-main">
-          <div className="row-identity"><Icon name={env.source === 'manual' ? 'globe' : 'terminal'} size={15} className="connection-icon" /><span className="row-name">{env.label}</span>{env.detail && env.detail !== 'SSH host' && <span className="row-meta">{env.detail}</span>}</div>
-          <div className={`connection-status ${state}`}>{state === 'preparing' ? <Spinner size={10} /> : <span className={`status-dot ${status.dot}`} />}<span title={status.text}>{status.text}</span></div>
+          <div className="row-identity"><Icon name={env.source === 'manual' ? 'globe' : 'terminal'} size={15} className="connection-icon" /><span className="row-name" title={env.detail}>{env.label}</span></div>
         </div>
         <div className="row-actions">
-          {state === 'error' && <button className="button small" onClick={() => api('prepareEnvironment', env.id, true)}>Retry</button>}
+          <span className={`connection-state ${state}`} title={status.text}>{state === 'preparing' ? <Spinner size={12} /> : <span className={`status-dot ${status.dot}`} />}</span>
+          {state === 'error' && <button className="button small" title={status.text} onClick={() => api('prepareEnvironment', env.id, true)}>Retry</button>}
           <button ref={anchor} className="icon-button" aria-label="More" onClick={() => setMenu(m => !m)}><Icon name="more" size={16} /></button>
           <Popover anchor={anchor} open={menu} onClose={() => setMenu(false)} width={210} placement="bottom-end">
             <MenuItem icon="refresh" label="Check again" disabled={!env.enabled} onClick={() => { setMenu(false); api('prepareEnvironment', env.id, true); }} />
@@ -365,7 +348,7 @@ function AddConnectionDialog({ onClose }) {
           {shown.map(env => (
             <label key={env.id} className={`pick-row ${picked.has(env.id) ? 'on' : ''}`}>
               <Icon name="terminal" size={17} />
-              <span className="pick-text"><span className="pick-name">{env.label}</span>{env.detail !== 'SSH host' && <span className="pick-detail">{env.detail}</span>}</span>
+              <span className="pick-text" title={env.detail}><span className="pick-name">{env.label}</span></span>
               <input type="checkbox" checked={picked.has(env.id)} onChange={() => toggle(env.id)} />
             </label>
           ))}
@@ -417,7 +400,7 @@ export function SettingsPage() {
         <div className="settings-drag drag" />
         <div className="settings-content">
           <h1 className="settings-title">{page.title}</h1>
-          {page.id === 'providers' ? <><ModelsPage /><ContextSection /></> : <ConnectionsPage />}
+          {page.id === 'providers' ? <ModelsPage /> : <ConnectionsPage />}
         </div>
       </main>
     </div>

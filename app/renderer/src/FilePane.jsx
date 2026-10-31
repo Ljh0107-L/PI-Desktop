@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import hljs from 'highlight.js/lib/common';
 import { Icon } from './Icons.jsx';
 import { MenuItem, Markdown, Popover, Spinner } from './ui.jsx';
+import { changeStats, hunkLines } from './diffs.js';
 import { api, closeFile, notify, openFile, set as setStore, setFilePaneOpen, useStore } from './store.js';
 
 const LANGS = { js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript', py: 'python', sh: 'bash', zsh: 'bash', bash: 'bash',
@@ -110,6 +111,36 @@ function Preview({ sessionId, path, refreshKey }) {
   );
 }
 
+// The change review: every file one turn changed, as diffs.
+function ChangesView({ sessionId, changes }) {
+  return (
+    <div className="fp-preview">
+      <div className="fp-content changes">
+        {changes.map(change => {
+          const { added, removed } = changeStats(change);
+          return (
+            <section key={change.path} className="change-file">
+              <button className="change-head" onClick={() => openFile(sessionId, change.path)} title="Open file">
+                <Icon name={iconFor(change.path)} size={15} /><span className="change-path">{change.path}</span>
+                <span className="plus">+{added}</span><span className="minus">−{removed}</span>
+              </button>
+              <div className="change-body">
+                {change.hunks.map((h, i) => (
+                  <div key={i} className="change-hunk">
+                    {hunkLines(h).map((l, j) => l.type === 'gap'
+                      ? <div key={j} className="diff-gap">⋯</div>
+                      : <div key={j} className={`diff-row ${l.type}`}><span className="diff-sign">{l.type === 'add' ? '+' : l.type === 'del' ? '−' : ' '}</span><span className="diff-text">{l.text || ' '}</span></div>)}
+                  </div>
+                ))}
+              </div>
+            </section>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 export function FilePane({ session }) {
   const state = useStore(s => s.files[session.id]) ?? { tabs: [], active: null };
   const maximized = useStore(s => s.filePaneMax);
@@ -124,7 +155,7 @@ export function FilePane({ session }) {
   const absolute = path => path.startsWith('/') ? path : `${session.cwd.replace(/\/$/, '')}/${path}`;
   const target = state.active ? absolute(state.active) : session.cwd;
   return (
-    <aside className={`file-pane ${state.active ? 'has-file' : ''} ${maximized ? 'maximized' : ''}`}>
+    <aside className={`file-pane ${state.active || state.changes ? 'has-file' : ''} ${maximized ? 'maximized' : ''}`}>
       <div className="fp-bar">
         <div className="fp-tabs">
           {state.tabs.map(path => (
@@ -133,7 +164,11 @@ export function FilePane({ session }) {
               <button className="fp-tab-close" onClick={() => closeFile(session.id, path)} aria-label="Close"><Icon name="x" size={13} /></button>
             </div>
           ))}
-          {!state.tabs.length && <span className="fp-title">Files</span>}
+          {state.changes && <div className={`fp-tab ${!state.active ? 'active' : ''}`}>
+            <button className="fp-tab-name" onClick={() => setStore(s => ({ files: { ...s.files, [session.id]: { ...state, active: null } } }))}>Changes</button>
+            <button className="fp-tab-close" onClick={() => setStore(s => ({ files: { ...s.files, [session.id]: { ...state, changes: null } } }))} aria-label="Close"><Icon name="x" size={13} /></button>
+          </div>}
+          {!state.tabs.length && !state.changes && <span className="fp-title">Files</span>}
         </div>
         <div className="fp-actions">
           <button className={`tool-button ${tree ? 'on' : ''}`} onClick={() => setTree(t => !t)} title={tree ? 'Hide file tree' : 'Show file tree'} aria-label="Toggle file tree"><Icon name="listTree" size={16} /></button>
@@ -151,6 +186,7 @@ export function FilePane({ session }) {
       <div className="fp-body">
         {state.active
           ? <Preview sessionId={session.id} path={state.active} refreshKey={refresh} />
+          : state.changes ? <ChangesView sessionId={session.id} changes={state.changes} />
           : <div className="fp-preview fp-placeholder"><Icon name="folder" size={26} /><span>Open files appear here</span></div>}
         {tree && <div className="fp-tree"><TreeDir sessionId={session.id} rel="" depth={0} active={state.active} version={refresh} /></div>}
       </div>

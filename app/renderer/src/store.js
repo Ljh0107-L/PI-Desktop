@@ -20,6 +20,8 @@ let state = {
   activeId: null, view: 'new',             // 'new' | 'session'
   transcripts: {},                          // session id -> transcript
   questions: {},
+  goals: {},
+  confirm: null,                            // { title, message, action, run }                                // session id -> { objective, status, turns } | null
   files: {},                                // session id -> { tabs: [path], active }
   filePaneOpen: false,
   filePaneMax: false,                            // session id -> [question waiting for an answer]
@@ -79,6 +81,15 @@ window.pidesk.subscribe(({ channel, payload }) => {
       if (payload.event.type === 'agent_settled') refreshStats(payload.id);
       break;
     }
+    case 'open-settings':
+      openSettings(true);
+      break;
+    case 'update':
+      set({ update: payload });
+      break;
+    case 'goal':
+      set(s => ({ goals: { ...s.goals, [payload.id]: payload.goal } }));
+      break;
     case 'status':
       set(s => ({ sessions: s.sessions.map(x => x.id === payload.id ? { ...x, status: payload.status, streaming: payload.streaming ?? (payload.status === 'connected' ? x.streaming : false), statusMessage: payload.message, compacting: payload.compacting ?? x.compacting } : x) }));
       if (payload.status === 'error' || (payload.status === 'disconnected' && payload.message)) notify(payload.message ?? 'Session disconnected', 'error');
@@ -190,6 +201,7 @@ export async function openSession(id, { record = true } = {}) {
     const history = fromHistory(messages, timingsOf(id));
     setTranscript(id, { ...history, live: current.live, tools: { ...history.tools, ...current.tools } });
     refreshStats(id);
+    api('goal', id).then(goal => set(s => ({ goals: { ...s.goals, [id]: goal ?? s.goals[id] ?? null } }))).catch(() => {});
   } catch (error) {
     setTranscript(id, { ...transcriptOf(id), loaded: true, error: error.message });
   }
@@ -199,16 +211,16 @@ export async function refreshStats(id) {
   try { const stats = await api('stats', id); if (stats) set(s => ({ stats: { ...s.stats, [id]: stats } })); } catch { /* ignore */ }
 }
 
-export async function startSession(text) {
+export async function startSession(text, attachments = []) {
   const { draft } = state;
   if (!draft.cwd) throw new Error('Choose a project folder first.');
   if (!draft.model) throw new Error('Add a model provider in Settings first.');
   const pendingId = 'pending';
-  set({ view: 'session', activeId: pendingId, transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: [{ role: 'user', content: text }] } } });
+  set({ view: 'session', activeId: pendingId, transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: [{ role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] } } });
   try {
     const session = await api('createSession', { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel });
     set(s => ({ activeId: session.id, transcripts: { ...s.transcripts, [session.id]: { ...emptyTranscript(), loaded: true }, [pendingId]: undefined }, sessions: s.sessions.some(x => x.id === session.id) ? s.sessions : [session, ...s.sessions] }));
-    await api('prompt', session.id, text);
+    await api('prompt', session.id, text, attachments);
     api('updateDefaults', { environmentId: draft.environmentId, model: draft.model, thinkingLevel: draft.thinkingLevel }).then(setSettings);
   } catch (error) {
     set({ view: 'new', activeId: null });
@@ -217,10 +229,31 @@ export async function startSession(text) {
 }
 
 // Text sent while Pi is waiting on a question answers that question instead of starting a new turn.
-export async function sendPrompt(id, text) {
+export async function sendPrompt(id, text, attachments = []) {
   const pending = state.questions[id]?.find(q => q.method === 'select' || q.method === 'input' || q.method === 'editor');
-  if (pending) { await api('answer', id, pending.requestId, { value: text }); return; }
-  await api('prompt', id, text);
+  if (pending && text && !attachments.length) { await api('answer', id, pending.requestId, { value: text }); return; }
+  // Desktop commands; anything else starting with "/" (goal, skills, prompt templates) goes to Pi.
+  const command = /^\/(\w+)\s*$/.exec(text)?.[1];
+  if (command === 'compact') { await api('compact', id); return; }
+  if (command === 'fork') { await forkSession(id); return; }
+  if (command === 'new') { newSession(); return; }
+  await api('prompt', id, text, attachments);
+}
+
+export async function forkSession(id) {
+  const session = await api('fork', id);
+  set(s => ({ sessions: s.sessions.some(x => x.id === session.id) ? s.sessions : [session, ...s.sessions] }));
+  openSession(session.id);
+}
+
+export async function deleteSession(id) {
+  await api('deleteSession', id);
+  set(s => ({ sessions: s.sessions.filter(x => x.id !== id) }));
+  if (state.activeId === id) newSession();
+}
+
+export async function editMessage(id, ordinal, originalText, text, attachments = []) {
+  await api('editMessage', id, ordinal, originalText, text, attachments);
 }
 
 export function newSession() { navigate({ view: 'new', activeId: null }); set({ view: 'new', activeId: null, paletteOpen: false }); }
@@ -239,7 +272,7 @@ export function openFile(id, path) {
   set(s => {
     const cur = s.files[id] ?? { tabs: [], active: null };
     const tabs = cur.tabs.includes(rel) ? cur.tabs : [...cur.tabs, rel].slice(-8);
-    return { files: { ...s.files, [id]: { tabs, active: rel } }, filePaneOpen: true };
+    return { files: { ...s.files, [id]: { tabs, active: rel, changes: null } }, filePaneOpen: true };
   });
 }
 export function closeFile(id, path) {
@@ -251,7 +284,14 @@ export function closeFile(id, path) {
   });
 }
 export const setFilePaneOpen = open => set({ filePaneOpen: open });
+// Open the change review for one turn in the file pane.
+export function openChanges(id, changes) {
+  set(s => ({ files: { ...s.files, [id]: { ...(s.files[id] ?? { tabs: [] }), active: null, changes } }, filePaneOpen: true }));
+}
 export { set };
 
 // Read-only access for tests and debugging.
 window.__pideskState = () => state;
+
+export const askConfirm = confirm => set({ confirm });
+export const closeConfirm = () => set({ confirm: null });

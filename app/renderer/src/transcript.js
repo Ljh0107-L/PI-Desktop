@@ -140,18 +140,31 @@ export function displayBlocks(t) {
     if (turn.length && !live) {
       const usage = usageOf(turn);
       const text = turn.flatMap(m => (m.content ?? []).filter(c => c?.type === 'text').map(c => c.text)).join('\n\n').trim();
-      if (usage.calls) blocks.push({ kind: 'usage', key, usage, text });
+      if (usage.calls) blocks.push({ kind: 'usage', key, usage, text, changes: changesOf(turn, t.tools) });
     }
     turn = [];
   };
+  let ordinal = 0;
   all.forEach((message, mi) => {
     if (message.role === 'assistant') turn.push(message);
     if (message.role === 'user') {
       flush();
       closeTurn(`s${mi}`, false);
-      const text = typeof message.content === 'string' ? message.content : (message.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+      const parts = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content ?? [];
+      let text = parts.filter(c => c.type === 'text').map(c => c.text).join('\n');
       if (text.startsWith('/pidesk-')) return;
-      blocks.push({ kind: 'user', key: `u${mi}`, text });
+      // Attached files travel as a trailing list of paths (see SessionManager.prompt).
+      let files = [];
+      const att = /(?:^|\n\n)Attached files:\n((?:- .+(?:\n|$))+)$/.exec(text);
+      if (att) { files = att[1].trim().split('\n').map(l => l.replace(/^- /, '')); text = text.slice(0, att.index); }
+      const images = parts.filter(c => c.type === 'image');
+      blocks.push({ kind: 'user', key: `u${mi}`, text, files, images, ordinal: ordinal++ });
+      return;
+    }
+    // A goal started with /goal (the bridge's hidden prompt): show what was set.
+    if (message.role === 'custom' && message.customType === 'pidesk-goal') {
+      const objective = /^The user set a goal[\s\S]*?<objective>\n([\s\S]*?)\n<\/objective>/.exec(typeof message.content === 'string' ? message.content : '')?.[1];
+      if (objective) { flush(); closeTurn(`s${mi}`, false); blocks.push({ kind: 'goal', key: `g${mi}`, objective }); }
       return;
     }
     if (message.role === 'bashExecution') { flush(); blocks.push({ kind: 'bash', key: `b${mi}`, message }); return; }
@@ -225,4 +238,24 @@ export function toolSummary(calls) {
   const other = calls.length - (counts.bash ?? 0) - edited - (counts.read ?? 0) - searched;
   if (other) parts.push(`${parts.length ? 'used' : 'Used'} ${plural(other, 'tool', 'tools')}`);
   return parts.join(', ');
+}
+
+// Files changed by one turn's successful edit/write calls, merged per path in order.
+export function changesOf(messages, tools = {}) {
+  const byPath = new Map();
+  for (const m of messages) {
+    if (m.role !== 'assistant') continue;
+    for (const c of m.content ?? []) {
+      if (c?.type !== 'toolCall' || !['edit', 'write'].includes(c.name)) continue;
+      if (tools[c.id]?.status !== 'done') continue;
+      const a = c.arguments ?? {};
+      const path = a.path ?? a.file_path;
+      if (!path) continue;
+      const entry = byPath.get(path) ?? { path, hunks: [] };
+      if (c.name === 'write') entry.hunks = [{ oldText: null, newText: String(a.content ?? '') }];
+      else for (const e of a.edits ?? [{ oldText: a.oldText ?? a.old_string, newText: a.newText ?? a.new_string }]) entry.hunks.push({ oldText: String(e.oldText ?? ''), newText: String(e.newText ?? '') });
+      byPath.set(path, entry);
+    }
+  }
+  return [...byPath.values()];
 }

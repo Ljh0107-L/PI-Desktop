@@ -2,7 +2,9 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { Markdown, Spinner } from './ui.jsx';
 import { displayBlocks, formatTokens, toolSummary } from './transcript.js';
-import { api, notify, useStore } from './store.js';
+import { api, editMessage, notify, openChanges, useStore } from './store.js';
+import { changeStats } from './diffs.js';
+import { Composer } from './Composer.jsx';
 
 const textOf = result => (result?.content ?? []).map(c => c.text ?? '').join('').replace(/\s+$/, '');
 
@@ -136,14 +138,56 @@ function QuestionCard({ sessionId, question }) {
   );
 }
 
-// Under each finished reply: copy. (Speed and token usage live in the right panel.)
-function TurnFooter({ text }) {
+// Under each finished reply: copy, and the files this turn changed (opens the change review).
+function TurnFooter({ text, changes, sessionId }) {
   const [copied, setCopied] = useState(false);
-  if (!text) return null;
+  const totals = useMemo(() => (changes ?? []).map(changeStats).reduce((t, c) => ({ added: t.added + c.added, removed: t.removed + c.removed }), { added: 0, removed: 0 }), [changes]);
+  if (!text && !changes?.length) return null;
   return (
     <div className="turn-foot">
-      <button className="turn-action" aria-label="Copy reply" title={copied ? 'Copied' : 'Copy'} onClick={() => { navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1200); }}>
-        <Icon name={copied ? 'check' : 'copy'} size={14} /></button>
+      {text && <button className="turn-action" aria-label="Copy reply" title={copied ? 'Copied' : 'Copy'} onClick={() => { navigator.clipboard.writeText(text); setCopied(true); setTimeout(() => setCopied(false), 1200); }}>
+        <Icon name={copied ? 'check' : 'copy'} size={14} /></button>}
+      {changes?.length > 0 && <button className="changes-pill" onClick={() => openChanges(sessionId, changes)}>
+        <Icon name="fileDiff" size={14} />{changes.length === 1 ? changes[0].path.split('/').pop() : `${changes.length} files changed`}
+        <span className="plus">+{totals.added}</span><span className="minus">−{totals.removed}</span>
+      </button>}
+    </div>
+  );
+}
+
+// Where /goal set an objective.
+function GoalMarker({ objective }) {
+  return <div className="goal-marker"><Icon name="target" size={15} /><span className="goal-marker-label">Goal</span><span className="goal-marker-text">{objective}</span></div>;
+}
+
+// A message you sent: images and files it carried, and (on hover) copy and edit.
+function UserMessage({ block, sessionId, editable }) {
+  const [editing, setEditing] = useState(false);
+  const [copied, setCopied] = useState(false);
+  if (editing) {
+    return (
+      <div className="user-row editing">
+        <Composer autoFocus compact initialText={block.text} placeholder="Edit message" onCancel={() => setEditing(false)}
+          onSubmit={async (text, attachments) => {
+            const images = (block.images ?? []).map(img => ({ kind: 'image', name: 'image', mimeType: img.mimeType, data: img.data }));
+            const files = (block.files ?? []).map(path => ({ kind: 'file', name: path.split('/').pop(), path }));
+            setEditing(false);
+            await editMessage(sessionId, block.ordinal, block.text, text, [...images, ...files, ...attachments]);
+          }} />
+      </div>
+    );
+  }
+  return (
+    <div className="user-row">
+      <div className="user-stack">
+        {block.images?.length > 0 && <div className="user-images">{block.images.map((img, i) => <img key={i} src={`data:${img.mimeType};base64,${img.data}`} alt="" />)}</div>}
+        {block.files?.length > 0 && <div className="user-files">{block.files.map(path => <button key={path} className="attachment file" title={path} onClick={() => window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: path }))}><Icon name="fileAny" size={15} /><span>{path.split('/').pop()}</span></button>)}</div>}
+        {block.text && <div className="user-bubble">{block.text}</div>}
+        <div className="user-actions">
+          <button className="turn-action" aria-label="Copy message" title={copied ? 'Copied' : 'Copy'} onClick={() => { navigator.clipboard.writeText(block.text); setCopied(true); setTimeout(() => setCopied(false), 1200); }}><Icon name={copied ? 'check' : 'copy'} size={14} /></button>
+          {editable && <button className="turn-action" aria-label="Edit message" title="Edit" onClick={() => setEditing(true)}><Icon name="edit" size={14} /></button>}
+        </div>
+      </div>
     </div>
   );
 }
@@ -221,9 +265,10 @@ export function Transcript({ session, transcript, questions }) {
         {transcript.error && <div className="block-error"><Icon name="alert" size={15} /> {transcript.error}</div>}
         {blocks.map(block => {
           switch (block.kind) {
-            case 'user': return <div key={block.key} className="user-row"><div className="user-bubble">{block.text}</div></div>;
+            case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!!session && session.id !== 'pending' && session.status === 'connected' && !block.text.startsWith('/')} />;
+            case 'goal': return <GoalMarker key={block.key} objective={block.objective} />;
             case 'text': return <Markdown key={block.key} text={block.text} streaming={block.streaming} />;
-            case 'usage': return <TurnFooter key={block.key} text={block.text} />;
+            case 'usage': return <TurnFooter key={block.key} text={block.text} changes={block.changes} sessionId={session?.id} />;
             case 'compaction': return <CompactionMarker key={block.key} {...block} />;
             case 'thinking': return <Thinking key={block.key} {...block} />;
             case 'tools': return <ToolGroup key={block.key} calls={block.calls} tools={transcript.tools} live={!!transcript.live} />;

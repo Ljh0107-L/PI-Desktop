@@ -5,10 +5,13 @@
 //   npx vite build && node test/e2e.mjs [--shots dir]
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { launch, shot } from './harness.mjs';
 import { startMockLlm } from './mock-llm.mjs';
+
+const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
 const { values: opts } = parseArgs({ options: { shots: { type: 'string', default: '/tmp/pidesk-e2e/shots' }, 'ssh-config': { type: 'string', default: '/tmp/pidesk-sshd/ssh_config' } } });
 const work = '/tmp/pidesk-e2e';
@@ -17,7 +20,7 @@ const localProject = join(work, 'projects/demo-app');
 const remoteProject = join(work, 'remote/api-server');
 for (const dir of [localProject, remoteProject]) mkdirSync(dir, { recursive: true });
 writeFileSync(join(localProject, 'README.md'), '# demo-app\n');
-for (const f of ['denied.txt', 'notes/plan.md']) rmSync(join(localProject, f), { force: true });
+for (const f of ['denied.txt', 'notes/plan.md', 'local-after-quit.txt']) rmSync(join(localProject, f), { force: true });
 for (const f of ['survived.txt', 'after-quit.txt']) rmSync(join(remoteProject, f), { force: true });
 // Simulate the network dropping: kill this machine's ssh client for the remote session's relay connection.
 const dropSsh = () => { try { execFileSync('pkill', ['-f', 'pidesk-test.*/.pidesk/ext/pidesk-relay.mjs.*attach']); return true; } catch { return false; } };
@@ -25,7 +28,11 @@ const dropSsh = () => { try { execFileSync('pkill', ['-f', 'pidesk-test.*/.pides
 const results = [];
 const check = (name, ok, detail = '') => { results.push(ok); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`); };
 const mock = await startMockLlm({ chunkDelay: 25 });
-const env = { PIDESK_SSH_CONFIG: opts['ssh-config'], PIDESK_TEST_PICK_FOLDER: localProject };
+const attachFile = join(work, 'attach-notes.txt');
+writeFileSync(attachFile, 'notes for Pi\n');
+const env = { PIDESK_SSH_CONFIG: opts['ssh-config'], PIDESK_TEST_PICK_FOLDER: localProject, PIDESK_TEST_PICK_FILES: attachFile };
+// 1×1 PNG
+const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 const profile = join(work, 'profile');
 rmSync(profile, { recursive: true, force: true });
 // Let compaction summarize even this short test conversation (Pi keeps the last 20K tokens by default).
@@ -112,10 +119,12 @@ try {
   // Manual compaction from the conversation menu leaves a marker with the summary.
   for (const word of ['alpha', 'beta', 'gamma']) await waitNew('.markdown', `echo: ${word} `, () => send(`${word} `.repeat(60)));
   await page.locator('.send-button.stop').waitFor({ state: 'detached', timeout: 30000 });
-  await page.click('.title-button');
-  await page.click('.menu-item:has-text("Compact conversation")');
+  await composer().fill('/');
+  await page.locator('.slash-menu .slash-item', { hasText: '/compact' }).waitFor({ timeout: 10000 });
+  check('typing / lists commands (goal, compact, fork, new)', (await page.locator('.slash-menu').innerText()).includes('/goal'));
+  await send('/compact');
   await page.locator('.compaction', { hasText: 'Conversation compacted' }).waitFor({ timeout: 30000 });
-  check('manual compaction shows a "Conversation compacted" marker', true);
+  check('/compact shows a "Conversation compacted" marker', true);
   await S('04c-compacted');
   check('session listed under "demo-app · This computer"', await page.locator('.group-head', { hasText: 'demo-app' }).count() === 1);
   check('provider received the stored key', mock.requests.at(-1).authorization === 'Bearer sk-e2e-secret');
@@ -129,6 +138,12 @@ try {
 
   await waitNew('.markdown', 'Tool result', () => send('[[write:notes/plan.md|# Plan\n- ship M1]]'));
   await page.locator('.panel-row.file', { hasText: 'plan.md' }).waitFor();
+  // change review: the turn's changed files with diffs
+  await page.locator('.changes-pill', { hasText: 'plan.md' }).last().click();
+  await page.locator('.change-file', { hasText: 'notes/plan.md' }).waitFor({ timeout: 10000 });
+  check('change review lists the turn\'s files with added lines', await page.locator('.change-file .diff-row.add').count() >= 2);
+  await S('05c-changes');
+  await page.click('.fp-actions .tool-button[aria-label="Close files"]');
   // Claude-style file preview: open the output, rendered and as source, and browse the tree
   await page.locator('.panel-row.file', { hasText: 'plan.md' }).click();
   await page.locator('.file-pane .fp-markdown h1', { hasText: 'Plan' }).waitFor({ timeout: 15000 });
@@ -188,6 +203,50 @@ try {
   await page.locator('.markdown .code-block').last().waitFor();
   check('code blocks are syntax highlighted with a copy button', await page.locator('.code-block .hljs-keyword').count() > 0 && await page.locator('.code-block .code-copy').count() > 0);
   await S('05-local-session');
+
+  // ---- attachments: a picked file and a dropped image
+  await page.click('.composer-attach');
+  await page.locator('.attachment.file', { hasText: 'attach-notes.txt' }).waitFor();
+  await page.evaluate(png => {
+    const bytes = Uint8Array.from(atob(png), c => c.charCodeAt(0));
+    const dt = new DataTransfer();
+    dt.items.add(new File([bytes], 'dot.png', { type: 'image/png' }));
+    document.querySelector('.composer').dispatchEvent(new DragEvent('drop', { dataTransfer: dt, bubbles: true, cancelable: true }));
+  }, PNG);
+  await page.locator('.attachment.image img').waitFor();
+  await S('05d-attachments');
+  await waitNew('.markdown', '[images:1]', () => send('look at these'));
+  const attachReply = await page.locator('.markdown', { hasText: '[images:1]' }).last().innerText();
+  check('attachments: image reaches the model, file path is attached', attachReply.includes(attachFile) && await page.locator('.user-images img').count() >= 1 && await page.locator('.user-files .attachment', { hasText: 'attach-notes.txt' }).count() >= 1, attachReply.slice(0, 120));
+
+  // ---- /goal: Pi keeps going until the model marks the goal complete
+  await send('/goal finish the demo [[goal-turns:2]]');
+  await page.locator('.goal-banner').waitFor({ timeout: 15000 });
+  await page.locator('.goal-state.complete').waitFor({ timeout: 60000 });
+  check('/goal runs continuation turns until the goal is achieved', await page.locator('.markdown', { hasText: 'goal progress 1' }).count() >= 1 && await page.locator('.goal-marker', { hasText: 'finish the demo' }).count() === 1);
+  await S('05e-goal');
+  await page.click('.goal-close');
+  await page.locator('.goal-banner').waitFor({ state: 'detached', timeout: 15000 });
+
+  // ---- edit an earlier message and regenerate from there
+  await waitNew('.markdown', 'echo: edit me please', () => send('edit me please'));
+  await page.locator('.user-row', { hasText: 'edit me please' }).last().hover();
+  await page.locator('.user-row', { hasText: 'edit me please' }).last().locator('button[aria-label="Edit message"]').click();
+  await page.locator('.user-row.editing textarea').fill('edited text');
+  await page.locator('.user-row.editing textarea').press('Enter');
+  await waitText('.markdown', 'echo: edited text');
+  check('editing a message regenerates from there', !(await page.locator('.markdown', { hasText: 'echo: edit me please' }).count()) && !(await page.locator('.user-bubble', { hasText: 'edit me please' }).count()));
+
+  // ---- terminal panel in the session folder
+  await page.click('.main-tools .tool-button[aria-label="Terminal"]');
+  await page.locator('.terminal-panel .xterm').waitFor({ timeout: 15000 });
+  await page.waitForTimeout(1500);
+  await page.locator('.terminal-panel .xterm').click();
+  await page.keyboard.type('echo term-$((40+2)) && pwd\n');
+  await page.locator('.terminal-panel .xterm-rows', { hasText: 'term-42' }).waitFor({ timeout: 15000 });
+  check('terminal panel runs a shell in the session folder', (await page.locator('.terminal-panel .xterm-rows').innerText()).includes('demo-app'));
+  await S('05f-terminal');
+  await page.click('.terminal-bar .tool-button');
 
   // ---- remote session over SSH
   await page.click('.nav-item.new');
@@ -274,7 +333,24 @@ try {
   check('file preview reads files on the SSH host', true);
   await page.click('.fp-actions .tool-button[aria-label="Close files"]');
 
-  // ---- a command started just before quitting finishes on the host while the app is closed
+  // ---- fork and delete from the session's right-click menu
+  await page.locator('.session-row', { hasText: 'hello from the desktop' }).click({ button: 'right' });
+  await page.click('.popover .menu-item:has-text("Fork")');
+  await page.locator('.session-row', { hasText: '(fork)' }).waitFor({ timeout: 30000 });
+  await waitText('.markdown', 'echo: hello from the desktop', 30000);
+  check('fork opens a copy of the conversation', await page.locator('.session-row.active', { hasText: '(fork)' }).count() === 1);
+  await page.locator('.session-row', { hasText: '(fork)' }).click({ button: 'right' });
+  const menuItems = (await page.locator('.popover .menu-item').allInnerTexts()).map(t => t.trim()).join('|');
+  await page.click('.popover .menu-item:has-text("Delete")');
+  await page.click('.modal .button.danger-solid');
+  await page.locator('.session-row', { hasText: '(fork)' }).waitFor({ state: 'detached', timeout: 15000 });
+  check('right-click menu is Rename / Fork / Archive / Delete, and Delete removes the session', menuItems === 'Rename|Fork|Archive|Delete', menuItems);
+
+  // ---- commands started just before quitting finish while the app is closed (local and remote)
+  await page.locator('.session-row', { hasText: 'hello from the desktop' }).click();
+  await send('[[bash:sleep 3 && echo local-after-quit | tee local-after-quit.txt]]');
+  await page.locator('.tool-group-head .spinner').first().waitFor({ timeout: 15000 });
+  await page.locator('.session-row', { hasText: 'hello from the server' }).click();
   await send('[[bash:sleep 3 && echo after-quit | tee after-quit.txt]]');
   await page.locator('.tool-group-head .spinner').first().waitFor({ timeout: 15000 });
 } catch (error) {
@@ -286,6 +362,7 @@ try {
 await app.close();
 await new Promise(r => setTimeout(r, 4500));
 check('remote command finished while the app was closed', existsSync(join(remoteProject, 'after-quit.txt')));
+check('local command finished while the app was closed', existsSync(join(localProject, 'local-after-quit.txt')));
 ({ app, page } = await launch({ userData: profile, env }));
 try {
   await page.locator('.session-row', { hasText: 'hello from the server' }).click();
@@ -295,6 +372,8 @@ try {
   check('sessions restored after restart', await page.locator('.session-row').count() === 2);
   await page.locator('.session-row', { hasText: 'hello from the desktop' }).click();
   await waitText('.markdown', '[mock-lab/alpha-1] echo: hello from the desktop', 90000);
+  await waitText('.markdown', 'Tool result: local-after-quit', 60000);
+  check('reopened local session shows the reply produced while closed', true);
   await waitText('.markdown', '[mock-lab/beta-1] echo: after switching models');
   check('history reloaded from the Pi session file', true);
   await page.waitForTimeout(500);
@@ -306,6 +385,7 @@ try {
 const secretsFile = readFileSync(join(profile, 'secrets.json'), 'utf8');
 check('settings never store the key in settings.json', !readFileSync(join(profile, 'settings.json'), 'utf8').includes('sk-e2e-secret') && !secretsFile.includes('sk-e2e-secret') && !readFileSync(join(profile, 'settings.json'), 'utf8').includes('sk-e2e-rotated') && !secretsFile.includes('sk-e2e-rotated'));
 await app.close();
+try { execFileSync('pkill', ['-f', `${join(root, 'agent/pidesk-relay.mjs')} daemon`]); } catch { /* not running */ }
 await mock.close();
 const failed = results.filter(r => !r).length;
 console.log(`\n${results.length - failed}/${results.length} checks passed. Screenshots: ${opts.shots}`);

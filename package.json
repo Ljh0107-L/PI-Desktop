@@ -1,7 +1,7 @@
 {
   "name": "pi-desktop",
-  "version": "1.0.0",
-  "description": "Claude Desktop-style multi-host GUI for the Pi agent harness",
+  "version": "0.1.0",
+  "description": "Claude Desktop-style app for the Pi agent harness: sessions on this Mac and SSH hosts, any model",
   "scripts": {
     "test:sshd": "sh test/sshd.sh",
     "test:protocol": "node test/protocol.mjs --ssh-host pidesk-test --ssh-config /tmp/pidesk-sshd/ssh_config",
@@ -9,25 +9,98 @@
     "build": "vite build",
     "start": "vite build && electron .",
     "dev": "vite",
-    "test:e2e": "vite build && node test/e2e.mjs"
+    "test:e2e": "vite build && node test/e2e.mjs",
+    "dist": "vite build && electron-builder --mac --publish never"
   },
   "license": "ISC",
   "type": "module",
   "private": true,
   "dependencies": {
     "@earendil-works/pi-coding-agent": "^1.4.0",
-    "dompurify": "^3.4.17",
-    "highlight.js": "^11.12.0",
-    "lucide-react": "^1.66.0",
-    "marked": "^15.0.12",
-    "react": "^19.3.1",
-    "react-dom": "^19.3.1"
+    "node-pty": "^1.1.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^6.1.2",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "diff": "^8.0.4",
+    "dompurify": "^3.4.17",
     "electron": "^45.2.1",
+    "electron-builder": "^26.18.0",
+    "highlight.js": "^11.12.0",
+    "lucide-react": "^1.66.0",
+    "marked": "^15.0.12",
     "playwright-core": "^1.64.1",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
     "vite": "^8.3.5"
   },
-  "main": "app/main/main.mjs"
+  "main": "app/main/main.mjs",
+  "author": "Ljh0107-L",
+  "homepage": "https://github.com/Ljh0107-L/PI-Desktop",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Ljh0107-L/PI-Desktop.git"
+  },
+  "build": {
+    "appId": "dev.pidesktop.app",
+    "productName": "Pi Desktop",
+    "copyright": "Pi Desktop contributors",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "package.json",
+      "app/main/**",
+      "agent/**",
+      "core/**",
+      "dist/renderer/**",
+      "build/icon.png",
+      "!**/*.map"
+    ],
+    "asar": false,
+    "afterPack": "build/after-pack.cjs",
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "icon": "build/icon.icns",
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64",
+            "x64"
+          ]
+        }
+      ],
+      "extendInfo": {
+        "NSDesktopFolderUsageDescription": "Pi works in the folders you choose.",
+        "NSDocumentsFolderUsageDescription": "Pi works in the folders you choose.",
+        "NSDownloadsFolderUsageDescription": "Pi works in the folders you choose."
+      }
+    },
+    "dmg": {
+      "title": "Pi Desktop ${version}"
+    },
+    "artifactName": "Pi-Desktop-${version}-${arch}-mac.${ext}",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Ljh0107-L",
+        "repo": "PI-Desktop",
+        "releaseType": "release"
+      }
+    ],
+    "npmRebuild": false
+  }
 }

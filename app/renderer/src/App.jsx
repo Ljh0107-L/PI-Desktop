@@ -6,10 +6,40 @@ import { Transcript } from './Conversation.jsx';
 import { RightPanel } from './RightPanel.jsx';
 import { SettingsPage } from './Settings.jsx';
 import { FilePane } from './FilePane.jsx';
+import { TerminalPanel } from './TerminalPanel.jsx';
 import { Palette } from './Palette.jsx';
-import { MenuItem, Popover, Spinner } from './ui.jsx';
+import { MenuItem, Modal, Popover, Spinner } from './ui.jsx';
 import { emptyTranscript } from './transcript.js';
-import { api, bootstrap, getState, newSession, notify, openFile, openPalette, openSettings, sendPrompt, setDraft, setFilePaneOpen, startSession, toggleRightPanel, toggleSidebar, useStore } from './store.js';
+import { api, bootstrap, closeConfirm, set as setStore, getState, newSession, notify, openFile, openPalette, openSettings, sendPrompt, setDraft, setFilePaneOpen, startSession, toggleRightPanel, toggleSidebar, useStore } from './store.js';
+
+// The session's goal (/goal): objective, state, and pause / resume / clear.
+function GoalBanner({ session }) {
+  const goal = useStore(s => s.goals[session.id]);
+  if (!goal?.objective) return null;
+  const label = { active: 'Working', paused: 'Paused', complete: 'Achieved', blocked: 'Blocked' }[goal.status] ?? goal.status;
+  const run = arg => api('prompt', session.id, `/goal ${arg}`).catch(e => notify(e.message, 'error'));
+  return (
+    <div className={`goal-banner ${goal.status}`}>
+      <Icon name="target" size={15} className="goal-icon" />
+      <span className="goal-objective" title={goal.objective}>{goal.objective}</span>
+      <span className={`goal-state ${goal.status}`}>{goal.status === 'active' && <span className="goal-pulse" />}{label}</span>
+      {goal.status === 'active' && <button className="goal-action" onClick={() => run('pause')}>Pause</button>}
+      {(goal.status === 'paused' || goal.status === 'blocked') && <button className="goal-action" onClick={() => run('resume')}>Resume</button>}
+      <button className="goal-close" aria-label="Clear goal" title="Clear goal" onClick={() => run('clear')}><Icon name="x" size={13} /></button>
+    </div>
+  );
+}
+
+function ConfirmHost() {
+  const confirm = useStore(s => s.confirm);
+  if (!confirm) return null;
+  return (
+    <Modal title={confirm.title} width={400} onClose={closeConfirm} footer={<>
+      <button className="button" onClick={closeConfirm}>Cancel</button>
+      <button className="button danger-solid" autoFocus onClick={() => { closeConfirm(); confirm.run(); }}>{confirm.action}</button>
+    </>}>{confirm.message && <div className="confirm-text">{confirm.message}</div>}</Modal>
+  );
+}
 
 function NewSessionView() {
   const draft = useStore(s => s.draft);
@@ -46,7 +76,13 @@ function SessionView({ session }) {
   const questions = useStore(s => s.questions[session.id]) ?? [];
   const rightPanel = useStore(s => s.rightPanel);
   const filePaneOpen = useStore(s => s.filePaneOpen);
+  const terminalOpen = useStore(s => s.terminalOpen);
   const filePaneMax = useStore(s => s.filePaneMax) && filePaneOpen;
+  useEffect(() => {
+    const onKey = e => { if (e.ctrlKey && e.key === '`') { e.preventDefault(); setStore(st => ({ terminalOpen: !st.terminalOpen })); } };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
   // Relative links in replies (e.g. "authoring/plan.md") open in the file preview.
   useEffect(() => {
     const onOpen = e => openFile(session.id, e.detail);
@@ -59,9 +95,11 @@ function SessionView({ session }) {
         <Transcript session={session} transcript={transcript} questions={questions} />
         <div className="dock">
           <ConnectionBanner session={session} />
-          <Composer session={session} autoFocus placeholder={questions.length ? 'Answer Pi’s question…' : session.streaming ? 'Queue a follow-up…' : 'Reply to Pi…'} onSubmit={text => sendPrompt(session.id, text)} />
+          <GoalBanner session={session} />
+          <Composer session={session} autoFocus placeholder={questions.length ? 'Answer Pi’s question…' : session.streaming ? 'Queue a follow-up…' : 'Reply to Pi…'} onSubmit={(text, attachments) => sendPrompt(session.id, text, attachments)} />
           <ComposerBar session={session} />
         </div>
+        {terminalOpen && <TerminalPanel session={session} />}
       </div>
       {filePaneOpen ? <FilePane session={session} /> : rightPanel && <RightPanel session={session} />}
     </div>
@@ -71,6 +109,7 @@ function SessionView({ session }) {
 function Header({ session, view }) {
   const rightPanel = useStore(s => s.rightPanel);
   const filePaneOpen = useStore(s => s.filePaneOpen);
+  const terminalOpen = useStore(s => s.terminalOpen);
   const sidebar = useStore(s => s.sidebar);
   const anchor = useRef(null);
   const [menu, setMenu] = useState(false);
@@ -88,6 +127,7 @@ function Header({ session, view }) {
           <SessionMenuItems session={session} close={() => setMenu(false)} onRename={() => { setTitle(session.title); setRenaming(true); }} />
         </Popover>
         <div className="main-tools no-drag">
+          <button className={`tool-button ${terminalOpen ? 'on' : ''}`} onClick={() => setStore({ terminalOpen: !terminalOpen })} aria-label="Terminal" title="Terminal (⌃`)"><Icon name="terminalPanel" size={18} /></button>
           <button className={`tool-button ${filePaneOpen ? 'on' : ''}`} onClick={() => setFilePaneOpen(!filePaneOpen)} aria-label="Files" title="Files"><Icon name="folder" size={18} /></button>
           <button className={`tool-button ${rightPanel && !filePaneOpen ? 'on' : ''}`} onClick={() => { if (filePaneOpen) { setFilePaneOpen(false); if (!rightPanel) toggleRightPanel(); } else toggleRightPanel(); }} aria-label="Session details" title="Session details"><Icon name="panel" size={18} /></button>
         </div>
@@ -133,6 +173,7 @@ export function App() {
           : <SessionView key={session.id} session={session} />) : <NewSessionView />}
       </main>
       {paletteOpen && <Palette />}
+      <ConfirmHost />
       {toasts}
     </div>
   );

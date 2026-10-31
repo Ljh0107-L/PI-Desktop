@@ -84,6 +84,21 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
       finish('tool_calls');
       return;
     }
+    // Goals (/goal): the objective may carry [[goal-turns:N]]; after N goal turns the model marks it complete.
+    if (userText.includes('<objective>') && !userText.includes('<conversation>')) {
+      const needed = Number(/\[\[goal-turns:(\d+)\]\]/.exec(userText)?.[1] ?? 1);
+      const goalTurns = messages.filter(m => m.role === 'user' && textOf(m.content).includes('<objective>')).length;
+      if (last.role === 'tool') { send({ content: 'Goal complete.' }); finish('stop'); return; }
+      if (goalTurns >= needed) {
+        send({ role: 'assistant', content: '' });
+        send({ tool_calls: [{ index: 0, id: 'call_goal' + requests.length, type: 'function', function: { name: 'update_goal', arguments: '{"status":"complete"}' } }] });
+        finish('tool_calls');
+        return;
+      }
+      send({ content: `goal progress ${goalTurns}` });
+      finish('stop');
+      return;
+    }
     // Summarization requests (compaction) quote the whole conversation: answer with a short summary.
     if (userText.includes('<conversation>')) {
       send({ content: `## Goal\nSummary of ${messages.length} messages (mock).` });
@@ -91,7 +106,8 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
       return;
     }
     // Long inputs are echoed in bigger chunks so tests stay fast; short ones still stream visibly.
-    const reply = `[${provider}/${payload.model}] echo: ${userText}`;
+    const imageCount = Array.isArray(lastUser?.content) ? lastUser.content.filter(c => c.type === 'image_url').length : 0;
+    const reply = `[${provider}/${payload.model}] ${imageCount ? `[images:${imageCount}] ` : ''}echo: ${userText}`;
     const step = reply.length > 600 ? 64 : 8;
     for (let i = 0; i < reply.length; i += step) { await sleep(chunkDelay); send({ content: reply.slice(i, i + step) }); }
     finish('stop');

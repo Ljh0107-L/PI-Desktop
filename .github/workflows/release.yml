@@ -1,0 +1,71 @@
+name: Release
+
+# Push a tag like v0.2.0 to build, smoke-test and publish a release; run manually to build without publishing.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    name: macOS app (arm64 + x64)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+          key: electron-release-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+      - run: npm ci --ignore-scripts --no-audit --no-fund && node node_modules/electron/install.js
+      - name: Version from tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: npm version --no-git-tag-version --allow-same-version "${GITHUB_REF_NAME#v}"
+      - run: npx vite build
+      - name: Package
+        run: npx electron-builder --mac --arm64 --x64 --publish never
+      - name: Update manifest (latest-mac.yml with SHA-512 of each zip)
+        run: |
+          node -e '
+            const fs = require("fs"), crypto = require("crypto");
+            const v = require("./package.json").version;
+            const zips = fs.readdirSync("release").filter(f => f.endsWith(".zip"));
+            const files = zips.map(f => { const d = fs.readFileSync("release/" + f); return `  - url: ${f}\n    sha512: ${crypto.createHash("sha512").update(d).digest("base64")}\n    size: ${d.length}`; });
+            fs.writeFileSync("release/latest-mac.yml", `version: ${v}\nfiles:\n${files.join("\n")}\nreleaseDate: ${new Date().toISOString()}\n`);
+          '
+          cat release/latest-mac.yml
+      - name: Smoke-test the packaged app
+        run: |
+          APP="release/mac-arm64/Pi Desktop.app"
+          codesign --verify --deep --strict "$APP"
+          PIDESK_SMOKE_TEST=1 PIDESK_USER_DATA=/tmp/pidesk-smoke PIDESK_INSECURE_TEST_STORAGE=1 "$APP/Contents/MacOS/Pi Desktop" 2>&1 | tee /tmp/smoke.log &
+          PID=$!
+          for i in $(seq 1 90); do grep -q "PIDESK SMOKE" /tmp/smoke.log && break; sleep 1; done
+          wait $PID || true
+          grep -q "PIDESK SMOKE OK" /tmp/smoke.log
+      - name: Publish
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ls -la release
+          gh release create "$GITHUB_REF_NAME" release/*.dmg release/*.zip release/latest-mac.yml \
+            --title "Pi Desktop ${GITHUB_REF_NAME#v}" --notes-file RELEASE_NOTES.md --repo "$GITHUB_REPOSITORY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pi-desktop-mac
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/latest-mac.yml
+          if-no-files-found: ignore

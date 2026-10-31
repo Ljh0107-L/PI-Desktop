@@ -1,14 +1,15 @@
 // Owns every Pi process the desktop runs, local or remote, and the records needed to resume them.
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { mkdirSync } from 'node:fs';
-import { basename } from 'node:path';
+import { execFile } from 'node:child_process';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 import { PiSession } from '../../core/pi-session.mjs';
-import { egressEnv, localTransport, relaySpawnSpec, sshRelayTransport } from '../../core/transports.mjs';
+import { egressEnv, localRelayTransport, localTransport, relaySpawnSpec, shellQuote, sshRelayTransport } from '../../core/transports.mjs';
 import { startEgressProxy, hostPortOf } from '../../core/egress-proxy.mjs';
-import { listRelaySessions, prepareRemote, stopRelaySession } from './remote-setup.mjs';
+import { listRelaySessions, prepareRemote, runSsh, stopRelaySession } from './remote-setup.mjs';
 
-const titleFrom = text => { const line = text.trim().split('\n')[0].replace(/\s+/g, ' '); return line.length > 60 ? line.slice(0, 57) + '…' : line || 'New session'; };
+const titleFrom = text => { const line = text.trim().replace(/^\/goal\s+/, '').split('\n')[0].replace(/\s+/g, ' '); return line.length > 60 ? line.slice(0, 57) + '…' : line || 'New session'; };
 const remoteBase = path => path.split('/').filter(Boolean).pop() ?? path;
 
 export class SessionManager extends EventEmitter {
@@ -22,7 +23,7 @@ export class SessionManager extends EventEmitter {
     super();
     this.store = store;
     this.environments = environments; // () => [environment]
-    this.local = local;               // { node, piCli, agentDir, extraEnv }
+    this.local = local;               // { node, piCli, agentDir, extraEnv, runDir, uploadDir }
     this.piVersion = piVersion;
     this.bridgePath = bridgePath;
     this.relayPath = relayPath;
@@ -34,6 +35,34 @@ export class SessionManager extends EventEmitter {
     const env = this.environments().find(e => e.id === id);
     if (!env) throw new Error(`Unknown environment ${id}`);
     return env;
+  }
+
+  // Start a throwaway Pi through this machine's relay and read its state (used by the packaged-build smoke test).
+  async piSelfTest() {
+    const id = 'selftest-' + randomUUID().slice(0, 8);
+    const spawn = relaySpawnSpec({ cwd: this.local.agentDir, node: this.local.node, piCli: this.local.piCli, agentDir: this.local.agentDir, extensions: [this.bridgePath], piArgs: ['--no-session'], extraEnv: this.local.extraEnv });
+    mkdirSync(this.local.agentDir, { recursive: true });
+    const session = new PiSession({ id, boot: { providers: [] }, transport: localRelayTransport({ node: this.local.node, relayPath: this.relayPath, runDir: this.local.runDir, extraEnv: this.local.extraEnv }), relay: { spawn } });
+    await session.start({ readyTimeout: 60000 });
+    const state = session.initialState;
+    await session.stop();
+    await this.#localRelay(['stop', id]).catch(() => {});
+    return { sessionId: state?.sessionId ?? null };
+  }
+
+  // ---------------------------------------------------------------- relays
+  // Local and SSH sessions both live in a relay daemon (this machine's, or the host's), so they keep
+  // running when the app quits or the connection drops.
+  #localRelay(args) {
+    return new Promise((resolve, reject) => execFile(this.local.node, [this.relayPath, ...args], { env: { ...process.env, ...this.local.extraEnv, PIDESK_RUN_DIR: this.local.runDir }, timeout: 15000 }, (error, stdout) => error ? reject(error) : resolve(stdout)));
+  }
+  async relaySessions(env) {
+    if (env.kind === 'local') return JSON.parse((await this.#localRelay(['list'])).trim().split('\n').pop()).sessions ?? [];
+    return listRelaySessions(env, await this.prepare(env.id));
+  }
+  async stopRelay(env, id) {
+    if (env.kind === 'local') return this.#localRelay(['stop', id]);
+    return stopRelaySession(env, await this.prepare(env.id), id);
   }
 
   // ---------------------------------------------------------------- providers and models
@@ -131,8 +160,8 @@ export class SessionManager extends EventEmitter {
     return this.egress;
   }
 
-  // Environment for every Pi this app starts: long (1-hour) prompt caching where the provider supports it.
-  piEnv() { return this.store.settings.context?.longCache === false ? {} : { PI_CACHE_RETENTION: 'long' }; }
+  // Environment for every Pi this app starts: 1-hour prompt caching wherever the provider supports it.
+  piEnv() { return { PI_CACHE_RETENTION: 'long' }; }
 
   #localTransport(target) {
     mkdirSync(this.local.agentDir, { recursive: true });
@@ -186,7 +215,7 @@ export class SessionManager extends EventEmitter {
     const runtime = this.runtimes.get(spare.id);
     this.close(spare.id).catch(() => {});
     const env = this.environments().find(e => e.id === spare.record.environmentId);
-    if (env?.kind === 'ssh' && runtime) this.prepare(env.id).then(facts => stopRelaySession(env, facts, spare.id)).catch(() => {});
+    if (env && runtime) this.stopRelay(env, spare.id).catch(() => {});
   }
 
   async create({ environmentId, cwd, model, thinkingLevel }) {
@@ -273,7 +302,10 @@ export class SessionManager extends EventEmitter {
     const piArgs = record.piSessionFile ? ['--session', record.piSessionFile] : [];
     let session;
     if (env.kind === 'local') {
-      session = new PiSession({ id: record.id, boot, transport: this.#localTransport({ cwd: record.cwd, piArgs }) });
+      mkdirSync(this.local.agentDir, { recursive: true });
+      const spawn = relaySpawnSpec({ cwd: record.cwd, node: this.local.node, piCli: this.local.piCli, agentDir: this.local.agentDir, extensions: [this.bridgePath], piArgs, extraEnv: { ...this.local.extraEnv, ...this.piEnv() } });
+      const transport = localRelayTransport({ node: this.local.node, relayPath: this.relayPath, runDir: this.local.runDir, extraEnv: this.local.extraEnv });
+      session = new PiSession({ id: record.id, boot, transport, relay: { sinceSeq: runtime.lastSeq, spawn } });
     } else {
       const facts = await this.prepare(env.id);
       const egressProxy = await this.#egressFor(facts.unreachable ?? []);
@@ -297,7 +329,7 @@ export class SessionManager extends EventEmitter {
       runtime.streaming = false;
       if (runtime.questions.size) { runtime.questions.clear(); this.emit('questions-cleared', { id: record.id }); }
       const message = session.stderr.trim().split('\n').slice(-2).join(' ');
-      if (env.kind === 'ssh' && !piExited && runtime.status === 'connected') { this.#scheduleReconnect(record, runtime, message || 'Connection lost'); return; }
+      if (!piExited && runtime.status === 'connected') { this.#scheduleReconnect(record, runtime, message || 'Connection lost'); return; }
       if (runtime.starting) return; // the start promise reports this failure
       runtime.status = 'disconnected';
       if (piExited) runtime.lastSeq = null; // a new Pi process numbers its events from scratch
@@ -305,12 +337,15 @@ export class SessionManager extends EventEmitter {
     });
     await session.start({ readyTimeout: 90000 });
     runtime.lastSeq = session.lastSeq;
-    const created = env.kind === 'local' || session.attachInfo?.created;
-    if (env.kind === 'ssh') runtime.autoReconnect = true;
+    const created = !!session.attachInfo?.created;
+    runtime.autoReconnect = true;
     const state = session.initialState ?? await session.state();
     runtime.streaming = !!state.isStreaming;
     runtime.providersVersion = created ? this.providersVersion : -1;
-    if (!created) await this.#syncProviders(runtime).catch(() => {});
+    if (!created) {
+      await this.#syncProviders(runtime).catch(() => {});
+      session.prompt('/goal').catch(() => {}); // re-publish the goal of a Pi that kept running without us
+    }
     if (created) {
       // Pipelined: both requests travel together, one network round trip instead of two.
       await Promise.all([
@@ -323,20 +358,19 @@ export class SessionManager extends EventEmitter {
     return session;
   }
 
-  // After the app starts, re-attach to SSH sessions that kept running in their host's relay.
+  // After the app starts, re-attach to sessions that kept running in a relay (this machine's or a host's).
   async resumeRemote() {
     // Set up every added host in the background now, so the first message there doesn't pay for it.
     for (const env of this.environments().filter(e => e.kind === 'ssh' && e.added && e.enabled)) this.prepare(env.id).catch(() => {});
     const byEnv = new Map();
-    for (const record of this.store.sessions.filter(s => !s.archived && s.environmentId !== 'local')) {
+    for (const record of this.store.sessions.filter(s => !s.archived)) {
       if (!byEnv.has(record.environmentId)) byEnv.set(record.environmentId, []);
       byEnv.get(record.environmentId).push(record);
     }
     await Promise.all([...byEnv].map(async ([envId, records]) => {
       try {
         const env = this.env(envId);
-        const facts = await this.prepare(envId);
-        const alive = new Set((await listRelaySessions(env, facts)).filter(s => s.alive).map(s => s.id));
+        const alive = new Set((await this.relaySessions(env)).filter(s => s.alive).map(s => s.id));
         await Promise.all(records.filter(r => alive.has(r.id)).map(r => this.ensureStarted(r.id).catch(() => {})));
       } catch { /* host unreachable: sessions stay idle until opened */ }
     }));
@@ -358,20 +392,59 @@ export class SessionManager extends EventEmitter {
       return;
     }
     if (request.method === 'notify') this.emit('notice', { id: record.id, level: request.notifyType ?? 'info', message: request.message });
+    if (request.method === 'setStatus' && request.statusKey === 'pidesk-goal') {
+      try { runtime.goal = request.statusText ? JSON.parse(request.statusText) : null; } catch { runtime.goal = null; }
+      this.emit('goal', { id: record.id, goal: runtime.goal });
+    }
   }
 
 
-  async prompt(id, text) {
+  // attachments: [{ kind: 'image', name, mimeType, data (base64) } | { kind: 'file', name, path?, data? }]
+  async prompt(id, text, attachments = []) {
     const record = this.record(id);
     const session = await this.ensureStarted(id);
     await this.#syncProviders(this.runtimes.get(id)).catch(() => {});
-    if (record.title === 'New session') {
+    if (record.title === 'New session' && text.trim()) {
       const title = titleFrom(text);
       this.#save(record, { title });
       session.request('set_session_name', { name: title }).catch(() => {});
     }
+    const images = attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }));
+    const files = attachments.filter(a => a.kind === 'file');
+    let message = text;
+    if (files.length) {
+      const paths = await this.#placeFiles(record, files);
+      message = `${text}${text ? '\n\n' : ''}Attached files:\n${paths.map(p => `- ${p}`).join('\n')}`;
+    }
     const runtime = this.runtimes.get(id);
-    return session.prompt(text, runtime.streaming ? { streamingBehavior: 'followUp' } : {});
+    return session.prompt(message, { ...(images.length ? { images } : {}), ...(runtime.streaming && !message.startsWith('/') ? { streamingBehavior: 'followUp' } : {}) });
+  }
+
+  // Put attached files where the session's Pi can read them: as-is on this machine, uploaded to the host.
+  async #placeFiles(record, files) {
+    const env = this.env(record.environmentId);
+    const safe = name => String(name || 'file').replace(/[^\w.@+-]+/g, '_').slice(-120);
+    const stamp = Date.now().toString(36);
+    if (env.kind === 'local') {
+      const dir = join(this.local.uploadDir, record.id, stamp);
+      return files.map(f => {
+        if (f.path) return f.path;
+        mkdirSync(dir, { recursive: true });
+        const path = join(dir, safe(f.name));
+        writeFileSync(path, Buffer.from(f.data, 'base64'));
+        return path;
+      });
+    }
+    const facts = await this.prepare(env.id);
+    const dir = `${facts.root}/uploads/${record.id}/${stamp}`;
+    const paths = [];
+    for (const f of files) {
+      const path = `${dir}/${safe(f.name)}`;
+      const data = f.path ? readFileSync(f.path) : Buffer.from(f.data, 'base64');
+      await runSsh(env, `mkdir -p ${shellQuote(dir)} && cat > ${shellQuote(path)}`, { input: data, timeout: 600000 });
+      paths.push(path);
+    }
+    return paths;
   }
 
   // payload: { value } for select/input/editor, { confirmed } for confirm, or { cancelled: true }.
@@ -461,12 +534,80 @@ export class SessionManager extends EventEmitter {
     const record = this.record(id);
     await this.close(id);
     const env = this.environments().find(e => e.id === record.environmentId);
-    if (env?.kind === 'ssh') {
-      // Archiving ends the remote Pi process too; a detach alone would leave it running.
-      this.prepare(env.id).then(facts => stopRelaySession(env, facts, id)).catch(() => {});
-    }
+    // Archiving ends the Pi process too; a detach alone would leave it running in the relay.
+    if (env) this.stopRelay(env, id).catch(() => {});
     this.#save(record, { archived: true });
   }
+
+  // Remove a session for good: its Pi process, its session file, and the record.
+  async delete(id) {
+    const record = this.record(id);
+    await this.close(id);
+    const env = this.environments().find(e => e.id === record.environmentId);
+    if (env) {
+      await this.stopRelay(env, id).catch(() => {});
+      if (record.piSessionFile) {
+        if (env.kind === 'local') rmSync(record.piSessionFile, { force: true });
+        else await runSsh(env, `rm -f ${shellQuote(record.piSessionFile)}`).catch(() => {});
+      }
+    }
+    this.store.sessions = this.store.sessions.filter(s => s.id !== id);
+    this.store.saveSessions();
+    this.emit('sessions');
+  }
+
+  // A new session that continues from a copy of this one's history.
+  async fork(id) {
+    const source = this.record(id);
+    if (!source.piSessionFile) throw new Error('Send a message before forking this conversation.');
+    const env = this.env(source.environmentId);
+    const record = {
+      id: randomUUID(), title: `${source.title} (fork)`, environmentId: source.environmentId, environmentLabel: env.label, cwd: source.cwd,
+      project: source.project, model: source.model, thinkingLevel: source.thinkingLevel, piSessionFile: source.piSessionFile,
+      createdAt: Date.now(), updatedAt: Date.now(),
+    };
+    this.store.sessions.unshift(record);
+    this.store.saveSessions();
+    this.emit('sessions');
+    const session = await this.ensureStarted(record.id); // a Pi on the source file…
+    await session.request('clone', {}, { timeout: 60000 }); // …that switches to a copy of it
+    const state = await session.state();
+    session.request('set_session_name', { name: record.title }).catch(() => {});
+    this.#save(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId });
+    return this.#view(record);
+  }
+
+  // Edit an earlier user message: branch the conversation just before it and send the new text there.
+  async editMessage(id, ordinal, originalText, text, attachments = []) {
+    const record = this.record(id);
+    const session = await this.ensureStarted(id);
+    const runtime = this.runtimes.get(id);
+    if (runtime.streaming) {
+      const settled = session.nextSettled(30000).catch(() => {});
+      await session.abort().catch(() => {});
+      await settled;
+    }
+    const { messages } = await session.request('get_fork_messages');
+    const same = m => m.text?.trim() === String(originalText ?? '').trim();
+    let target = messages[ordinal];
+    if (!target || (originalText && !same(target))) target = [...messages].reverse().find(same);
+    if (!target) throw new Error('That message can no longer be edited.');
+    const result = await session.request('fork', { entryId: target.entryId });
+    if (result?.cancelled) throw new Error('Editing was cancelled.');
+    const state = await session.state();
+    this.#save(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId });
+    this.emit('resync', { id });
+    return this.prompt(id, text, attachments);
+  }
+
+  async commands(id) {
+    const runtime = this.runtimes.get(id);
+    if (runtime?.status !== 'connected') return [];
+    const { commands } = await runtime.session.request('get_commands').catch(() => ({ commands: [] }));
+    return commands.filter(c => !c.name.startsWith('pidesk-') && c.name !== 'goal').map(c => ({ name: c.name, description: c.description ?? '', source: c.source }));
+  }
+
+  goal(id) { return this.runtimes.get(id)?.goal ?? null; }
 
   // Disconnect from a session. Local Pi processes stop; SSH sessions only detach and keep running remotely.
   async close(id) {

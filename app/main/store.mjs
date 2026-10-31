@@ -9,8 +9,6 @@ const DEFAULT_SETTINGS = {
   providers: [],
   defaults: { model: null, thinkingLevel: 'medium', environmentId: 'local' },
   environments: {},
-  // Prompt caching: 1-hour provider caches where supported.
-  context: { longCache: true },
   customHosts: [],
   recentEnvironments: [],
   recentFolders: {},
@@ -24,7 +22,6 @@ export class Store {
     mkdirSync(dir, { recursive: true });
     this.settings = { ...structuredClone(DEFAULT_SETTINGS), ...this.#read('settings.json', {}) };
     this.settings.defaults = { ...DEFAULT_SETTINGS.defaults, ...this.settings.defaults };
-    this.settings.context = { ...DEFAULT_SETTINGS.context, ...this.settings.context };
     this.secrets = this.#read('secrets.json', {});
     this.sessions = this.#read('sessions.json', []);
   }

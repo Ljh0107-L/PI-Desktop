@@ -167,9 +167,50 @@ export const modelLabel = (model, catalog) => {
 };
 
 // ---------------------------------------------------------------- composer
-export function Composer({ session, onSubmit, autoFocus, placeholder }) {
-  const [text, setText] = useState('');
+// Built-in commands handled by the desktop (or the bridge, for /goal); Pi's own skills and prompt templates
+// are listed after them.
+export const BUILTIN_COMMANDS = [
+  { name: 'goal', args: true, description: 'Set a goal Pi keeps working toward' },
+  { name: 'compact', description: 'Summarize the conversation to free up context' },
+  { name: 'fork', description: 'Continue in a copy of this conversation' },
+  { name: 'new', description: 'Start a new conversation' },
+];
+
+const IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/gif', 'image/webp'];
+const toBase64 = buffer => { let s = ''; const bytes = new Uint8Array(buffer); for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000)); return btoa(s); };
+async function attachmentFromFile(file) {
+  const path = window.pidesk.pathForFile?.(file) ?? '';
+  if (IMAGE_TYPES.includes(file.type)) {
+    if (file.size > 20 << 20) throw new Error(`${file.name} is too large (images up to 20 MB)`);
+    const data = toBase64(await file.arrayBuffer());
+    return { kind: 'image', name: file.name || 'image.png', mimeType: file.type, data, preview: `data:${file.type};base64,${data}` };
+  }
+  if (path) return { kind: 'file', name: file.name, path };
+  if (file.size > 50 << 20) throw new Error(`${file.name} is too large (files up to 50 MB)`);
+  return { kind: 'file', name: file.name || 'file', data: toBase64(await file.arrayBuffer()) };
+}
+
+function SlashMenu({ items, index, onPick }) {
+  const ref = useRef(null);
+  useEffect(() => { ref.current?.querySelector('.slash-item.on')?.scrollIntoView({ block: 'nearest' }); }, [index]);
+  return (
+    <div className="slash-menu" ref={ref} role="listbox">
+      {items.map((c, i) => (
+        <button key={c.name} type="button" role="option" aria-selected={i === index} className={`slash-item ${i === index ? 'on' : ''}`} onMouseDown={e => { e.preventDefault(); onPick(c); }}>
+          <span className="slash-name">/{c.name}</span><span className="slash-desc">{c.description}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function Composer({ session, onSubmit, autoFocus, placeholder, initialText = '', onCancel, compact }) {
+  const [text, setText] = useState(initialText);
+  const [attachments, setAttachments] = useState([]);
   const [sending, setSending] = useState(false);
+  const [dragging, setDragging] = useState(false);
+  const [slashIndex, setSlashIndex] = useState(0);
+  const [pi, setPi] = useState([]);
   const ref = useRef(null);
   const streaming = session?.streaming;
   useEffect(() => { if (autoFocus) ref.current?.focus(); }, [autoFocus, session?.id]);
@@ -178,21 +219,70 @@ export function Composer({ session, onSubmit, autoFocus, placeholder }) {
     el.style.height = 'auto';
     el.style.height = Math.min(el.scrollHeight, 240) + 'px';
   }, [text]);
+  // Slash commands: shown while the message is a single "/word" being typed.
+  const slashQuery = /^\/[\w:.-]*$/.test(text) ? text.slice(1).toLowerCase() : null;
+  useEffect(() => { if (slashQuery !== null && session?.id) api('commands', session.id).then(setPi).catch(() => {}); }, [slashQuery !== null, session?.id]);
+  const commands = slashQuery === null ? [] : [...BUILTIN_COMMANDS.filter(c => session || c.name === 'goal'), ...pi].filter(c => c.name.toLowerCase().includes(slashQuery)).slice(0, 12);
+  useEffect(() => setSlashIndex(0), [slashQuery]);
+  const pickCommand = c => { setText(`/${c.name} `); ref.current?.focus(); };
+
+  const add = async files => {
+    for (const file of files) {
+      try { const att = await attachmentFromFile(file); setAttachments(list => [...list, { ...att, key: Math.random().toString(36).slice(2) }]); }
+      catch (e) { notify(e.message, 'error'); }
+    }
+  };
+  const browse = async () => {
+    const paths = await api('pickFiles');
+    setAttachments(list => [...list, ...paths.map(path => ({ kind: 'file', name: path.split('/').pop(), path, key: path + Math.random() }))]);
+  };
   const submit = async () => {
     const value = text.trim();
-    if (!value || sending) return;
+    if ((!value && !attachments.length) || sending) return;
     setSending(true);
-    try { await onSubmit(value); setText(''); }
-    catch (e) { notify(e.message, 'error'); }
+    try { await onSubmit(value, attachments.map(({ preview, key, ...a }) => a)); setText(''); setAttachments([]); }
+    catch (e) { notify(e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), 'error'); }
     finally { setSending(false); }
   };
+  const canSend = !!(text.trim() || attachments.length);
   return (
-    <div className="composer" onClick={e => { if (e.target === e.currentTarget) ref.current?.focus(); }}>
-      <textarea ref={ref} rows={1} value={text} placeholder={placeholder} onChange={e => setText(e.target.value)} aria-label="Message"
-        onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit(); } }} />
-      {streaming && !text.trim()
-        ? <button className="send-button stop" onClick={() => api('abort', session.id)} aria-label="Stop" title="Stop"><Icon name="stop" size={22} /></button>
-        : <button className={`send-button ${text.trim() ? 'ready' : ''}`} disabled={!text.trim() || sending} onClick={submit} aria-label="Send">{sending ? <Spinner size={13} /> : <Icon name="arrowUp" size={17} stroke={2.4} />}</button>}
+    <div className={`composer ${dragging ? 'dragging' : ''} ${attachments.length ? 'has-attachments' : ''} ${compact ? 'compact' : ''}`}
+      onClick={e => { if (e.target === e.currentTarget) ref.current?.focus(); }}
+      onDragOver={e => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); setDragging(true); } }}
+      onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setDragging(false); }}
+      onDrop={e => { e.preventDefault(); setDragging(false); add([...e.dataTransfer.files]); }}>
+      {commands.length > 0 && <SlashMenu items={commands} index={slashIndex} onPick={pickCommand} />}
+      {attachments.length > 0 && (
+        <div className="attachments">
+          {attachments.map(a => (
+            <div key={a.key} className={`attachment ${a.kind}`} title={a.path ?? a.name}>
+              {a.kind === 'image' ? <img src={a.preview} alt={a.name} /> : <><Icon name="fileAny" size={15} /><span>{a.name}</span></>}
+              <button type="button" className="attachment-remove" aria-label={`Remove ${a.name}`} onClick={() => setAttachments(list => list.filter(x => x.key !== a.key))}><Icon name="x" size={12} /></button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="composer-row">
+        <button type="button" className="composer-attach" onClick={browse} aria-label="Attach files" title="Attach files"><Icon name="paperclip" size={18} /></button>
+        <textarea ref={ref} rows={1} value={text} placeholder={placeholder} onChange={e => setText(e.target.value)} aria-label="Message"
+          onPaste={e => { const files = [...e.clipboardData.files]; if (files.length) { e.preventDefault(); add(files); } }}
+          onKeyDown={e => {
+            if (commands.length) {
+              if (e.key === 'ArrowDown') { e.preventDefault(); setSlashIndex(i => (i + 1) % commands.length); return; }
+              if (e.key === 'ArrowUp') { e.preventDefault(); setSlashIndex(i => (i - 1 + commands.length) % commands.length); return; }
+              if ((e.key === 'Tab' || e.key === 'Enter') && !e.nativeEvent.isComposing) {
+                const c = commands[slashIndex];
+                if (c && (e.key === 'Tab' || c.args || text.slice(1) !== c.name)) { e.preventDefault(); pickCommand(c); return; }
+              }
+            }
+            if (e.key === 'Escape' && onCancel) { e.preventDefault(); onCancel(); return; }
+            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit(); }
+          }} />
+        {onCancel && <button type="button" className="button ghost small" onClick={onCancel}>Cancel</button>}
+        {streaming && !canSend && !onCancel
+          ? <button className="send-button stop" onClick={() => api('abort', session.id)} aria-label="Stop" title="Stop"><Icon name="stop" size={22} /></button>
+          : <button className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend || sending} onClick={submit} aria-label="Send">{sending ? <Spinner size={13} /> : <Icon name="arrowUp" size={17} stroke={2.4} />}</button>}
+      </div>
     </div>
   );
 }

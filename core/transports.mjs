@@ -64,6 +64,10 @@ function minimalEnv(source) {
 }
 
 // ---------------------------------------------------------------- relay (sessions that survive disconnects)
+// The relay on this machine: local sessions keep running after the app quits.
+export function localRelayTransport({ node, relayPath, runDir, extraEnv = {} }) {
+  return { kind: 'local-relay', label: 'This computer', command: node, args: [relayPath, 'attach'], spawnOptions: { env: { ...minimalEnv(process.env), ...extraEnv, PIDESK_RUN_DIR: runDir } } };
+}
 // What the relay daemon spawns on the host when the session is not already running there.
 export function relaySpawnSpec({ cwd, node, piCli, agentDir, sessionDir, extensions = [], piArgs = [], extraEnv = {} }) {
   const env = { PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0', ...extraEnv };
