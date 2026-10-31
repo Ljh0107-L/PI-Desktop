@@ -428,7 +428,26 @@ export class SessionManager extends EventEmitter {
   async compact(id) { const session = await this.ensureStarted(id); return session.request('compact', {}, { timeout: 300000 }); }
 
 
-  async messages(id) { const session = await this.ensureStarted(id); return session.messages(); }
+  // Full visible history: the active branch of the session tree, including messages from before any
+  // compaction (Pi's get_messages returns only what the model still sees), with compactions as markers.
+  async messages(id) {
+    const session = await this.ensureStarted(id);
+    try {
+      const { entries, leafId } = await session.request('get_entries', {}, { timeout: 60000 });
+      const byId = new Map(entries.map(e => [e.id, e]));
+      const path = [];
+      for (let e = byId.get(leafId); e; e = byId.get(e.parentId)) path.push(e);
+      path.reverse();
+      const out = [];
+      for (const e of path) {
+        if (e.type === 'message' && e.message) out.push(e.message);
+        else if (e.type === 'compaction') out.push({ role: 'compactionSummary', summary: e.summary, tokensBefore: e.tokensBefore, timestamp: Date.parse(e.timestamp) || 0 });
+      }
+      return out;
+    } catch {
+      return session.messages();
+    }
+  }
   async stats(id) { const runtime = this.runtimes.get(id); if (runtime?.status !== 'connected') return null; return runtime.session.request('get_session_stats'); }
 
   rename(id, title) {

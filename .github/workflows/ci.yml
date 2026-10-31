@@ -48,6 +48,7 @@ jobs:
       # The protocol and relay suites use their own temp dirs, so they run alongside the UI suite.
       - name: Protocol + relay + end-to-end UI
         run: |
+          set +e
           node test/protocol.mjs --ssh-host pidesk-test --ssh-config /tmp/pidesk-sshd/ssh_config > /tmp/protocol.log 2>&1 & P1=$!
           node test/relay.mjs --ssh-config /tmp/pidesk-sshd/ssh_config > /tmp/relay.log 2>&1 & P2=$!
           node test/e2e.mjs --ssh-config /tmp/pidesk-e2e/ssh_config; E=$?
