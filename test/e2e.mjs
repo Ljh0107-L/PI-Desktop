@@ -1,14 +1,14 @@
 // End-to-end test of Pi Desktop driven through its real UI with Playwright.
-// Offline mock model + a real SSH connection to a throwaway sshd (m0/test-sshd.sh).
+// Offline mock model + a real SSH connection to a throwaway sshd (test/sshd.sh).
 //
-//   sh m0/test-sshd.sh &            # provides host alias "pidesk-test"
+//   sh test/sshd.sh &            # provides host alias "pidesk-test"
 //   npx vite build && node test/e2e.mjs [--shots dir]
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { launch, shot } from './harness.mjs';
-import { startMockLlm } from '../m0/mock-llm.mjs';
+import { startMockLlm } from './mock-llm.mjs';
 
 const { values: opts } = parseArgs({ options: { shots: { type: 'string', default: '/tmp/pidesk-e2e/shots' }, 'ssh-config': { type: 'string', default: '/tmp/pidesk-sshd/ssh_config' } } });
 const work = '/tmp/pidesk-e2e';
@@ -20,7 +20,7 @@ writeFileSync(join(localProject, 'README.md'), '# demo-app\n');
 for (const f of ['denied.txt', 'notes/plan.md']) rmSync(join(localProject, f), { force: true });
 for (const f of ['survived.txt', 'after-quit.txt']) rmSync(join(remoteProject, f), { force: true });
 // Simulate the network dropping: kill this machine's ssh client for the remote session's relay connection.
-const dropSsh = () => { try { execFileSync('pkill', ['-f', 'pidesk-test.*pidesk-relay.mjs attach']); return true; } catch { return false; } };
+const dropSsh = () => { try { execFileSync('pkill', ['-f', 'pidesk-test.*/.pidesk/ext/pidesk-relay.mjs.*attach']); return true; } catch { return false; } };
 
 const results = [];
 const check = (name, ok, detail = '') => { results.push(ok); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`); };
@@ -110,7 +110,7 @@ try {
   check('hidden reasoning shown as "Thought for…" and speed not inflated', /^Thought for \d+s$/.test(hiddenRow.trim()) && tpsAfter > 0 && tpsAfter < 600, `${hiddenRow.replace(/\s+/g, ' ')} · ${tpsAfter} tok/s`);
   await S('04b-usage-card');
   // Manual compaction from the conversation menu leaves a marker with the summary.
-  for (const word of ['alpha', 'beta', 'gamma']) await waitNew('.markdown', `echo: ${word} `, () => send(`${word} `.repeat(300)));
+  for (const word of ['alpha', 'beta', 'gamma']) await waitNew('.markdown', `echo: ${word} `, () => send(`${word} `.repeat(60)));
   await page.locator('.send-button.stop').waitFor({ state: 'detached', timeout: 30000 });
   await page.click('.title-button');
   await page.click('.menu-item:has-text("Compact conversation")');
@@ -210,7 +210,8 @@ try {
   await S('07-remote-browser');
   await page.click('button:has-text("Use this folder")');
   await page.locator('.trigger', { hasText: 'api-server' }).waitFor();
-  await page.waitForTimeout(4000); // a Pi is pre-warmed on the host meanwhile
+  // a Pi is pre-warmed on the host meanwhile
+  for (let i = 0; i < 60 && !(await page.evaluate(() => window.pidesk.invoke('warmSessions'))); i++) await page.waitForTimeout(250);
   await send('hello from the server ' + 'with a longer message so streaming takes a moment '.repeat(4));
   // While the remote session streams, switch to the local one and work there too.
   await page.locator('.session-row', { hasText: 'after switching' }).first().waitFor({ timeout: 1000 }).catch(() => {});

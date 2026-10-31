@@ -3,8 +3,9 @@
   "version": "1.0.0",
   "description": "Claude Desktop-style multi-host GUI for the Pi agent harness",
   "scripts": {
-    "verify:m0": "node m0/verify.mjs",
-    "test-sshd": "sh m0/test-sshd.sh",
+    "test:sshd": "sh test/sshd.sh",
+    "test:protocol": "node test/protocol.mjs --ssh-host pidesk-test --ssh-config /tmp/pidesk-sshd/ssh_config",
+    "test:relay": "node test/relay.mjs",
     "build": "vite build",
     "start": "vite build && electron .",
     "dev": "vite",

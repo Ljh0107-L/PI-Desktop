@@ -150,6 +150,7 @@ const api = {
   listSessions: () => manager.list(),
   resumeRemote: () => manager.resumeRemote(),
   prewarm: draft => manager.prewarm(draft),
+  warmSessions: () => [...manager.spares.values()].filter(sp => manager.runtimes.get(sp.id)?.status === 'connected').length,
   createSession: options => manager.create(options),
   openSession: id => manager.ensureStarted(id).then(() => true),
   prompt: (id, text) => manager.prompt(id, text),

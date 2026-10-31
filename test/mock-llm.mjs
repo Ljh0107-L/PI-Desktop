@@ -84,8 +84,16 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
       finish('tool_calls');
       return;
     }
+    // Summarization requests (compaction) quote the whole conversation: answer with a short summary.
+    if (userText.includes('<conversation>')) {
+      send({ content: `## Goal\nSummary of ${messages.length} messages (mock).` });
+      finish('stop');
+      return;
+    }
+    // Long inputs are echoed in bigger chunks so tests stay fast; short ones still stream visibly.
     const reply = `[${provider}/${payload.model}] echo: ${userText}`;
-    for (let i = 0; i < reply.length; i += 8) { await sleep(chunkDelay); send({ content: reply.slice(i, i + 8) }); }
+    const step = reply.length > 600 ? 64 : 8;
+    for (let i = 0; i < reply.length; i += step) { await sleep(chunkDelay); send({ content: reply.slice(i, i + step) }); }
     finish('stop');
   });
   return new Promise(resolve => server.listen(port, '127.0.0.1', () => {

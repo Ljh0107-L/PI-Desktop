@@ -3,7 +3,7 @@
 // (allow and deny), and that API keys held by the desktop never appear in argv, tool environments
 // or session files.
 //
-// Usage: node m0/verify.mjs --ssh-host <alias> [--ssh-config <file>] [--remote-node <path>] [--remote-pi <path>]
+// Usage: node test/protocol.mjs --ssh-host <alias> [--ssh-config <file>] [--remote-node <path>] [--remote-pi <path>]
 // Without --ssh-host the "remote" session uses the local transport (no SSH coverage).
 import { execFileSync } from 'node:child_process';
 import { randomBytes } from 'node:crypto';

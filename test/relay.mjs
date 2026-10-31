@@ -1,5 +1,5 @@
 // Protocol-level test: Pi sessions survive SSH disconnects through the pidesk relay.
-//   sh m0/test-sshd.sh &     then   node test/relay.mjs [--ssh-config /tmp/pidesk-sshd/ssh_config]
+//   sh test/sshd.sh &     then   node test/relay.mjs [--ssh-config /tmp/pidesk-sshd/ssh_config]
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { PiSession } from '../core/pi-session.mjs';
 import { relaySpawnSpec, sshRelayTransport } from '../core/transports.mjs';
-import { startMockLlm } from '../m0/mock-llm.mjs';
+import { startMockLlm } from './mock-llm.mjs';
 import { root } from './harness.mjs';
 
 const { values: opts } = parseArgs({ options: { 'ssh-config': { type: 'string', default: '/tmp/pidesk-sshd/ssh_config' } } });
