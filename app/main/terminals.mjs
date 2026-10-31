@@ -1,10 +1,21 @@
 // Terminal panel: a real pty per session, on this machine or on the session's SSH host (ssh -tt).
+import { chmodSync, existsSync, statSync } from 'node:fs';
 import { createRequire } from 'node:module';
+import { dirname, join } from 'node:path';
 import { sshMuxArgs } from '../../core/transports.mjs';
 
 const require = createRequire(import.meta.url);
 let pty = null;
-const loadPty = () => (pty ??= require('node-pty'));
+// npm installs node-pty's prebuilt spawn-helper without its execute bit when install scripts are skipped.
+function ensureHelperExecutable() {
+  try {
+    const dir = dirname(require.resolve('node-pty/package.json'));
+    for (const helper of [join(dir, 'prebuilds', `${process.platform}-${process.arch}`, 'spawn-helper'), join(dir, 'build', 'Release', 'spawn-helper')]) {
+      if (existsSync(helper) && !(statSync(helper).mode & 0o111)) chmodSync(helper, 0o755);
+    }
+  } catch { /* read-only install: packaging sets the bit */ }
+}
+const loadPty = () => { if (!pty) { ensureHelperExecutable(); pty = require('node-pty'); } return pty; };
 
 const quote = value => `'${String(value).replace(/'/g, `'\\''`)}'`;
 

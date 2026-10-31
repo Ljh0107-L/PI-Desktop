@@ -6,6 +6,8 @@ const { join } = require('node:path');
 exports.default = async function afterPack(context) {
   if (context.electronPlatformName !== 'darwin') return;
   const app = join(context.appOutDir, `${context.packager.appInfo.productFilename}.app`);
+  // node-pty's helper must be executable (npm may install it without the bit).
+  execFileSync('/bin/sh', ['-c', `find "${app}/Contents/Resources/app/node_modules/node-pty" -name spawn-helper -exec chmod 755 {} +`], { stdio: 'inherit' });
   execFileSync('codesign', ['--force', '--deep', '--sign', '-', app], { stdio: 'inherit' });
   execFileSync('codesign', ['--verify', '--deep', '--strict', app], { stdio: 'inherit' });
 };

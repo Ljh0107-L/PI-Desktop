@@ -236,13 +236,21 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
     const paths = await api('pickFiles');
     setAttachments(list => [...list, ...paths.map(path => ({ kind: 'file', name: path.split('/').pop(), path, key: path + Math.random() }))]);
   };
+  // Clear at once and let the backend work in the background: a slow command (e.g. /goal starting a
+  // run) must not block the next message. The draft comes back if sending fails.
   const submit = async () => {
     const value = text.trim();
     if ((!value && !attachments.length) || sending) return;
+    const sent = attachments;
     setSending(true);
-    try { await onSubmit(value, attachments.map(({ preview, key, ...a }) => a)); setText(''); setAttachments([]); }
-    catch (e) { notify(e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), 'error'); }
-    finally { setSending(false); }
+    setText(''); setAttachments([]);
+    const done = onSubmit(value, sent.map(({ preview, key, ...a }) => a));
+    setTimeout(() => setSending(false), 150);
+    try { await done; }
+    catch (e) {
+      notify(e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), 'error');
+      setText(t => t || value); setAttachments(list => list.length ? list : sent);
+    }
   };
   const canSend = !!(text.trim() || attachments.length);
   return (
