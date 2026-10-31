@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { MenuItem, Modal, Popover, Spinner } from './ui.jsx';
 import { api, loadCatalog, openSettings, setAddConnectionOpen, setEnvironments, setSettings, useStore } from './store.js';
+import { formatTokens as fmtTokens } from './transcript.js';
 
 const CUSTOM_APIS = [
   { id: 'openai-completions', label: 'OpenAI Chat Completions compatible' },
@@ -379,12 +380,117 @@ function ConnectionsPage() {
   );
 }
 
+// ---------------------------------------------------------------- usage
+const dayKey = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+const WEEKS = 53;
+
+// A year of daily token counts, one column per week (Sunday on top), like a contribution graph.
+function Heatmap({ days }) {
+  const [hover, setHover] = useState(null);
+  const box = useRef(null);
+  const { columns, months, max } = useMemo(() => {
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const start = new Date(today); start.setDate(start.getDate() - start.getDay() - (WEEKS - 1) * 7);
+    const columns = [], months = [];
+    let max = 0;
+    for (let w = 0; w < WEEKS; w++) {
+      const cells = [];
+      for (let d = 0; d < 7; d++) {
+        const date = new Date(start); date.setDate(start.getDate() + w * 7 + d);
+        const key = dayKey(date), tokens = days[key] ?? 0;
+        if (date <= today) max = Math.max(max, tokens);
+        cells.push({ key, date, tokens, future: date > today });
+      }
+      if (w === 0 || cells[0].date.getMonth() !== columns[w - 1][0].date.getMonth()) months.push({ column: w, label: MONTHS[cells[0].date.getMonth()] });
+      columns.push(cells);
+    }
+    return { columns, months: months.filter((m, i) => i === months.length - 1 || months[i + 1].column - m.column >= 3), max };
+  }, [days]);
+  const level = t => !t || !max ? 0 : Math.max(1, Math.ceil(4 * Math.log1p(t) / Math.log1p(max)));
+  const show = (e, cell) => {
+    const r = box.current.getBoundingClientRect(), c = e.currentTarget.getBoundingClientRect();
+    setHover({ ...cell, x: c.left - r.left + c.width / 2, y: c.top - r.top });
+  };
+  return (
+    <div className="heatmap" ref={box} onMouseLeave={() => setHover(null)}>
+      <div className="heatmap-grid" style={{ gridTemplateColumns: `repeat(${WEEKS}, 1fr)` }}>
+        {columns.map((cells, w) => cells.map((cell, d) => (
+          <span key={cell.key} className={`heat-cell l${level(cell.tokens)} ${cell.future ? 'future' : ''}`} style={{ gridColumn: w + 1, gridRow: d + 1 }}
+            onMouseEnter={cell.future ? undefined : e => show(e, cell)} />
+        )))}
+      </div>
+      <div className="heatmap-months" style={{ gridTemplateColumns: `repeat(${WEEKS}, 1fr)` }}>
+        {months.map(m => <span key={m.column} style={{ gridColumn: `${m.column + 1} / span 3` }}>{m.label}</span>)}
+      </div>
+      {hover && <div className="heat-tip" style={{ left: hover.x, top: hover.y }}>
+        <span>{MONTHS[hover.date.getMonth()]} {hover.date.getDate()}</span>
+        <b>{hover.tokens ? `${fmtTokens(hover.tokens)} tokens` : 'No usage'}</b>
+      </div>}
+    </div>
+  );
+}
+
+function UsagePage() {
+  const [data, setData] = useState(null);
+  const [error, setError] = useState(null);
+  const providers = useStore(s => s.settings.providers);
+  const catalog = useStore(s => s.catalog);
+  useEffect(() => { api('usageSummary').then(setData, e => setError(e.message)); }, []);
+  if (error) return <div className="form-error"><Icon name="alert" size={14} /> {error}</div>;
+  if (!data) return <div className="usage-loading"><Spinner size={14} /> Reading conversations…</div>;
+  const { totals, days, models, today } = data;
+  const activeDays = Object.values(days).filter(Boolean).length;
+  const modelName = m => catalog.find(c => c.provider === m.provider && c.id === m.model)?.name ?? m.model;
+  const providerName = id => providers.find(p => p.id === id)?.name ?? id;
+  const top = models[0]?.tokens || 1;
+  const stats = [
+    { label: 'Total tokens', value: fmtTokens(totals.tokens) },
+    { label: 'Today', value: fmtTokens(days[today] ?? 0) },
+    { label: 'Active days', value: String(activeDays) },
+    { label: 'Est. cost', value: totals.cost ? `$${totals.cost < 100 ? totals.cost.toFixed(2) : Math.round(totals.cost).toLocaleString()}` : '—' },
+  ];
+  return <>
+    <section className="section">
+      <div className="usage-stats">
+        {stats.map(s => <div key={s.label} className="usage-stat"><span className="usage-stat-label">{s.label}</span><span className="usage-stat-value">{s.value}</span></div>)}
+      </div>
+      <div className="usage-split">
+        <span>Input <b>{fmtTokens(totals.input)}</b></span>
+        <span>Cache read <b>{fmtTokens(totals.cacheRead)}</b></span>
+        <span>Cache write <b>{fmtTokens(totals.cacheWrite)}</b></span>
+        <span>Output <b>{fmtTokens(totals.output)}</b></span>
+      </div>
+    </section>
+    <section className="section">
+      <div className="section-head"><h2 className="section-title">Token activity</h2></div>
+      <Heatmap days={days} />
+    </section>
+    <section className="section">
+      <div className="section-head"><h2 className="section-title">Models</h2></div>
+      {models.length ? <ol className="model-rank">
+        {models.map((m, i) => (
+          <li key={`${m.provider}/${m.model}`} className="model-rank-row">
+            <span className="model-rank-n">{i + 1}</span>
+            <span className="model-rank-name" title={`${m.provider}/${m.model}`}>{modelName(m)}<span className="model-rank-provider">{providerName(m.provider)}</span></span>
+            <span className="model-rank-bar"><span style={{ width: `${Math.max(2, 100 * m.tokens / top)}%` }} /></span>
+            <span className="model-rank-tokens">{fmtTokens(m.tokens)}</span>
+            <span className="model-rank-share">{Math.round(100 * m.tokens / (totals.tokens || 1))}%</span>
+          </li>
+        ))}
+      </ol> : <div className="grouped-empty">No usage yet — it appears here after your first reply.</div>}
+      <p className="section-foot">Counts every model reply: input, cached and output tokens. Conversations on SSH hosts count from this version on.</p>
+    </section>
+  </>;
+}
+
 // ---------------------------------------------------------------- page
 export function SettingsPage() {
   const tab = useStore(s => s.settingsTab);
   const pages = [
     { id: 'providers', label: 'Models', icon: 'sparkle', title: 'Models' },
     { id: 'connections', label: 'Connections', icon: 'server', title: 'Connections' },
+    { id: 'usage', label: 'Usage', icon: 'gauge', title: 'Usage' },
   ];
   const page = pages.find(p => p.id === tab) ?? pages[0];
   return (
@@ -400,7 +506,7 @@ export function SettingsPage() {
         <div className="settings-drag drag" />
         <div className="settings-content">
           <h1 className="settings-title">{page.title}</h1>
-          {page.id === 'providers' ? <ModelsPage /> : <ConnectionsPage />}
+          {page.id === 'providers' ? <ModelsPage /> : page.id === 'usage' ? <UsagePage /> : <ConnectionsPage />}
         </div>
       </main>
     </div>

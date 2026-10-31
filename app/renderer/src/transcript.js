@@ -167,6 +167,8 @@ export function displayBlocks(t) {
     if (message.role === 'custom' && message.customType === 'pidesk-goal') {
       const objective = /^The user set a goal[\s\S]*?<objective>\n([\s\S]*?)\n<\/objective>/.exec(typeof message.content === 'string' ? message.content : '')?.[1];
       if (objective) { flush(); closeTurn(`s${mi}`, false); blocks.push({ kind: 'goal', key: `g${mi}`, objective }); }
+      // A goal continuation is a new prompt: the reply before it is an answer, not folded work.
+      else { flush(); blocks.push({ kind: 'break', key: `x${mi}` }); }
       return;
     }
     if (message.role === 'bashExecution') { flush(); blocks.push({ kind: 'bash', key: `b${mi}`, message }); return; }
@@ -204,7 +206,28 @@ export function displayBlocks(t) {
   });
   flush();
   closeTurn('s-end', !!t.live);
-  return blocks;
+  return collapseWork(blocks);
+}
+
+// Claude-style: within a reply, everything before its closing text (reasoning, commands, the notes Pi
+// wrote between them) folds into one expandable line. A reply that only thought keeps its plain
+// "Thought" row; the closing text always stays visible.
+const WORK = new Set(['text', 'thinking', 'tools']);
+export function collapseWork(blocks) {
+  const out = [];
+  for (let i = 0; i < blocks.length;) {
+    if (!WORK.has(blocks[i].kind)) { out.push(blocks[i++]); continue; }
+    let j = i;
+    while (j < blocks.length && WORK.has(blocks[j].kind)) j++;
+    const run = blocks.slice(i, j);
+    const last = run.findLastIndex(b => b.kind !== 'text');
+    const work = run.slice(0, last + 1);
+    if (work.length > 1 || work[0]?.kind === 'tools') out.push({ kind: 'work', key: work[0].key, items: work });
+    else out.push(...work);
+    out.push(...run.slice(last + 1));
+    i = j;
+  }
+  return out;
 }
 
 // Files the agent wrote or edited, most recent first.

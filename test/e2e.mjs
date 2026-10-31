@@ -158,6 +158,16 @@ try {
   await page.click('.tool-group-head:has-text("Ran 1 command")');
   await page.click('.tool-call-head');
   check('tool output visible when expanded', (await page.locator('.tool-output').last().innerText()).includes(localProject.replace('/tmp', '')));
+  check('a reply\'s work folds into one line; the answer stays visible', await page.locator('.tool-group.work', { hasText: 'Ran 1 command' }).count() >= 1 && await page.locator('.markdown', { hasText: 'Tool result: hi-from-pi' }).count() >= 1);
+  check('long tool rows never scroll the conversation sideways', await page.evaluate(() => { const t = document.querySelector('.transcript'); return t.scrollWidth <= t.clientWidth + 1; }));
+  // numbered lists continue on Shift+Enter, and an empty item ends the list
+  await composer().fill('1. first');
+  await composer().press('Shift+Enter');
+  const listed = await composer().inputValue();
+  await composer().press('Shift+Enter');
+  const ended = await composer().inputValue();
+  await composer().fill('');
+  check('composer continues 1. 2. 3. lists', listed === '1. first\n2. ' && ended === '1. first\n', JSON.stringify({ listed, ended }));
 
   await waitNew('.markdown', 'Tool result', () => send('[[write:notes/plan.md|# Plan\n- ship M1]]'));
   await page.locator('.panel-row.file', { hasText: 'plan.md' }).waitFor();
@@ -217,6 +227,13 @@ try {
   await page.fill('form.editor label.field:has-text("API key") input', 'sk-e2e-rotated');
   await page.click('form.editor button[type=submit]');
   await page.locator('form.editor').waitFor({ state: 'detached' });
+  // Settings → Usage: totals, a day in the activity graph, models ranked by tokens
+  await page.click('.settings-sidebar-nav .nav-item:has-text("Usage")');
+  await page.locator('.model-rank-row').first().waitFor({ timeout: 15000 });
+  const usageStats = await page.locator('.usage-stats').innerText();
+  const ranked = (await page.locator('.model-rank-name').allInnerTexts()).map(t => t.split('\n')[0]);
+  check('Settings → Usage shows total tokens, today\'s activity and a model ranking', /Total tokens\s+[\d.]+[KM]?/.test(usageStats) && await page.locator('.heat-cell.l1, .heat-cell.l2, .heat-cell.l3, .heat-cell.l4').count() >= 1 && ranked.includes('alpha-1') && ranked.includes('beta-1'), `${usageStats.replace(/\s+/g, ' ')} · ${ranked.join(', ')}`);
+  await S('06b-usage');
   await page.click('.nav-item.back');
   await waitNew('.markdown', 'echo: after rotating the key', () => send('after rotating the key'));
   check('a running session picks up a rotated API key', mock.requests.at(-1).authorization === 'Bearer sk-e2e-rotated', mock.requests.at(-1).authorization);

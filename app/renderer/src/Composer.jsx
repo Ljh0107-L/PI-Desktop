@@ -190,6 +190,32 @@ async function attachmentFromFile(file) {
   return { kind: 'file', name: file.name || 'file', data: toBase64(await file.arrayBuffer()) };
 }
 
+// Lists while typing: Shift+Enter on a "1. …" (or "- …") line starts the next item; on an empty item it
+// ends the list. Returns the new text and caret, or null when the line is not a list item.
+export function continueList(text, caret) {
+  const lineStart = text.lastIndexOf('\n', caret - 1) + 1;
+  const lineEnd = text.indexOf('\n', caret) === -1 ? text.length : text.indexOf('\n', caret);
+  const m = /^(\s*)(?:(\d+)([.)])|([-*\u2022]))(\s+)/.exec(text.slice(lineStart, lineEnd));
+  if (!m || caret < lineStart + m[0].length) return null;
+  const [marker, indent, num, delim, bullet, gap] = m;
+  // An empty item ends the list: remove its marker.
+  if (!text.slice(lineStart + marker.length, lineEnd).trim()) return { text: text.slice(0, lineStart) + text.slice(lineEnd), caret: lineStart };
+  const insert = `\n${indent}${num ? `${Number(num) + 1}${delim}` : bullet}${gap}`;
+  let after = text.slice(caret);
+  if (num) {
+    // Renumber the items right after this one, so inserting in the middle keeps 1. 2. 3. in order.
+    const lines = after.split('\n');
+    let n = Number(num) + 2;
+    for (let i = 1; i < lines.length; i++) {
+      const item = /^(\s*)(\d+)([.)])(\s.*)$/.exec(lines[i]);
+      if (!item || item[1] !== indent || item[3] !== delim) break;
+      lines[i] = `${indent}${n++}${delim}${item[4]}`;
+    }
+    after = lines.join('\n');
+  }
+  return { text: text.slice(0, caret) + insert + after, caret: caret + insert.length };
+}
+
 function SlashMenu({ items, index, onPick }) {
   const ref = useRef(null);
   useEffect(() => { ref.current?.querySelector('.slash-item.on')?.scrollIntoView({ block: 'nearest' }); }, [index]);
@@ -280,6 +306,15 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
               }
             }
             if (e.key === 'Escape' && onCancel) { e.preventDefault(); onCancel(); return; }
+            if (e.key === 'Enter' && e.shiftKey && !e.nativeEvent.isComposing && e.target.selectionStart === e.target.selectionEnd) {
+              const next = continueList(text, e.target.selectionStart);
+              if (next) {
+                e.preventDefault();
+                setText(next.text);
+                requestAnimationFrame(() => { const el = ref.current; if (el) el.selectionStart = el.selectionEnd = next.caret; });
+                return;
+              }
+            }
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit(); }
           }} />
         {onCancel && <button type="button" className="button ghost small" onClick={onCancel}>Cancel</button>}

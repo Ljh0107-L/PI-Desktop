@@ -1,8 +1,8 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, safeStorage, shell } from 'electron';
-import { readFileSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, statSync } from 'node:fs';
 import { open, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, extname, join, posix, resolve } from 'node:path';
+import { basename, dirname, extname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listEnvironments } from './environments.mjs';
 import { listRemoteDir, runSsh } from './remote-setup.mjs';
@@ -12,15 +12,27 @@ import { SessionManager } from './session-manager.mjs';
 import { Terminals } from './terminals.mjs';
 import { Updater } from './updater.mjs';
 import { Store } from './store.mjs';
+import { UsageLedger } from './usage.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const piPackage = join(root, 'node_modules/@earendil-works/pi-coding-agent');
 const piVersion = JSON.parse(readFileSync(join(piPackage, 'package.json'), 'utf8')).version;
 
+// Pi and the relay run on this app's Electron binary acting as Node. On macOS they use the helper app's
+// copy: Pi sets its process title, which makes libuv check the process in with LaunchServices, and the
+// main executable would then appear in the Dock as a generic "exec" icon. The helper is a UI element
+// (LSUIElement), so it never shows in the Dock.
+function nodeBinary() {
+  if (process.platform !== 'darwin') return process.execPath;
+  const name = basename(process.execPath); // "Pi Desktop", or "Electron" in development
+  const helper = join(dirname(process.execPath), '../Frameworks', `${name} Helper.app/Contents/MacOS/${name} Helper`);
+  return existsSync(helper) ? helper : process.execPath;
+}
+
 if (process.env.PIDESK_USER_DATA) app.setPath('userData', process.env.PIDESK_USER_DATA);
 app.setName('Pi Desktop');
 
-let store, manager, window;
+let store, manager, window, usage;
 // Hosts set up before Connections existed count as added.
 const migrateConnections = () => { for (const v of Object.values(store?.settings.environments ?? {})) if (v.root && v.added === undefined) v.added = true; };
 const environments = () => (migrateConnections(), listEnvironments({ sshConfig: process.env.PIDESK_SSH_CONFIG, customHosts: store?.settings.customHosts ?? [], state: store?.settings.environments ?? {} }));
@@ -169,6 +181,7 @@ const api = {
   checkForUpdates: () => updater?.check({ manual: true }),
   installUpdate: () => updater?.install(),
   appVersion: () => app.getVersion(),
+  usageSummary: () => usage.summary(),
   // Terminal panel
   termOpen(id, cols, rows) { const record = manager.record(id); return terminals.open({ env: manager.env(record.environmentId), cwd: record.cwd, cols, rows }); },
   termWrite: (termId, data) => terminals.write(termId, data),
@@ -278,13 +291,15 @@ app.whenReady().then(() => {
     piPackageDir: join(root, 'node_modules/@earendil-works/pi-coding-agent'),
     cacheDir: join(app.getPath('userData'), 'downloads'),
     local: {
-      node: process.execPath, piCli: join(piPackage, 'dist/bundle/cli.js'),
+      node: nodeBinary(), piCli: join(piPackage, 'dist/bundle/cli.js'),
       agentDir: join(app.getPath('userData'), 'agent'),
       runDir: join(app.getPath('userData'), 'run'),
       uploadDir: join(app.getPath('userData'), 'uploads'),
       extraEnv: { ELECTRON_RUN_AS_NODE: '1' },
     },
   });
+  usage = new UsageLedger({ path: join(app.getPath('userData'), 'usage.jsonl'), sessionsDir: join(app.getPath('userData'), 'agent', 'sessions') });
+  manager.on('event', ({ event }) => { if (event.type === 'message_end' && event.message?.role === 'assistant') usage.record(event.message); });
   manager.on('environments-changed', () => send('environments', environments()));
   for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'rewound', 'notice', 'environment', 'goal']) manager.on(channel, payload => send(channel, payload));
   manager.on('sessions', () => send('sessions', manager.list()));

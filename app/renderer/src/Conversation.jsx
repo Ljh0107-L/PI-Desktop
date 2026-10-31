@@ -82,6 +82,53 @@ function ToolGroup({ calls, tools, live }) {
   );
 }
 
+// One line of a reply's folded work: a note Pi wrote between steps, or its reasoning.
+const firstLine = text => String(text ?? '').split('\n').map(l => l.replace(/[*_`#>]/g, '').trim()).find(Boolean) ?? '';
+function WorkNote({ item }) {
+  const [open, setOpen] = useState(false);
+  const thinking = item.kind === 'thinking';
+  const body = item.text;
+  if (thinking && (item.hidden || item.redacted || !item.text)) {
+    return <div className="work-note static"><span className="work-note-line">{item.durationMs > 800 ? `Thought for ${seconds(item.durationMs)}` : 'Thought'}</span></div>;
+  }
+  return (
+    <div className={`work-note ${thinking ? 'thought' : ''}`}>
+      <button className="work-note-head" onClick={() => setOpen(o => !o)}>
+        <span className={`work-note-line ${item.streaming ? 'shimmer' : ''}`}>{firstLine(body) || (thinking ? 'Thought' : '')}</span>
+        <Icon name={open ? 'caretDown' : 'caretRight'} size={14} className="tool-caret" />
+      </button>
+      {open && <div className="work-note-body"><Markdown text={body} /></div>}
+    </div>
+  );
+}
+
+// Everything a reply did before its answer, folded into one line ("Ran 2 commands, read 1 file").
+function WorkGroup({ items, tools, live }) {
+  const [open, setOpen] = useState(false);
+  const calls = items.flatMap(i => i.kind === 'tools' ? i.calls : []);
+  const running = items.some(i => i.streaming) || calls.some(c => tools[c.id]?.status === 'running' || (!tools[c.id] && live));
+  const failed = calls.filter(c => tools[c.id]?.status === 'error').length;
+  const thinkMs = items.reduce((n, i) => n + (i.kind === 'thinking' ? i.durationMs ?? 0 : 0), 0);
+  const summary = toolSummary(calls) || (running ? '' : thinkMs > 800 ? `Thought for ${seconds(thinkMs)}` : 'Thought');
+  const latest = items.at(-1);
+  const thinkingNow = running && latest?.kind === 'thinking' && latest.streaming;
+  return (
+    <div className={`tool-group work ${open ? 'open' : ''}`}>
+      <button className="tool-group-head" onClick={() => setOpen(o => !o)}>
+        {running && !thinkingNow && <Spinner size={12} />}
+        {thinkingNow ? <span className="shimmer thinking-latest">{firstLine(latest.text) || 'Thinking'}</span> : <span>{summary || 'Working'}</span>}
+        {failed > 0 && <span className="tool-failed">{failed} failed</span>}
+        <Icon name={open ? 'caretDown' : 'caretRight'} size={14} />
+      </button>
+      {open && <div className="work-body">
+        {items.flatMap(item => item.kind === 'tools'
+          ? item.calls.map(call => <ToolCall key={call.id} call={call} tool={tools[call.id]} />)
+          : [<WorkNote key={item.key} item={item} />])}
+      </div>}
+    </div>
+  );
+}
+
 const seconds = ms => ms < 60000 ? `${Math.max(1, Math.round(ms / 1000))}s` : `${Math.floor(ms / 60000)}m ${Math.round(ms % 60000 / 1000)}s`;
 
 // Reasoning comes in four shapes: streamed in full, summarized by the provider, redacted, or hidden
@@ -271,6 +318,7 @@ export function Transcript({ session, transcript, questions }) {
             case 'usage': return <TurnFooter key={block.key} text={block.text} changes={block.changes} sessionId={session?.id} />;
             case 'compaction': return <CompactionMarker key={block.key} {...block} />;
             case 'thinking': return <Thinking key={block.key} {...block} />;
+            case 'work': return <WorkGroup key={block.key} items={block.items} tools={transcript.tools} live={!!transcript.live} />;
             case 'tools': return <ToolGroup key={block.key} calls={block.calls} tools={transcript.tools} live={!!transcript.live} />;
             case 'ask': return transcript.tools[block.call.id]?.status === 'done' ? <AskBlock key={block.key} call={block.call} tool={transcript.tools[block.call.id]} /> : null;
             case 'bash': return <pre key={block.key} className="tool-output">$ {block.message.command}{'\n'}{block.message.output}</pre>;
