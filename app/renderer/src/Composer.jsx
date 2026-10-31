@@ -207,7 +207,6 @@ function SlashMenu({ items, index, onPick }) {
 export function Composer({ session, onSubmit, autoFocus, placeholder, initialText = '', onCancel, compact }) {
   const [text, setText] = useState(initialText);
   const [attachments, setAttachments] = useState([]);
-  const [sending, setSending] = useState(false);
   const [dragging, setDragging] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
   const [pi, setPi] = useState([]);
@@ -240,13 +239,10 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   // run) must not block the next message. The draft comes back if sending fails.
   const submit = async () => {
     const value = text.trim();
-    if ((!value && !attachments.length) || sending) return;
+    if (!value && !attachments.length) return; // the box is cleared at once, so a repeat Enter is a no-op
     const sent = attachments;
-    setSending(true);
     setText(''); setAttachments([]);
-    const done = onSubmit(value, sent.map(({ preview, key, ...a }) => a));
-    setTimeout(() => setSending(false), 150);
-    try { await done; }
+    try { await onSubmit(value, sent.map(({ preview, key, ...a }) => a)); }
     catch (e) {
       notify(e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), 'error');
       setText(t => t || value); setAttachments(list => list.length ? list : sent);
@@ -289,7 +285,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
         {onCancel && <button type="button" className="button ghost small" onClick={onCancel}>Cancel</button>}
         {streaming && !canSend && !onCancel
           ? <button className="send-button stop" onClick={() => api('abort', session.id)} aria-label="Stop" title="Stop"><Icon name="stop" size={22} /></button>
-          : <button className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend || sending} onClick={submit} aria-label="Send">{sending ? <Spinner size={13} /> : <Icon name="arrowUp" size={17} stroke={2.4} />}</button>}
+          : <button className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={submit} aria-label="Send"><Icon name="arrowUp" size={17} stroke={2.4} /></button>}
       </div>
     </div>
   );
