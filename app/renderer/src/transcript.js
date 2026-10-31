@@ -1,0 +1,228 @@
+// Turns Pi's AgentMessages (history) and RPC events (live) into one per-session transcript.
+
+// Rough token count of streamed text before the provider reports real usage: CJK characters are about
+// one token each, other text about four characters per token. Calibrated against real counts later.
+const CJK = /[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/g;
+export const estimateTokens = text => { const cjk = (text.match(CJK) ?? []).length; return cjk + (text.length - cjk) / 4; };
+
+export const emptyTranscript = () => ({ messages: [], live: null, tools: {}, loaded: false, error: null });
+
+function toolsFromMessages(messages) {
+  const tools = {};
+  for (const message of messages) {
+    if (message.role === 'toolResult') tools[message.toolCallId] = { status: message.isError ? 'error' : 'done', result: { content: message.content, details: message.details } };
+  }
+  return tools;
+}
+
+// `timings`: generation timing saved when replies streamed (Pi's history has token counts but no timing).
+export function fromHistory(messages, timings = {}) {
+  const withTiming = messages.map(m => m.role === 'assistant' && timings[m.timestamp] ? { ...m, __timing: timings[m.timestamp] } : m);
+  return { messages: withTiming, live: null, tools: toolsFromMessages(messages), loaded: true, error: null };
+}
+
+// ---------------------------------------------------------------- usage & speed
+// Pi's usage: input = uncached prompt tokens, cacheRead / cacheWrite = cached prompt tokens, output
+// (which already includes `reasoning` when the provider reports it).
+//
+// Speed must survive hidden or summarized reasoning: such models think silently (or stream only a short
+// summary), so output tokens far exceed what was streamed, and the first visible token comes late.
+// Measuring from that token would overstate the speed, so for those replies the window starts when
+// the reply started streaming instead.
+function generation(m) {
+  const t = m.__timing, out = m.usage?.output ?? 0;
+  if (!t?.end || !out) return null;
+  const streamedTokens = t.est ?? (t.chars ?? 0) / 4;
+  const hiddenWork = (m.usage.reasoning ?? 0) > streamedTokens * 0.5 || out > streamedTokens * 1.6 + 20;
+  const from = hiddenWork || !t.first ? t.start : t.first;
+  const ms = (t.last ?? t.end) - from; // to the last streamed token, not the closing usage chunk
+  return ms > 50 ? { ms, out, hiddenWork } : null;
+}
+export function usageOf(messages) {
+  const u = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0, reasoningReported: false, cost: 0, genMs: 0, genOut: 0, hiddenWork: false, start: null, end: null, calls: 0 };
+  for (const m of messages) {
+    if (m.role !== 'assistant' || !m.usage) continue;
+    u.calls += 1;
+    u.input += m.usage.input ?? 0; u.cacheRead += m.usage.cacheRead ?? 0; u.cacheWrite += m.usage.cacheWrite ?? 0; u.output += m.usage.output ?? 0;
+    if (m.usage.reasoning != null) { u.reasoningReported = true; u.reasoning += m.usage.reasoning; }
+    u.cost += m.usage.cost?.total ?? 0;
+    const g = generation(m);
+    if (g) { u.genMs += g.ms; u.genOut += g.out; u.hiddenWork ||= g.hiddenWork; }
+    const t = m.__timing;
+    if (t?.start && t.end) { u.start = Math.min(u.start ?? t.start, t.start); u.end = Math.max(u.end ?? t.end, t.end); }
+  }
+  const prompt = u.input + u.cacheRead + u.cacheWrite;
+  return { ...u, prompt, cacheHit: prompt ? u.cacheRead / prompt : null, tps: u.genMs ? u.genOut / (u.genMs / 1000) : null, durationMs: u.start && u.end ? u.end - u.start : null };
+}
+// Usage per finished turn (user message → the replies that followed), oldest first.
+export function turnUsages(messages) {
+  const turns = []; let current = [];
+  for (const m of messages) {
+    if (m.role === 'user') { if (current.length) turns.push(usageOf(current)); current = []; }
+    else if (m.role === 'assistant') current.push(m);
+  }
+  if (current.length) turns.push(usageOf(current));
+  return turns.filter(t => t.calls);
+}
+export const formatTokens = n => n == null ? '—' : n < 1000 ? String(n) : n < 100000 ? `${(n / 1000).toFixed(n < 10000 ? 1 : 0).replace(/\.0$/, '')}K` : n < 1e6 ? `${Math.round(n / 1000)}K` : `${(n / 1e6).toFixed(1).replace(/\.0$/, '')}M`;
+
+function updateBlock(live, index, update) {
+  const content = live.content.slice();
+  content[index] = update(content[index]);
+  return { ...live, content };
+}
+
+export function applyEvent(t, event) {
+  switch (event.type) {
+    case 'message_start':
+      if (event.message?.role === 'assistant') return { ...t, live: { ...event.message, content: [], stopReason: 'pending', __t0: Date.now(), __chars: 0 } };
+      return t;
+    case 'message_update': {
+      // Attached mid-reply (e.g. after an app restart): start a live message from the deltas we do get.
+      if (!t.live) t = { ...t, live: { role: 'assistant', content: [], stopReason: 'pending' } };
+      const e = event.assistantMessageEvent ?? {};
+      // Speed: time from the first generated token, and characters streamed so far (for a live estimate).
+      if (typeof e.delta === 'string' && e.type?.endsWith('_delta')) {
+        const now = Date.now(), L = t.live, thinking = e.type === 'thinking_delta';
+        t = { ...t, live: { ...L, __tFirst: L.__tFirst ?? now, __tLast: now, __chars: (L.__chars ?? 0) + e.delta.length, __est: (L.__est ?? 0) + estimateTokens(e.delta),
+          __thinkStart: thinking ? L.__thinkStart ?? now : L.__thinkStart, __thinkEnd: !thinking && L.__thinkStart && !L.__thinkEnd ? now : L.__thinkEnd } };
+      }
+      const i = e.contentIndex;
+      switch (e.type) {
+        case 'text_start': return { ...t, live: updateBlock(t.live, i, () => ({ type: 'text', text: '' })) };
+        case 'text_delta': return { ...t, live: updateBlock(t.live, i, b => ({ type: 'text', text: (b?.text ?? '') + e.delta })) };
+        case 'text_end': return { ...t, live: updateBlock(t.live, i, () => ({ type: 'text', text: e.content })) };
+        case 'thinking_start': return { ...t, live: updateBlock(t.live, i, () => ({ type: 'thinking', thinking: '' })) };
+        case 'thinking_delta': return { ...t, live: updateBlock(t.live, i, b => ({ type: 'thinking', thinking: (b?.thinking ?? '') + e.delta })) };
+        case 'thinking_end': return { ...t, live: updateBlock(t.live, i, () => ({ type: 'thinking', thinking: e.content })) };
+        case 'toolcall_start': return { ...t, live: updateBlock(t.live, i, () => ({ type: 'toolCall', id: e.id, name: e.toolName, arguments: {}, argsText: '' })) };
+        case 'toolcall_delta': return { ...t, live: updateBlock(t.live, i, b => {
+          const argsText = (b?.argsText ?? '') + e.delta;
+          let args = b?.arguments ?? {};
+          try { args = JSON.parse(argsText); } catch { /* partial JSON */ }
+          return { ...b, argsText, arguments: args };
+        }) };
+        case 'toolcall_end': return { ...t, live: updateBlock(t.live, i, () => e.toolCall) };
+        default: return t;
+      }
+    }
+    case 'message_end': {
+      const message = event.message;
+      if (!message) return t;
+      if (message.role === 'assistant') {
+        const now = Date.now();
+        const timing = t.live?.__t0 ? { start: t.live.__t0, first: t.live.__tFirst ?? null, end: now, last: t.live.__tLast ?? null, chars: t.live.__chars ?? 0, est: t.live.__est ?? null, think: t.live.__thinkStart ? (t.live.__thinkEnd ?? now) - t.live.__thinkStart : null } : null;
+        return { ...t, live: null, messages: [...t.messages, timing ? { ...message, __timing: timing } : message] };
+      }
+      return { ...t, messages: [...t.messages, message] };
+    }
+    case 'compaction_start': return { ...t, compacting: true };
+    case 'compaction_end': return { ...t, compacting: false };
+    case 'tool_execution_start':
+      return { ...t, tools: { ...t.tools, [event.toolCallId]: { status: 'running', args: event.args } } };
+    case 'tool_execution_update':
+      return { ...t, tools: { ...t.tools, [event.toolCallId]: { ...t.tools[event.toolCallId], status: 'running', result: event.partialResult } } };
+    case 'tool_execution_end':
+      return { ...t, tools: { ...t.tools, [event.toolCallId]: { status: event.isError ? 'error' : 'done', result: event.result, durationMs: event.durationMs } } };
+    default:
+      return t;
+  }
+}
+
+// Display blocks: user bubbles, assistant text/thinking, and groups of consecutive tool calls.
+export function displayBlocks(t) {
+  const blocks = [];
+  const all = t.live ? [...t.messages, t.live] : t.messages;
+  let group = null;
+  const flush = () => { if (group) { blocks.push(group); group = null; } };
+  let turn = [];
+  const closeTurn = (key, live) => {
+    if (turn.length && !live) {
+      const usage = usageOf(turn);
+      const text = turn.flatMap(m => (m.content ?? []).filter(c => c?.type === 'text').map(c => c.text)).join('\n\n').trim();
+      if (usage.calls) blocks.push({ kind: 'usage', key, usage, text });
+    }
+    turn = [];
+  };
+  all.forEach((message, mi) => {
+    if (message.role === 'assistant') turn.push(message);
+    if (message.role === 'user') {
+      flush();
+      closeTurn(`s${mi}`, false);
+      const text = typeof message.content === 'string' ? message.content : (message.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+      if (text.startsWith('/pidesk-')) return;
+      blocks.push({ kind: 'user', key: `u${mi}`, text });
+      return;
+    }
+    if (message.role === 'bashExecution') { flush(); blocks.push({ kind: 'bash', key: `b${mi}`, message }); return; }
+    if (message.role === 'compactionSummary') { flush(); blocks.push({ kind: 'compaction', key: `c${mi}`, summary: message.summary, tokensBefore: message.tokensBefore }); return; }
+    if (message.role !== 'assistant') return;
+    const reasoning = message.usage?.reasoning ?? 0;
+    let sawThinking = false;
+    const firstBlock = blocks.length;
+    (message.content ?? []).forEach((block, bi) => {
+      if (!block) return;
+      if (block.type === 'toolCall' && block.name === 'ask_user') { flush(); blocks.push({ kind: 'ask', key: `q${mi}-${bi}`, call: block }); return; }
+      if (block.type === 'toolCall') {
+        if (!group) group = { kind: 'tools', key: `g${mi}-${bi}`, calls: [] };
+        group.calls.push(block);
+        return;
+      }
+      if (block.type === 'text' && !block.text?.trim()) return;
+      flush();
+      if (block.type === 'text') blocks.push({ kind: 'text', key: `t${mi}-${bi}`, text: block.text, streaming: message === t.live });
+      if (block.type === 'thinking' && block.redacted) { sawThinking = true; blocks.push({ kind: 'thinking', key: `k${mi}-${bi}`, redacted: true, tokens: reasoning }); }
+      else if (block.type === 'thinking' && block.thinking?.trim()) {
+        sawThinking = true;
+        // Far fewer characters than reasoning tokens: the provider sent a summary, not the full reasoning.
+        const summary = reasoning > 0 && block.thinking.length / 4 < reasoning * 0.5;
+        blocks.push({ kind: 'thinking', key: `k${mi}-${bi}`, text: block.thinking, streaming: message === t.live, summary, tokens: reasoning, durationMs: message.__timing?.think ?? null });
+      }
+    });
+    // Reasoning that was billed but never shown (OpenAI o-series, hidden thinking): say so.
+    if (!sawThinking && reasoning > 0 && message !== t.live) {
+      const tm = message.__timing;
+      blocks.splice(firstBlock, 0, { kind: 'thinking', key: `h${mi}`, hidden: true, tokens: reasoning, durationMs: tm?.first && tm.start ? tm.first - tm.start : null });
+    }
+    if (message.errorMessage && message.stopReason !== 'aborted') { flush(); blocks.push({ kind: 'error', key: `e${mi}`, text: message.errorMessage }); }
+    if (message.stopReason === 'aborted') { flush(); blocks.push({ kind: 'notice', key: `a${mi}`, text: 'Interrupted' }); }
+  });
+  flush();
+  closeTurn('s-end', !!t.live);
+  return blocks;
+}
+
+// Files the agent wrote or edited, most recent first.
+export function outputs(t) {
+  const seen = new Map();
+  const all = t.live ? [...t.messages, t.live] : t.messages;
+  for (const message of all) {
+    if (message.role !== 'assistant') continue;
+    for (const block of message.content ?? []) {
+      if (block?.type !== 'toolCall' || !['write', 'edit'].includes(block.name)) continue;
+      const path = block.arguments?.path ?? block.arguments?.file_path;
+      if (!path) continue;
+      const status = t.tools[block.id]?.status;
+      if (status === 'error') continue;
+      seen.delete(path);
+      seen.set(path, { path, tool: block.name });
+    }
+  }
+  return [...seen.values()].reverse();
+}
+
+export function toolSummary(calls) {
+  const counts = {};
+  for (const call of calls) counts[call.name] = (counts[call.name] ?? 0) + 1;
+  const parts = [];
+  const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  if (counts.bash) parts.push(`Ran ${plural(counts.bash, 'command', 'commands')}`);
+  const edited = (counts.edit ?? 0) + (counts.write ?? 0);
+  if (edited) parts.push(`${parts.length ? 'edited' : 'Edited'} ${plural(edited, 'file', 'files')}`);
+  if (counts.read) parts.push(`${parts.length ? 'read' : 'Read'} ${plural(counts.read, 'file', 'files')}`);
+  const searched = (counts.grep ?? 0) + (counts.find ?? 0) + (counts.ls ?? 0);
+  if (searched) parts.push(`${parts.length ? 'searched' : 'Searched'} ${plural(searched, 'time', 'times')}`);
+  const other = calls.length - (counts.bash ?? 0) - edited - (counts.read ?? 0) - searched;
+  if (other) parts.push(`${parts.length ? 'used' : 'Used'} ${plural(other, 'tool', 'tools')}`);
+  return parts.join(', ');
+}

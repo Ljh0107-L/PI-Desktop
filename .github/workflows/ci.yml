@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          node node_modules/electron/install.js
+
+      - name: Build renderer
+        run: npx vite build
+
+      # A throwaway unprivileged sshd on 127.0.0.1 (host alias "pidesk-test") stands in for a remote machine.
+      - name: Start test SSH server
+        run: |
+          sh m0/test-sshd.sh > /tmp/pidesk-sshd.log 2>&1 &
+          for i in $(seq 1 50); do [ -f /tmp/pidesk-sshd/ssh_config ] && ssh -F /tmp/pidesk-sshd/ssh_config pidesk-test true && break; sleep 0.2; done
+          ssh -F /tmp/pidesk-sshd/ssh_config pidesk-test 'echo "ssh ok: $(hostname) node $(node -v)"'
+          mkdir -p /tmp/pidesk-e2e
+          { cat /tmp/pidesk-sshd/ssh_config; printf '\nMatch all\n  BatchMode yes\n'; } > /tmp/pidesk-e2e/ssh_config
+
+      - name: Pi RPC protocol (m0)
+        run: node m0/verify.mjs --ssh-host pidesk-test --ssh-config /tmp/pidesk-sshd/ssh_config
+
+      - name: Relay (sessions survive disconnects)
+        run: node test/relay.mjs --ssh-config /tmp/pidesk-sshd/ssh_config
+
+      - name: End-to-end UI (Electron + Playwright)
+        run: node test/e2e.mjs --ssh-config /tmp/pidesk-e2e/ssh_config
+
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-screenshots
+          path: /tmp/pidesk-e2e/shots
+          if-no-files-found: ignore
+
+      - name: Logs on failure
+        if: failure()
+        run: |
+          tail -50 /tmp/pidesk-sshd.log || true
+          tail -50 ~/.pidesk/run/relay.log || true

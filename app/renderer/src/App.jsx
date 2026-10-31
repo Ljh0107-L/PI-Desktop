@@ -1,0 +1,139 @@
+import { useEffect, useRef, useState } from 'react';
+import { Icon } from './Icons.jsx';
+import { Sidebar, SessionMenuItems } from './Sidebar.jsx';
+import { Composer, ComposerBar } from './Composer.jsx';
+import { Transcript } from './Conversation.jsx';
+import { RightPanel } from './RightPanel.jsx';
+import { SettingsPage } from './Settings.jsx';
+import { FilePane } from './FilePane.jsx';
+import { Palette } from './Palette.jsx';
+import { MenuItem, Popover, Spinner } from './ui.jsx';
+import { emptyTranscript } from './transcript.js';
+import { api, bootstrap, getState, newSession, notify, openFile, openPalette, openSettings, sendPrompt, setDraft, setFilePaneOpen, startSession, toggleRightPanel, toggleSidebar, useStore } from './store.js';
+
+function NewSessionView() {
+  const draft = useStore(s => s.draft);
+  // Start a Pi in the chosen place ahead of time, so the first message doesn't wait for it.
+  useEffect(() => {
+    if (!draft.cwd || !draft.model) return;
+    const t = setTimeout(() => api('prewarm', { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel }).catch(() => {}), 400);
+    return () => clearTimeout(t);
+  }, [draft.environmentId, draft.cwd, draft.model?.provider, draft.model?.id]);
+  return (
+    <div className="new-session">
+      <div className="new-session-center" />
+      <div className="dock">
+        <Composer autoFocus placeholder="What should Pi work on?" onSubmit={startSession} />
+        <ComposerBar />
+      </div>
+    </div>
+  );
+}
+
+function ConnectionBanner({ session }) {
+  if (session.status === 'reconnecting') {
+    return <div className="conn-banner"><Spinner size={13} /> <span className="conn-text">Reconnecting to <b>{session.environmentLabel}</b>… Pi keeps working on the server.</span></div>;
+  }
+  if (session.status === 'disconnected' || session.status === 'error') {
+    return <div className="conn-banner error"><Icon name="unplug" size={15} /> <span className="conn-text">{session.statusMessage || 'Disconnected from this session.'}</span>
+      <button className="button small" onClick={() => api('reconnect', session.id).catch(e => notify(e.message, 'error'))}>Reconnect</button></div>;
+  }
+  return null;
+}
+
+function SessionView({ session }) {
+  const transcript = useStore(s => s.transcripts[session.id]) ?? emptyTranscript();
+  const questions = useStore(s => s.questions[session.id]) ?? [];
+  const rightPanel = useStore(s => s.rightPanel);
+  const filePaneOpen = useStore(s => s.filePaneOpen);
+  const filePaneMax = useStore(s => s.filePaneMax) && filePaneOpen;
+  // Relative links in replies (e.g. "authoring/plan.md") open in the file preview.
+  useEffect(() => {
+    const onOpen = e => openFile(session.id, e.detail);
+    window.addEventListener('pidesk:open-file', onOpen);
+    return () => window.removeEventListener('pidesk:open-file', onOpen);
+  }, [session.id]);
+  return (
+    <div className={`session-view ${filePaneMax ? 'files-max' : ''}`}>
+      <div className="session-main">
+        <Transcript session={session} transcript={transcript} questions={questions} />
+        <div className="dock">
+          <ConnectionBanner session={session} />
+          <Composer session={session} autoFocus placeholder={questions.length ? 'Answer Pi’s question…' : session.streaming ? 'Queue a follow-up…' : 'Reply to Pi…'} onSubmit={text => sendPrompt(session.id, text)} />
+          <ComposerBar session={session} />
+        </div>
+      </div>
+      {filePaneOpen ? <FilePane session={session} /> : rightPanel && <RightPanel session={session} />}
+    </div>
+  );
+}
+
+function Header({ session, view }) {
+  const rightPanel = useStore(s => s.rightPanel);
+  const filePaneOpen = useStore(s => s.filePaneOpen);
+  const sidebar = useStore(s => s.sidebar);
+  const anchor = useRef(null);
+  const [menu, setMenu] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [title, setTitle] = useState('');
+  const local = session?.environmentId === 'local';
+  return (
+    <header className={`main-head drag ${sidebar ? '' : 'no-sidebar'}`}>
+      {!sidebar && <div className="window-tools no-drag"><button className="tool-button" onClick={toggleSidebar} aria-label="Show sidebar"><Icon name="sidebarToggle" size={19} /></button></div>}
+      {view === 'session' && session && session.id !== 'pending' ? <>
+        {renaming
+          ? <input className="title-input no-drag" autoFocus value={title} onChange={e => setTitle(e.target.value)} onBlur={() => { setRenaming(false); if (title.trim()) api('rename', session.id, title.trim()); }} onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); if (e.key === 'Escape') setRenaming(false); }} />
+          : <button ref={anchor} className="title-button no-drag" onClick={() => setMenu(m => !m)}>{session.title}<Icon name="chevronDown" size={16} /></button>}
+        <Popover anchor={anchor} open={menu} onClose={() => setMenu(false)} width={220} placement="bottom-start">
+          <SessionMenuItems session={session} close={() => setMenu(false)} onRename={() => { setTitle(session.title); setRenaming(true); }} />
+        </Popover>
+        <div className="main-tools no-drag">
+          <button className={`tool-button ${filePaneOpen ? 'on' : ''}`} onClick={() => setFilePaneOpen(!filePaneOpen)} aria-label="Files" title="Files"><Icon name="folder" size={18} /></button>
+          <button className={`tool-button ${rightPanel && !filePaneOpen ? 'on' : ''}`} onClick={() => { if (filePaneOpen) { setFilePaneOpen(false); if (!rightPanel) toggleRightPanel(); } else toggleRightPanel(); }} aria-label="Session details" title="Session details"><Icon name="panel" size={18} /></button>
+        </div>
+      </> : null}
+    </header>
+  );
+}
+
+export function App() {
+  const ready = useStore(s => s.ready);
+  const view = useStore(s => s.view);
+  const activeId = useStore(s => s.activeId);
+  const sessions = useStore(s => s.sessions);
+  const settingsOpen = useStore(s => s.settingsOpen);
+  const paletteOpen = useStore(s => s.paletteOpen);
+  const notices = useStore(s => s.notices);
+  const sidebar = useStore(s => s.sidebar);
+  const pendingTranscript = useStore(s => s.transcripts.pending);
+  useEffect(() => { bootstrap().catch(e => notify(e.message, 'error')); }, []);
+  useEffect(() => {
+    const onKey = e => {
+      if (e.metaKey && e.key.toLowerCase() === 'k') { e.preventDefault(); openPalette(!getState().paletteOpen); }
+      else if (e.metaKey && e.key.toLowerCase() === 'n') { e.preventDefault(); newSession(); }
+      else if (e.metaKey && e.key === '\\') { e.preventDefault(); toggleSidebar(); }
+      else if (e.metaKey && e.key === ',') { e.preventDefault(); openSettings(!getState().settingsOpen); }
+      else if (e.key === 'Escape' && getState().settingsOpen && !document.querySelector('.modal')) openSettings(false);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+  if (!ready) return <div className="app loading" />;
+  const pending = activeId === 'pending';
+  const session = sessions.find(s => s.id === activeId) ?? (pending ? { id: 'pending', title: 'New session', status: 'connecting', environmentId: 'local', cwd: '', streaming: true } : null);
+  const toasts = <div className="toasts">{notices.map(n => <div key={n.id} className={`toast ${n.level}`}><Icon name={n.level === 'error' ? 'alert' : 'check'} size={15} /> {n.message}</div>)}</div>;
+  if (settingsOpen) return <div className="app"><SettingsPage />{toasts}</div>;
+  return (
+    <div className="app">
+      {sidebar && <Sidebar />}
+      <main className="main">
+        <Header session={session} view={view} />
+        {view === 'session' && session ? (pending
+          ? <div className="session-view"><div className="session-main"><Transcript session={session} transcript={pendingTranscript ?? emptyTranscript()} questions={[]} /></div></div>
+          : <SessionView key={session.id} session={session} />) : <NewSessionView />}
+      </main>
+      {paletteOpen && <Palette />}
+      {toasts}
+    </div>
+  );
+}

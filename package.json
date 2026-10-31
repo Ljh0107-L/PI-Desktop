@@ -1,0 +1,32 @@
+{
+  "name": "pi-desktop",
+  "version": "1.0.0",
+  "description": "Claude Desktop-style multi-host GUI for the Pi agent harness",
+  "scripts": {
+    "verify:m0": "node m0/verify.mjs",
+    "test-sshd": "sh m0/test-sshd.sh",
+    "build": "vite build",
+    "start": "vite build && electron .",
+    "dev": "vite",
+    "test:e2e": "vite build && node test/e2e.mjs"
+  },
+  "license": "ISC",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "@earendil-works/pi-coding-agent": "^1.4.0",
+    "dompurify": "^3.4.17",
+    "highlight.js": "^11.12.0",
+    "lucide-react": "^1.66.0",
+    "marked": "^15.0.12",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.1.2",
+    "electron": "^45.2.1",
+    "playwright-core": "^1.64.1",
+    "vite": "^8.3.5"
+  },
+  "main": "app/main/main.mjs"
+}
