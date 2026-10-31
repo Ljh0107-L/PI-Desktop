@@ -357,6 +357,8 @@ try {
   await page.locator('.tool-group-head .spinner').first().waitFor({ timeout: 15000 });
 } catch (error) {
   check('unexpected error', false, error.message.split('\n')[0]);
+  console.log('notices:', JSON.stringify(await page.evaluate(() => window.__pideskNoticeLog ?? []).catch(() => [])));
+  console.log('composer:', JSON.stringify(await composer().inputValue().catch(() => '')));
   await S('zz-failure').catch(() => {});
 }
 

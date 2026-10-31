@@ -65,6 +65,7 @@ const setTranscript = (id, t) => set(s => ({ transcripts: { ...s.transcripts, [i
 
 export function notify(message, level = 'info') {
   // The same message twice in a row just refreshes the existing toast.
+  (window.__pideskNoticeLog ??= []).push(`${level}: ${message}`);
   if (state.notices.some(n => n.message === message)) return;
   const notice = { id: Math.random().toString(36).slice(2), message, level };
   set(s => ({ notices: [...s.notices, notice].slice(-3) }));
