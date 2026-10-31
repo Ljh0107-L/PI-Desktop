@@ -3,5 +3,4 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Later versions install themselves: an **Update** button appears next to Settings.
 
 **In this release**
-- No folder needed: new conversations start in a default workspace (`~/Pi` on this Mac, `~/pi` on an SSH host); pick a folder only when you want one.
-- Editing a message rewinds in place, without the conversation flashing.
+- The Update button shows download progress, then turns into “Update” when the new version is ready.
