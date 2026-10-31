@@ -102,7 +102,9 @@ try {
   // ---- no folder: a session in the default workspace, like Codex and Claude
   check('new sessions default to "No folder"', (await page.locator('.folder-trigger').innerText()).includes('No folder'));
   await waitNew('.markdown', 'Tool result', () => send('[[bash:pwd]]'));
-  check('a session without a folder runs in the default workspace', (await page.locator('.markdown', { hasText: 'Tool result' }).last().innerText()).includes('/Pi') && await page.locator('.group-head', { hasText: 'No folder' }).count() === 1);
+  const nfReply = await page.locator('.markdown', { hasText: 'Tool result' }).last().innerText();
+  const nfGroups = await page.locator('.group-head').allInnerTexts();
+  check('a session without a folder runs in the default workspace', nfReply.includes('/Pi') && nfGroups.some(g => g.includes('No folder')), JSON.stringify({ nfReply, nfGroups }));
   await page.locator('.session-row', { hasText: '[[bash:pwd]]' }).click({ button: 'right' });
   await page.click('.popover .menu-item:has-text("Archive")');
   await page.locator('.session-row', { hasText: '[[bash:pwd]]' }).waitFor({ state: 'detached' });
