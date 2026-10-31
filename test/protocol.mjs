@@ -31,7 +31,7 @@ function check(name, ok, detail = '') {
 }
 
 // ---------------------------------------------------------------------------- fixtures
-const mock = await startMockLlm();
+const mock = await startMockLlm({ chunkDelay: 60 }); // slow enough that the two streams overlap on a loaded runner
 const keys = { alpha: 'sk-alpha-' + randomBytes(12).toString('hex'), beta: 'sk-beta-' + randomBytes(12).toString('hex') };
 const providers = [
   { id: 'mock-alpha', name: 'Mock Alpha', api: 'openai-completions', baseUrl: mock.baseUrl('mock-alpha'), apiKey: keys.alpha, models: [{ id: 'alpha-1' }, { id: 'alpha-2' }] },

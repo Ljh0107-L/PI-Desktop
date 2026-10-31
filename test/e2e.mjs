@@ -216,10 +216,10 @@ try {
   }, PNG);
   await page.locator('.attachment.image img').waitFor();
   await S('05d-attachments');
-  await waitNew('.markdown', '[images:1]', () => send('look at these'));
-  const attachReply = await page.locator('.markdown', { hasText: '[images:1]' }).last().innerText();
+  await waitNew('.markdown', 'attach-notes.txt', () => send('look at these'));
+  const attachReply = await page.locator('.markdown', { hasText: 'attach-notes.txt' }).last().innerText();
   const shownImages = await page.locator('.user-images img').count(), shownFiles = await page.locator('.user-files .attachment', { hasText: 'attach-notes.txt' }).count();
-  check('attachments: image reaches the model, file path is attached', attachReply.includes(attachFile) && shownImages >= 1 && shownFiles >= 1, JSON.stringify({ path: attachReply.includes(attachFile), shownImages, shownFiles }));
+  check('attachments: image reaches the model, file path is attached', attachReply.includes('[images:1]') && attachReply.includes(attachFile) && shownImages >= 1 && shownFiles >= 1, JSON.stringify({ path: attachReply.includes(attachFile), shownImages, shownFiles }));
 
   // ---- /goal: Pi keeps going until the model marks the goal complete
   await send('/goal finish the demo [[goal-turns:2]]');

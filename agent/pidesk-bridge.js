@@ -31,6 +31,7 @@ function modelDefaults(model) {
   };
 }
 
+const BOOT = Symbol.for('pidesk.boot');
 const text = value => ({ content: [{ type: 'text', text: value }], details: {} });
 
 const MAX_GOAL_TURNS = 200;
@@ -58,12 +59,14 @@ ${goal.objective}
 Work autonomously; you will be prompted to continue after each turn while the goal stays active. When the objective is achieved and verified against current evidence, call update_goal with status "complete".`;
 
 export default function pideskBridge(pi) {
+  // Pi re-runs extension factories when it replaces the session (fork, clone, switch), after the boot
+  // record has already been removed from the environment, so it is kept for this process here.
   const raw = process.env.PIDESK_BOOT;
   delete process.env.PIDESK_BOOT;
-  let boot = {};
   if (raw) {
-    try { boot = JSON.parse(raw); } catch { process.stderr.write('pidesk: ignoring malformed boot record\n'); }
+    try { globalThis[BOOT] = JSON.parse(raw); } catch { process.stderr.write('pidesk: ignoring malformed boot record\n'); }
   }
+  const boot = globalThis[BOOT] ?? {};
 
   const register = providers => {
     for (const provider of providers ?? []) {
@@ -82,7 +85,11 @@ export default function pideskBridge(pi) {
   pi.registerCommand?.('pidesk-providers', {
     description: 'Pi Desktop: update providers',
     handler: async args => {
-      try { register(JSON.parse(Buffer.from(String(args ?? '').trim(), 'base64').toString('utf8'))); }
+      try {
+        const providers = JSON.parse(Buffer.from(String(args ?? '').trim(), 'base64').toString('utf8'));
+        register(providers);
+        globalThis[BOOT] = { ...(globalThis[BOOT] ?? {}), providers };
+      }
       catch { process.stderr.write('pidesk: ignoring malformed provider update\n'); }
     },
   });
