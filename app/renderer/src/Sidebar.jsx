@@ -99,6 +99,10 @@ export function Sidebar() {
       </div>
       <div className="sidebar-foot">
         <button className="nav-item settings-button" onClick={() => openSettings(true)} title="Settings (⌘,)"><Icon name="settings" size={17} /> Settings</button>
+        {update?.state === 'downloading' && <div className="update-button downloading" role="progressbar" aria-valuenow={Math.round((update.progress ?? 0) * 100)} title={`Downloading ${update.version}`}>
+          <span className="update-fill" style={{ width: `${Math.max(4, Math.round((update.progress ?? 0) * 100))}%` }} />
+          <span className="update-label">{Math.round((update.progress ?? 0) * 100)}%</span>
+        </div>}
         {update?.state === 'ready' && <button className="update-button" onClick={() => api('installUpdate')} title={`Restart to update to ${update.version}`}><Icon name="download" size={14} /> Update</button>}
       </div>
     </aside>

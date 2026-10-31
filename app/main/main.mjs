@@ -164,6 +164,8 @@ const api = {
   goal: id => manager.goal(id),
   // Updates
   updateStatus: () => updater?.status ?? { state: 'idle' },
+  // test builds only: show an update state without a real release
+  testUpdateStatus: status => { if (process.env.PIDESK_INSECURE_TEST_STORAGE === '1') send('update', status); },
   checkForUpdates: () => updater?.check({ manual: true }),
   installUpdate: () => updater?.install(),
   appVersion: () => app.getVersion(),

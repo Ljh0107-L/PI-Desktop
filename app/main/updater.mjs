@@ -4,7 +4,7 @@
 // place after the app quits, then relaunches it.
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { accessSync, constants, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
@@ -28,6 +28,8 @@ export class Updater {
 
   start() {
     if (!this.app.isPackaged || process.platform !== 'darwin') return;
+    // Downloads of versions already installed (or older) are no longer needed.
+    try { for (const v of readdirSync(this.cacheDir)) if (!newer(v, this.app.getVersion())) rmSync(join(this.cacheDir, v), { recursive: true, force: true }); } catch { /* none yet */ }
     const check = () => this.check().catch(() => {});
     setTimeout(check, 15000);
     this.#timer = setInterval(check, CHECK_EVERY_MS);
@@ -71,7 +73,7 @@ export class Updater {
     for await (const chunk of res.body) {
       chunks.push(chunk); received += chunk.length;
       const progress = total ? received / total : 0;
-      if (progress - last > 0.02) { last = progress; this.#set({ state: 'downloading', version, progress }); }
+      if (progress - last > 0.01) { last = progress; this.#set({ state: 'downloading', version, progress }); }
     }
     const data = Buffer.concat(chunks);
     if (createHash('sha512').update(data).digest('base64') !== sha512) throw new Error('The download did not match its checksum');

@@ -55,6 +55,16 @@ try {
   await page.waitForTimeout(400);
   await S('01-welcome');
 
+  // ---- update button: progress while downloading, then "Update"
+  await page.evaluate(() => window.pidesk.invoke('testUpdateStatus', { state: 'downloading', version: '9.9.9', progress: 0.42 }));
+  await page.locator('.update-button.downloading', { hasText: '42%' }).waitFor({ timeout: 5000 });
+  await S('01b-update-downloading');
+  await page.evaluate(() => window.pidesk.invoke('testUpdateStatus', { state: 'ready', version: '9.9.9' }));
+  await page.locator('button.update-button', { hasText: 'Update' }).waitFor({ timeout: 5000 });
+  await S('01c-update-ready');
+  check('update button shows download progress, then "Update"', true);
+  await page.evaluate(() => window.pidesk.invoke('testUpdateStatus', { state: 'idle' }));
+
   // ---- add a provider through Settings
   await page.click('.settings-button');
   await page.click('.add-button:has-text("Add provider")');

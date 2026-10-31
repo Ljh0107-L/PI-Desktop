@@ -129,6 +129,7 @@ window.pidesk.subscribe(({ channel, payload }) => {
 });
 
 export async function bootstrap() {
+  api('updateStatus').then(update => set({ update })).catch(() => {});
   const boot = await api('bootstrap');
   const d = boot.settings.defaults;
   set({
