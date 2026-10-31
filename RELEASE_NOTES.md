@@ -4,3 +4,4 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **In this release**
 - No folder needed: new conversations start in a default workspace (`~/Pi` on this Mac, `~/pi` on an SSH host); pick a folder only when you want one.
+- Editing a message rewinds in place, without the conversation flashing.
