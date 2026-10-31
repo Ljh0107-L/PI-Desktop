@@ -272,13 +272,14 @@ try {
   await page.click('button:has-text("Use this folder")');
   await page.locator('.trigger', { hasText: 'api-server' }).waitFor();
   // a Pi is pre-warmed on the host meanwhile
-  for (let i = 0; i < 60 && !(await page.evaluate(() => window.pidesk.invoke('warmSessions'))); i++) await page.waitForTimeout(250);
+  let warm = 0;
+  for (let i = 0; i < 60 && !(warm = await page.evaluate(() => window.pidesk.invoke('warmSessions'))); i++) await page.waitForTimeout(250);
   await send('hello from the server ' + 'with a longer message so streaming takes a moment '.repeat(4));
   // While the remote session streams, switch to the local one and work there too.
   await page.locator('.session-row', { hasText: 'after switching' }).first().waitFor({ timeout: 1000 }).catch(() => {});
   const sentAt = Date.now();
   await waitText('.markdown', 'echo: hello from the server', 120000);
-  check('first message on a pre-warmed SSH host starts without waiting for Pi', Date.now() - sentAt < 2500, `${Date.now() - sentAt} ms to first reply`);
+  check('first message on a pre-warmed SSH host starts without waiting for Pi', Date.now() - sentAt < 2500, `${Date.now() - sentAt} ms to first reply; warm sessions before sending: ${warm}`);
   check('remote session streamed a reply over SSH', true);
   check('sidebar groups by project and machine', await page.locator('.group-head', { hasText: 'api-server' }).locator('text=pidesk-test').count() === 1);
 
