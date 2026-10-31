@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { Markdown, Spinner } from './ui.jsx';
-import { displayBlocks, formatTokens, toolSummary } from './transcript.js';
+import { changesOf, displayBlocks, formatTokens, toolSummary } from './transcript.js';
 import { api, editMessage, notify, openChanges, useStore } from './store.js';
 import { changeStats, hunkLines } from './diffs.js';
 import { Composer } from './Composer.jsx';
@@ -15,7 +15,7 @@ function describeCall(call) {
   const a = call.arguments ?? {};
   const path = a.path ?? a.file_path ?? '';
   switch (call.name) {
-    case 'bash': return { icon: 'console', subject: a.command ?? '', mono: true };
+    case 'bash': return { subject: a.command ?? '', mono: true };
     case 'read': return { icon: 'fileText', verb: 'Read', subject: baseOf(path), detail: dirOf(path) };
     case 'write': return { icon: 'fileEdit', verb: 'Wrote', subject: baseOf(path), detail: dirOf(path) };
     case 'edit': return { icon: 'fileEdit', verb: 'Edited', subject: baseOf(path), detail: dirOf(path) };
@@ -41,38 +41,46 @@ function EditDiff({ hunks }) {
   );
 }
 
+// Inline disclosure triangle, right after a row's text (as in Claude).
+const Caret = ({ open }) => <Icon name={open ? 'caretDown' : 'caretRight'} size={14} className="step-caret" />;
+const outputText = text => text.length > 8000 ? text.slice(0, 8000) + '\n…' : text;
+
 function ToolCall({ call, tool }) {
   const [open, setOpen] = useState(false);
-  const { icon, verb, subject, detail, mono } = describeCall(call);
+  const { verb, subject, detail, mono } = describeCall(call);
   const status = tool?.status ?? 'pending';
   const output = textOf(tool?.result);
   const filePath = ['read', 'edit', 'write'].includes(call.name) && status !== 'error' ? (call.arguments?.path ?? call.arguments?.file_path) : null;
   const hunks = call.name === 'edit' ? editHunks(call.arguments) : call.name === 'write' ? [{ oldText: null, newText: String(call.arguments?.content ?? '') }] : [];
   const stats = hunks.length && status !== 'error' ? changeStats({ hunks }) : null;
   return (
-    <div className={`tool-call ${status} ${open ? 'open' : ''}`}>
-      <button className="tool-call-head" onClick={() => setOpen(o => !o)}>
-        <span className="tool-status">{status === 'running' ? <Spinner size={12} /> : <Icon name={icon} size={15} />}</span>
-        {verb && <span className="tool-verb">{verb}</span>}
-        <span className={`tool-subject ${mono ? 'mono' : ''}`}>{subject}{detail && <span className="tool-dir">{detail}</span>}</span>
-        {stats && <span className="tool-stats"><span className="plus">+{stats.added}</span><span className="minus">−{stats.removed}</span></span>}
-        {status === 'error' && <span className="tool-failed">Failed</span>}
-        {filePath && <span role="button" tabIndex={0} className="tool-open" title="Open file" onClick={e => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: filePath })); }}><Icon name="externalLink" size={13} /></span>}
-        <Icon name="chevronRight" size={14} className="tool-caret" />
-      </button>
+    <div className={`step tool-call ${status} ${open ? 'open' : ''}`}>
+      <div className="step-head tool-call-head" role="button" tabIndex={0} onClick={() => setOpen(o => !o)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
+        {status === 'running' && <Spinner size={12} />}
+        <span className="step-text">
+          {verb && <span className="step-verb">{verb}</span>}
+          <span className={`step-subject ${mono ? 'mono' : ''}`} title={filePath ?? undefined}
+            onDoubleClick={filePath ? e => { e.stopPropagation(); window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: filePath })); } : undefined}>{subject}</span>
+          {detail && <span className="step-dir">{detail}</span>}
+        </span>
+        {stats && <span className="step-stats">{stats.added > 0 && <span className="plus">+{stats.added}</span>}{stats.removed > 0 && <span className="minus">−{stats.removed}</span>}</span>}
+        {status === 'error' && <span className="step-failed">Failed</span>}
+        <Caret open={open} />
+      </div>
       {open && (
-        <div className="tool-detail">
+        <div className="step-detail tool-detail">
           {call.name === 'bash'
             ? <div className={`tool-console ${status === 'error' ? 'error' : ''}`}>
                 <pre className="tool-command"><span className="prompt">$</span> {call.arguments?.command}</pre>
-                {output && <pre className="tool-output">{output.length > 8000 ? output.slice(0, 8000) + '\n…' : output}</pre>}
+                {output && <pre className="tool-output">{outputText(output)}</pre>}
                 {!output && status === 'running' && <div className="tool-running">Running…</div>}
               </div>
             : <>
                 {hunks.length > 0 && <EditDiff hunks={hunks} />}
-                {output && call.name !== 'write' && (call.name !== 'edit' || status === 'error') && <pre className={`tool-output boxed ${status === 'error' ? 'error' : ''}`}>{output.length > 8000 ? output.slice(0, 8000) + '\n…' : output}</pre>}
+                {output && call.name !== 'write' && (call.name !== 'edit' || status === 'error') && <pre className={`tool-output boxed ${status === 'error' ? 'error' : ''}`}>{outputText(output)}</pre>}
                 {!output && status === 'running' && <div className="tool-running">Running…</div>}
               </>}
+          {filePath && <button className="step-open" onClick={() => window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: filePath }))}>Open {baseOf(filePath)}</button>}
         </div>
       )}
     </div>
@@ -89,51 +97,53 @@ function ToolGroup({ calls, tools, live }) {
         {running && <Spinner size={12} />}
         <span>{toolSummary(calls)}</span>
         {failed > 0 && <span className="tool-failed">{failed} failed</span>}
-        <Icon name="chevronRight" size={14} className={`rot-caret ${open ? 'down' : ''}`} />
+        <Icon name={open ? 'caretDown' : 'caretRight'} size={14} />
       </button>
       {open && <div className="tool-group-body">{calls.map(call => <ToolCall key={call.id} call={call} tool={tools[call.id]} />)}</div>}
     </div>
   );
 }
 
-// One line of a reply's folded work: a note Pi wrote between steps, or its reasoning.
+// One reasoning step inside a folded group: its first line, opening to the full text.
 const firstLine = text => String(text ?? '').split('\n').map(l => l.replace(/[*_`#>]/g, '').trim()).find(Boolean) ?? '';
+const thoughtLabel = ms => ms > 800 ? `Thought for ${seconds(ms)}` : 'Thought';
 function WorkNote({ item }) {
   const [open, setOpen] = useState(false);
-  const thinking = item.kind === 'thinking';
-  if (thinking && (item.hidden || item.redacted || !item.text)) {
-    return <div className="work-note static"><span className="tool-status"><Icon name="brain" size={15} /></span><span className="work-note-line">{item.durationMs > 800 ? `Thought for ${seconds(item.durationMs)}` : 'Thought'}</span></div>;
-  }
+  if (item.hidden || item.redacted || !item.text) return <div className="step static"><div className="step-head"><span className="step-text">{thoughtLabel(item.durationMs)}</span></div></div>;
   return (
-    <div className={`work-note ${thinking ? 'thought' : ''} ${open ? 'open' : ''}`}>
-      <button className="work-note-head" onClick={() => setOpen(o => !o)}>
-        <span className="tool-status">{item.streaming ? <Spinner size={12} /> : <Icon name={thinking ? 'brain' : 'chat'} size={15} />}</span>
-        <span className="work-note-line">{open ? (thinking ? (item.durationMs > 800 ? `Thought for ${seconds(item.durationMs)}` : 'Thought') : 'Note') : firstLine(item.text) || 'Thought'}</span>
-        <Icon name="chevronRight" size={14} className="tool-caret" />
-      </button>
-      {open && <div className="work-note-body"><Markdown text={item.text} /></div>}
+    <div className={`step thought ${open ? 'open' : ''}`}>
+      <div className="step-head" role="button" tabIndex={0} onClick={() => setOpen(o => !o)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
+        {item.streaming && <Spinner size={12} />}
+        <span className="step-text">{open ? thoughtLabel(item.durationMs) : firstLine(item.text) || 'Thought'}</span>
+        <Caret open={open} />
+      </div>
+      {open && <div className="step-detail step-markdown"><Markdown text={item.text} /></div>}
     </div>
   );
 }
 
-// Everything a reply did before its answer, folded into one line ("Ran 2 commands, read 1 file").
+// Consecutive steps folded into one line ("Ran 2 commands, edited plan.md (1 failed) +12"), opening to a card
+// with one row per step.
 function WorkGroup({ items, tools, live }) {
   const [open, setOpen] = useState(false);
   const calls = items.flatMap(i => i.kind === 'tools' ? i.calls : []);
   const running = items.some(i => i.streaming) || calls.some(c => tools[c.id]?.status === 'running' || (!tools[c.id] && live));
   const failed = calls.filter(c => tools[c.id]?.status === 'error').length;
   const thinkMs = items.reduce((n, i) => n + (i.kind === 'thinking' ? i.durationMs ?? 0 : 0), 0);
-  const summary = toolSummary(calls) || (running ? '' : thinkMs > 800 ? `Thought for ${seconds(thinkMs)}` : 'Thought');
+  const edits = changesOf([{ role: 'assistant', content: calls }], tools).map(changeStats).reduce((t, c) => ({ added: t.added + c.added, removed: t.removed + c.removed }), { added: 0, removed: 0 });
+  const summary = toolSummary(calls) || (running ? '' : thoughtLabel(thinkMs));
   const latest = items.at(-1);
   const thinkingNow = running && latest?.kind === 'thinking' && latest.streaming;
   return (
     <div className={`tool-group work ${open ? 'open' : ''}`}>
-      <button className="tool-group-head" onClick={() => setOpen(o => !o)}>
-        {running && !thinkingNow && <Spinner size={12} />}
-        {thinkingNow ? <span className="shimmer thinking-latest">{firstLine(latest.text) || 'Thinking'}</span> : <span>{summary || 'Working'}</span>}
-        {failed > 0 && <span className="tool-failed">{failed} failed</span>}
-        <Icon name="chevronRight" size={14} className={`rot-caret ${open ? 'down' : ''}`} />
-      </button>
+      <div className="tool-group-head" role="button" tabIndex={0} onClick={() => setOpen(o => !o)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
+        {running && <Spinner size={12} />}
+        <span className={`group-summary ${thinkingNow ? 'shimmer' : ''}`}>{thinkingNow ? firstLine(latest.text) || 'Thinking' : summary || 'Working'}</span>
+        {failed > 0 && <span className="group-failed">({failed} failed)</span>}
+        {edits.added > 0 && <span className="plus">+{edits.added}</span>}
+        {edits.removed > 0 && <span className="minus">−{edits.removed}</span>}
+        <Caret open={open} />
+      </div>
       {open && <div className="work-body">
         {items.flatMap(item => item.kind === 'tools'
           ? item.calls.map(call => <ToolCall key={call.id} call={call} tool={tools[call.id]} />)
@@ -158,7 +168,7 @@ function Thinking({ text, streaming, redacted, hidden, durationMs }) {
     <div className="thinking">
       <button className="tool-group-head" onClick={() => setOpen(o => !o)}>
         {streaming ? <span className="shimmer thinking-latest">{latest || 'Thinking'}</span> : <span>{label}</span>}
-        <Icon name="chevronRight" size={14} className={`rot-caret ${open ? 'down' : ''}`} />
+        <Icon name={open ? 'caretDown' : 'caretRight'} size={14} />
       </button>
       {open && <div className="thinking-body"><Markdown text={text} /></div>}
     </div>
@@ -276,7 +286,7 @@ function CompactionMarker({ summary, tokensBefore }) {
     <div className="compaction">
       <button className="compaction-line" onClick={() => setOpen(o => !o)}>
         <span className="compaction-rule" />
-        <span className="compaction-label"><Icon name="compact" size={14} /> Conversation compacted{tokensBefore ? ` · ${formatTokens(tokensBefore)} → summary` : ''}<Icon name="chevronRight" size={13} className={`rot-caret ${open ? 'down' : ''}`} /></span>
+        <span className="compaction-label"><Icon name="compact" size={14} /> Conversation compacted{tokensBefore ? ` · ${formatTokens(tokensBefore)} → summary` : ''}<Icon name={open ? 'caretDown' : 'caretRight'} size={13} /></span>
         <span className="compaction-rule" />
       </button>
       {open && <div className="compaction-body"><Markdown text={summary ?? ''} /></div>}

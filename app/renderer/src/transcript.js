@@ -209,22 +209,19 @@ export function displayBlocks(t) {
   return collapseWork(blocks);
 }
 
-// Claude-style: within a reply, everything before its closing text (reasoning, commands, the notes Pi
-// wrote between them) folds into one expandable line. A reply that only thought keeps its plain
-// "Thought" row; the closing text always stays visible.
-const WORK = new Set(['text', 'thinking', 'tools']);
+// Claude-style: consecutive steps (reasoning and tool calls) fold into one expandable line. Text Pi writes
+// to you is never folded: it stays in the conversation between the groups. A lone reasoning block keeps
+// its plain "Thought" row.
+const STEP = new Set(['thinking', 'tools']);
 export function collapseWork(blocks) {
   const out = [];
   for (let i = 0; i < blocks.length;) {
-    if (!WORK.has(blocks[i].kind)) { out.push(blocks[i++]); continue; }
+    if (!STEP.has(blocks[i].kind)) { out.push(blocks[i++]); continue; }
     let j = i;
-    while (j < blocks.length && WORK.has(blocks[j].kind)) j++;
+    while (j < blocks.length && STEP.has(blocks[j].kind)) j++;
     const run = blocks.slice(i, j);
-    const last = run.findLastIndex(b => b.kind !== 'text');
-    const work = run.slice(0, last + 1);
-    if (work.length > 1 || work[0]?.kind === 'tools') out.push({ kind: 'work', key: work[0].key, items: work });
-    else out.push(...work);
-    out.push(...run.slice(last + 1));
+    if (run.length > 1 || run[0].kind === 'tools') out.push({ kind: 'work', key: run[0].key, items: run });
+    else out.push(run[0]);
     i = j;
   }
   return out;
@@ -256,7 +253,9 @@ export function toolSummary(calls) {
   const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
   if (counts.bash) parts.push(`Ran ${plural(counts.bash, 'command', 'commands')}`);
   const edited = (counts.edit ?? 0) + (counts.write ?? 0);
-  if (edited) parts.push(`${parts.length ? 'edited' : 'Edited'} ${plural(edited, 'file', 'files')}`);
+  const editedPaths = [...new Set(calls.filter(c => c.name === 'edit' || c.name === 'write').map(c => c.arguments?.path ?? c.arguments?.file_path).filter(Boolean))];
+  const editedLabel = editedPaths.length === 1 ? editedPaths[0].split('/').pop() : plural(edited, 'file', 'files');
+  if (edited) parts.push(`${parts.length ? 'edited' : 'Edited'} ${editedLabel}`);
   if (counts.read) parts.push(`${parts.length ? 'read' : 'Read'} ${plural(counts.read, 'file', 'files')}`);
   const searched = (counts.grep ?? 0) + (counts.find ?? 0) + (counts.ls ?? 0);
   if (searched) parts.push(`${parts.length ? 'searched' : 'Searched'} ${plural(searched, 'time', 'times')}`);

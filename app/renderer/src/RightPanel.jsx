@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { baseName, envIcon, shortPath } from './ui.jsx';
-import { formatTokens, outputs, turnUsages, usageOf } from './transcript.js';
+import { formatTokens, outputs, usageOf } from './transcript.js';
 import { api, openFile, useStore } from './store.js';
 
 function Card({ title, children, open: initial = true, aside }) {
@@ -10,7 +10,7 @@ function Card({ title, children, open: initial = true, aside }) {
     <section className="panel-card">
       <button className="panel-card-head" onClick={() => setOpen(o => !o)} aria-expanded={open}>
         <span>{title}</span>
-        {children && <Icon name="chevronRight" size={13} className={`rot-caret ${open ? 'down' : ''}`} />}
+        {children && <Icon name={open ? 'caretDown' : 'caretRight'} size={13} className="muted" />}
         {aside && <span className="panel-card-aside">{aside}</span>}
       </button>
       {open && children && <div className="panel-card-body">{children}</div>}
@@ -20,14 +20,11 @@ function Card({ title, children, open: initial = true, aside }) {
 
 const fmtTps = v => v == null ? '—' : v >= 100 ? String(Math.round(v)) : v.toFixed(1);
 
-// Speed and token usage: the last turn's speed with a trend of recent turns, and input / cached /
-// output tokens for the last turn and the whole session.
-// Figures are per turn (your message → every model call that answered it) and change only when a turn
-// finishes: mid-turn, the previous turn's numbers stay up instead of jumping with each model call.
-function UsageCard({ transcript, streaming }) {
-  const all = turnUsages(transcript?.messages ?? []);
-  const lastMessage = transcript?.messages?.findLast(m => m.role === 'user' || m.role === 'assistant');
-  const turns = streaming && lastMessage?.role === 'assistant' ? all.slice(0, -1) : all;
+// Speed and token usage per turn, where a turn is one model call (one assistant message): the last turn's
+// speed with a trend of recent turns, and input / cached / output tokens for the last turn and the session.
+// Figures update as each turn finishes.
+function UsageCard({ transcript }) {
+  const turns = (transcript?.messages ?? []).filter(m => m.role === 'assistant' && m.usage).map(m => usageOf([m]));
   if (!turns.length) return null;
   const last = turns.at(-1);
   const total = usageOf(transcript.messages);
@@ -81,7 +78,7 @@ export function RightPanel({ session }) {
         <span className="muted">{stats?.contextUsage?.tokens != null ? `${formatTokens(stats.contextUsage.tokens)} / ${formatTokens(stats.contextUsage.contextWindow)}` : '—'}</span>
         <span className="meter" title={percent == null ? undefined : `${Math.round(percent)}% of the context window`}><span style={{ width: `${percent > 0 ? Math.max(6, Math.min(100, percent)) : 0}%` }} /></span>
       </>} />
-      <UsageCard transcript={transcript} streaming={!!session.streaming} />
+      <UsageCard transcript={transcript} />
       {files.length > 0 && <Card title="Outputs">
         {(showAll ? files : files.slice(0, 5)).map(f => (
           <button key={f.path} className="panel-row file" title={f.path} onClick={() => openFile(session.id, f.path)}>

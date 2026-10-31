@@ -248,7 +248,6 @@ code, pre, kbd { font-family: var(--mono); }
 .tool-failed { color: var(--red); font-size: 13px; }
 .tool-group-body { grid-template-columns: minmax(0, 1fr); margin: 4px 0 4px 2px; padding-left: 12px; border-left: 1.5px solid var(--border); display: grid; gap: 1px; }
 .tool-call-head { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 30px; text-align: left; font-size: 13.5px; color: var(--text-2); border-radius: 8px; padding: 3px 8px; transition: background .12s; }
-.tool-call-head:hover { background: rgba(255, 255, 255, .04); color: var(--text); }
 .tool-status { width: 16px; height: 16px; display: grid; place-items: center; flex-shrink: 0; color: var(--green); }
 .tool-call.error .tool-status { color: var(--red); }
 .tool-call.pending .tool-status { color: var(--faint); }
@@ -853,39 +852,32 @@ a[href], .markdown a { cursor: pointer; }
 .model-rank-tokens { text-align: right; font-variant-numeric: tabular-nums; color: var(--text-2); }
 .model-rank-share { text-align: right; font-variant-numeric: tabular-nums; color: var(--faint); font-size: 12.5px; }
 
-/* ------------------------------------------------------------ folded work (Claude-style) */
-.tool-group, .tool-call, .work-note { min-width: 0; max-width: 100%; }
-.tool-group-head:not(.static) { padding: 0 8px; margin-left: -8px; transition: color .12s, background .12s; }
-.tool-group-head:not(.static):hover { background: rgba(255, 255, 255, .05); }
-.rot-caret { color: var(--faint); flex-shrink: 0; transition: transform .15s var(--ease); }
-.rot-caret.down { transform: rotate(90deg); }
-.tool-group-head .tool-failed::before { content: '·'; margin-right: 6px; color: var(--faint); }
+/* ------------------------------------------------------------ folded steps (as in Claude) */
+/* Plain text rows, an inline triangle after the text, no icons and no hover highlight. */
+.tool-group, .step { min-width: 0; max-width: 100%; }
+.tool-group-head { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; min-height: 30px; font-size: 14.5px; color: var(--muted); cursor: default; }
+.tool-group-head:hover { color: var(--muted); }
+.tool-group-head:focus-visible, .step-head:focus-visible { outline: 1px solid var(--border-strong); outline-offset: 2px; border-radius: 6px; }
+.group-summary { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.group-failed { color: var(--muted); }
+.tool-group-head .plus, .tool-group-head .minus { font-variant-numeric: tabular-nums; }
+.step-caret { flex-shrink: 0; color: var(--faint); }
 
-.work-body { display: grid; grid-template-columns: minmax(0, 1fr); margin: 6px 0 10px; padding: 4px; border: 0.5px solid var(--hairline); border-radius: 14px; background: rgba(255, 255, 255, .025); }
-.work-body .tool-call-head, .work-note-head, .work-note.static {
-  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 36px; padding: 6px 10px; border-radius: 10px;
-  text-align: left; font-size: 13.5px; color: var(--text-2); transition: background .12s, color .12s;
-}
-.work-body .tool-call-head:hover, .work-note-head:hover { background: rgba(255, 255, 255, .045); color: var(--text); }
-.work-body .tool-call.open > .tool-call-head, .work-note.open > .work-note-head { background: rgba(255, 255, 255, .035); }
-.work-body .tool-status { width: 16px; height: 16px; color: var(--faint); }
-.work-body .tool-call.error .tool-status { color: var(--faint); }
-.work-body .tool-verb { color: var(--muted); }
-.tool-subject { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13.5px; color: var(--text-2); }
-.tool-subject.mono { font: 12.5px/1.4 var(--mono); color: var(--text-2); }
-.tool-dir { margin-left: 8px; font-size: 12.5px; color: var(--faint); font-family: -apple-system, BlinkMacSystemFont, sans-serif; }
-.tool-stats { display: inline-flex; gap: 6px; font-size: 12.5px; font-variant-numeric: tabular-nums; flex-shrink: 0; }
-.tool-call .tool-failed { font-size: 12.5px; flex-shrink: 0; }
-.tool-call .tool-caret { transition: transform .15s var(--ease); opacity: 0; }
-.tool-call-head:hover .tool-caret, .work-note-head:hover .tool-caret, .tool-call.open .tool-caret, .work-note.open .tool-caret { opacity: 1; }
-.tool-call.open .tool-caret, .work-note.open .tool-caret { transform: rotate(90deg); }
-.work-note-line { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.work-note.static { color: var(--muted); }
-.work-note.thought .work-note-line { color: var(--muted); }
-.work-note-body { padding: 2px 12px 8px 36px; }
-.work-note-body .markdown { font-size: 14px; color: var(--text-2); }
-.work-note.thought .work-note-body .markdown { color: var(--muted); }
-.work-body .tool-detail { margin: 4px 6px 10px 36px; min-width: 0; display: grid; gap: 8px; }
+.work-body { display: grid; grid-template-columns: minmax(0, 1fr); margin: 8px 0 10px; border: 0.5px solid var(--border); border-radius: 16px; background: rgba(255, 255, 255, .02); overflow: hidden; }
+.work-body > .step + .step { border-top: 0.5px solid var(--border); }
+.step-head { display: flex; align-items: center; gap: 8px; min-height: 46px; padding: 10px 20px; font-size: 14.5px; color: var(--muted); cursor: default; }
+.step.static .step-head { cursor: default; }
+.step-text { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.step-verb { color: var(--muted); margin-right: 8px; }
+.step-subject { color: var(--text-2); }
+.step-subject.mono { font: 13px/1.4 var(--mono); color: var(--muted); }
+.step-dir { margin-left: 8px; font-size: 13px; color: var(--faint); }
+.step-stats { display: inline-flex; gap: 6px; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+.step-failed { flex-shrink: 0; color: var(--red); }
+.step-detail { padding: 0 20px 14px; min-width: 0; display: grid; gap: 8px; }
+.step-markdown .markdown { font-size: 14px; color: var(--muted); }
+.step-open { justify-self: start; font-size: 12.5px; color: var(--faint); }
+.step-open:hover { color: var(--text-2); }
 
 /* a command and its output, as one console */
 .tool-console { border: 0.5px solid var(--border); border-radius: 10px; background: #141414; overflow: hidden; }
@@ -923,3 +915,4 @@ a[href], .markdown a { cursor: pointer; }
 
 /* message box without the paperclip: paste or drop files instead */
 .composer-row textarea { padding-left: 10px; }
+.step-detail.tool-detail { margin: 0; }
