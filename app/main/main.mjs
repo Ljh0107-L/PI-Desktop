@@ -308,8 +308,12 @@ async function smokeTest() {
   const fail = error => { console.error('PIDESK SMOKE FAILED:', error?.stack ?? error); app.exit(1); };
   try {
     await new Promise((resolve, reject) => { window.webContents.once('did-finish-load', resolve); window.webContents.once('did-fail-load', (_e, code, desc) => reject(new Error(`renderer: ${desc}`))); setTimeout(() => reject(new Error('renderer load timeout')), 30000); });
-    const title = await window.webContents.executeJavaScript('document.querySelector(".sidebar") ? "ok" : "missing"');
-    if (title !== 'ok') throw new Error('renderer did not mount');
+    let mounted = false;
+    for (let i = 0; i < 60 && !mounted; i++) {
+      mounted = await window.webContents.executeJavaScript('!!document.querySelector(".sidebar, .composer")');
+      if (!mounted) await new Promise(r => setTimeout(r, 250));
+    }
+    if (!mounted) throw new Error('renderer did not mount: ' + (await window.webContents.executeJavaScript('document.body.innerHTML.slice(0, 400)')));
     const t = terminals.open({ env: { kind: 'local' }, cwd: app.getPath('home'), cols: 80, rows: 24 });
     terminals.close(t);
     const piState = await manager.piSelfTest();

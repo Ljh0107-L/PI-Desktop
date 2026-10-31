@@ -220,6 +220,7 @@ export async function startSession(text, attachments = []) {
   try {
     const session = await api('createSession', { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel });
     set(s => ({ activeId: session.id, transcripts: { ...s.transcripts, [session.id]: { ...emptyTranscript(), loaded: true }, [pendingId]: undefined }, sessions: s.sessions.some(x => x.id === session.id) ? s.sessions : [session, ...s.sessions] }));
+    warnIfNoImages(draft.model, attachments);
     await api('prompt', session.id, text, attachments);
     api('updateDefaults', { environmentId: draft.environmentId, model: draft.model, thinkingLevel: draft.thinkingLevel }).then(setSettings);
   } catch (error) {
@@ -237,7 +238,15 @@ export async function sendPrompt(id, text, attachments = []) {
   if (command === 'compact') { await api('compact', id); return; }
   if (command === 'fork') { await forkSession(id); return; }
   if (command === 'new') { newSession(); return; }
+  warnIfNoImages(state.sessions.find(s => s.id === id)?.model, attachments);
   await api('prompt', id, text, attachments);
+}
+
+// Pi drops images for models without image input; say so instead of failing silently.
+function warnIfNoImages(model, attachments) {
+  if (!model || !attachments.some(a => a.kind === 'image')) return;
+  const info = state.catalog?.find(m => m.provider === model.provider && m.id === model.id);
+  if (info && !(info.input ?? ['text']).includes('image')) notify(`${info.name ?? model.id} doesn’t accept images, so they won’t be sent`, 'error');
 }
 
 export async function forkSession(id) {

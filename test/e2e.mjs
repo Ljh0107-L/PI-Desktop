@@ -75,6 +75,7 @@ try {
   await page.click('.modal-foot .button.primary');
   await page.locator('.model-entry').nth(1).locator('.icon-button').first().click();
   await page.locator('.model-advanced label.field:has-text("Context window") input').fill('200K');
+  await page.locator('.model-advanced label.check:has-text("Image") input').check();
   await page.click('.model-advanced .button:has-text("Add level")');
   await page.locator('.level-row input').first().fill('low');
   await S('02-add-provider');
