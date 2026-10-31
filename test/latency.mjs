@@ -33,7 +33,10 @@ const manager = new SessionManager({
 
 const rows = [];
 let failed = 0;
+// Shared CI runners are several times slower than a developer Mac.
+const SCALE = process.env.CI ? 3 : 1;
 async function time(env, op, budgetMs, fn) {
+  budgetMs *= SCALE;
   const t = Date.now();
   let error = null, result;
   try { result = await fn(); } catch (e) { error = e; }

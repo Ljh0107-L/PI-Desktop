@@ -2,41 +2,31 @@ name: CI
 
 on:
   push:
-    paths-ignore: ['**.md', 'docs/**', 'build/make-icon.py']
+    paths-ignore: ['**.md', 'docs/**', 'build/make-icon.py', 'build/icon-source.png']
   pull_request:
-    paths-ignore: ['**.md', 'docs/**', 'build/make-icon.py']
+    paths-ignore: ['**.md', 'docs/**', 'build/make-icon.py', 'build/icon-source.png']
   workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+# Two jobs in parallel: the UI suite alone on one runner, the headless suites on another.
 jobs:
-  test:
-    name: Tests (macOS)
+  ui:
+    name: End-to-end UI
     runs-on: macos-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-
-      - name: Cache Electron binary
-        uses: actions/cache@v4
+        with: { node-version: 24, cache: npm }
+      - uses: actions/cache@v4
         with:
           path: ~/Library/Caches/electron
           key: electron-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
-
-      - name: Install dependencies
-        run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          node node_modules/electron/install.js
-
+      - run: npm ci --ignore-scripts --no-audit --no-fund && node node_modules/electron/install.js
       # A throwaway unprivileged sshd on 127.0.0.1 (host alias "pidesk-test") stands in for a remote machine.
-      # Started in the background while the renderer builds.
       - name: Build renderer, start test SSH server
         run: |
           sh test/sshd.sh > /tmp/pidesk-sshd.log 2>&1 &
@@ -44,32 +34,34 @@ jobs:
           for i in $(seq 1 50); do [ -f /tmp/pidesk-sshd/ssh_config ] && ssh -F /tmp/pidesk-sshd/ssh_config pidesk-test true 2>/dev/null && break; sleep 0.2; done
           mkdir -p /tmp/pidesk-e2e
           { cat /tmp/pidesk-sshd/ssh_config; printf '\nMatch all\n  BatchMode yes\n'; } > /tmp/pidesk-e2e/ssh_config
+      - name: End-to-end UI (Electron + Playwright)
+        # Pi reaches the test host by upload from this machine (no npm registry round trips).
+        env: { PIDESK_FORCE_PI_UPLOAD: '1' }
+        run: node test/e2e.mjs --ssh-config /tmp/pidesk-e2e/ssh_config
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: e2e-screenshots, path: /tmp/pidesk-e2e/shots, if-no-files-found: ignore }
 
-      # The protocol and relay suites use their own temp dirs, so they run alongside the UI suite.
-      - name: Protocol + relay + end-to-end UI
+  core:
+    name: Protocol, relay, latency
+    runs-on: macos-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 24, cache: npm }
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Start test SSH server
+        run: |
+          sh test/sshd.sh > /tmp/pidesk-sshd.log 2>&1 &
+          for i in $(seq 1 50); do [ -f /tmp/pidesk-sshd/ssh_config ] && ssh -F /tmp/pidesk-sshd/ssh_config pidesk-test true 2>/dev/null && break; sleep 0.2; done
+      - name: Protocol + relay + latency
         run: |
           set +e
           node test/protocol.mjs --ssh-host pidesk-test --ssh-config /tmp/pidesk-sshd/ssh_config > /tmp/protocol.log 2>&1 & P1=$!
           node test/relay.mjs --ssh-config /tmp/pidesk-sshd/ssh_config > /tmp/relay.log 2>&1 & P2=$!
           node test/latency.mjs --ssh-config /tmp/pidesk-sshd/ssh_config > /tmp/latency.log 2>&1 & P3=$!
-          node test/e2e.mjs --ssh-config /tmp/pidesk-e2e/ssh_config; E=$?
           wait $P1; R1=$?; wait $P2; R2=$?; wait $P3; R3=$?
-          echo "::group::protocol ($R1)"; cat /tmp/protocol.log; echo "::endgroup::"
-          echo "::group::relay ($R2)"; cat /tmp/relay.log; echo "::endgroup::"
-          echo "::group::latency ($R3)"; cat /tmp/latency.log; echo "::endgroup::"
-          grep -h "checks passed\|within budget" /tmp/protocol.log /tmp/relay.log /tmp/latency.log || true
-          exit $(( E || R1 || R2 || R3 ))
-
-      - name: Upload screenshots
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: e2e-screenshots
-          path: /tmp/pidesk-e2e/shots
-          if-no-files-found: ignore
-
-      - name: Logs on failure
-        if: failure()
-        run: |
-          tail -50 /tmp/pidesk-sshd.log || true
-          tail -50 ~/.pidesk/run/relay.log || true
+          for f in protocol relay latency; do echo "::group::$f"; cat /tmp/$f.log; echo "::endgroup::"; done
+          grep -h "checks passed\|within budget" /tmp/protocol.log /tmp/relay.log /tmp/latency.log
+          exit $(( R1 || R2 || R3 ))
