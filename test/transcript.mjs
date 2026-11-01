@@ -1,6 +1,6 @@
 // Pure regressions, also imported by e2e.mjs so CI exercises them.
 import assert from 'node:assert/strict';
-import { applyEvent, collapseWork, displayBlocks, emptyTranscript, fromHistory, usageOf } from '../app/renderer/src/transcript.js';
+import { applyEvent, collapseWork, displayBlocks, emptyTranscript, fromHistory, isAbortText, usageOf } from '../app/renderer/src/transcript.js';
 
 const message = { role: 'assistant', timestamp: 1000, content: [], usage: { input: 10000, cacheRead: 30000, output: 600, reasoning: 400 }, durationMs: 6000 };
 const deliveredInBurst = { start: 100000, first: 100001, last: 100061, end: 100062, est: 600, chars: 2400 };
@@ -65,3 +65,16 @@ const hidden = { ...message, timestamp: 7000, durationMs: 6000, usage: { output:
 const hiddenTiming = { start: 0, first: 1000, last: 1155, end: 6000, chars: 30, est: null };
 assert.equal(Math.round(usageOf([{ ...hidden, __timing: hiddenTiming }]).tps), 67, 'hidden reasoning with too little text falls back to API duration');
 console.log('PASS  transcript generation-window TPS: first→last, Cursor estimate, burst fallback');
+
+// A user stop can arrive as an ordinary error message; it must not look like a provider failure.
+for (const text of ['This operation was aborted', 'Request was aborted', 'AbortError: The operation was aborted', 'Error: request was aborted']) {
+  assert.equal(isAbortText(text), true, `abort text classified: ${text}`);
+}
+assert.equal(isAbortText('400: maximum context length exceeded'), false);
+const interrupted = { ...message, timestamp: 8000, stopReason: 'error', errorMessage: 'This operation was aborted', content: [{ type: 'text', text: 'Partial answer' }] };
+const interruptedBlocks = displayBlocks({ ...emptyTranscript(), loaded: true, messages: [{ role: 'user', content: 'do work', timestamp: 7000 }, interrupted] });
+assert.equal(interruptedBlocks.some(b => b.kind === 'error'), false, 'aborted turn is not a red error');
+assert.equal(interruptedBlocks.some(b => b.kind === 'notice' && b.text === 'Interrupted'), true, 'aborted turn shows a neutral interruption notice');
+const failed = { ...message, timestamp: 9000, stopReason: 'error', errorMessage: 'terminated', content: [] };
+assert.equal(displayBlocks({ ...emptyTranscript(), loaded: true, messages: [{ role: 'user', content: 'do work', timestamp: 8500 }, failed] }).some(b => b.kind === 'error'), true, 'real failures stay errors');
+console.log('PASS  aborted turns render as interruption notices, not errors');

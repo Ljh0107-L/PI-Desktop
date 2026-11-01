@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { Markdown, Spinner } from './ui.jsx';
-import { changesOf, displayBlocks, formatTokens, toolSummary } from './transcript.js';
+import { changesOf, displayBlocks, formatTokens, isAbortText, toolSummary } from './transcript.js';
 import { api, editMessage, notify, openChanges } from './store.js';
 import { changeStats, hunkLines } from './diffs.js';
 import { Composer } from './Composer.jsx';
@@ -431,7 +431,9 @@ export function Transcript({ session, transcript, questions }) {
         if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'].includes(e.key)) scrollIntent.current = true;
       }}>
       <div className="transcript-inner">
-        {transcript.error && <div className="block-error"><Icon name="alert" size={15} /> {transcript.error}</div>}
+        {transcript.error && (isAbortText(transcript.error)
+          ? <div className="block-notice">Interrupted</div>
+          : <div className="block-error"><Icon name="alert" size={15} /> {transcript.error}</div>)}
         {blocks.map(block => {
           switch (block.kind) {
             case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!!session && session.id !== 'pending' && session.status === 'connected' && !block.text.startsWith('/')} />;

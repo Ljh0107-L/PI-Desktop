@@ -79,9 +79,14 @@ window.pidesk.subscribe(({ channel, payload }) => {
       if (transcriptOf(payload.id).rewinding) break; // old branch, superseded by an edit
       { const next = applyEvent(transcriptOf(payload.id), payload.event);
         setTranscript(payload.id, next);
-        if (payload.event.type === 'message_end' && payload.event.message?.role === 'assistant') saveTiming(payload.id, next.messages.at(-1));
-        if (payload.event.type === 'compaction_end') reloadTranscript(payload.id); } // history now starts with the summary
-      if (payload.event.type === 'agent_settled') refreshStats(payload.id);
+        if (payload.event.type === 'message_end' && payload.event.message?.role === 'assistant') {
+          saveTiming(payload.id, next.messages.at(-1));
+          // Context grows with every model call, not only when the whole agent run settles.
+          // Update it on the same boundary as the usage/TPS card.
+          scheduleStats(payload.id);
+        }
+        if (payload.event.type === 'compaction_end') { reloadTranscript(payload.id); refreshStats(payload.id); } } // history now starts with the summary
+      if (payload.event.type === 'agent_settled') scheduleStats(payload.id);
       break;
     }
     case 'open-settings':
@@ -224,8 +229,23 @@ export async function openSession(id, { record = true } = {}) {
   }
 }
 
+const statsSeq = new Map();
+const statsTimers = new Map();
 export async function refreshStats(id) {
-  try { const stats = await api('stats', id); if (stats) set(s => ({ stats: { ...s.stats, [id]: stats } })); } catch { /* ignore */ }
+  const seq = (statsSeq.get(id) ?? 0) + 1;
+  statsSeq.set(id, seq);
+  try {
+    const stats = await api('stats', id);
+    // A slower request from an earlier turn must not overwrite a newer context figure.
+    if (stats && statsSeq.get(id) === seq) set(s => ({ stats: { ...s.stats, [id]: stats } }));
+  } catch { /* ignore */ }
+}
+// Let Pi persist the finished message before asking for its context figure; coalesce a
+// burst of message_end events (tool loops) into one request.
+function scheduleStats(id) {
+  if (typeof window === 'undefined') return;
+  clearTimeout(statsTimers.get(id));
+  statsTimers.set(id, setTimeout(() => { statsTimers.delete(id); refreshStats(id); }, 120));
 }
 
 export async function startSession(text, attachments = []) {

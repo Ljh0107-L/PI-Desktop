@@ -30,6 +30,13 @@ export function fromHistory(messages, timings = {}) {
 // to Pi's durationMs (full API call, including first-token latency and queueing). A very dense burst
 // (e.g. a relay replaying a buffered response) is not a generation window, so it also falls back to
 // durationMs instead of reporting an artificial 10k tok/s.
+// A user-initiated stop sometimes arrives as an ordinary error message ("This
+// operation was aborted") instead of stopReason "aborted". Treat both as an
+// interruption notice, not as a provider failure in a red error box.
+const ABORT_TEXT = /^(?:error:\s*)?(?:this |the )?(?:operation|request)(?: was)? (?:aborted|cancelled|canceled)\b|^(?:aborted|cancelled|canceled|aborterror)\b/i;
+export const isAbortText = text => ABORT_TEXT.test(String(text ?? '').trim());
+export const isAbortMessage = m => m?.stopReason === 'aborted' || isAbortText(m?.errorMessage);
+
 const textOfMessage = m => typeof m.content === 'string'
   ? m.content
   : (m.content ?? []).filter(b => b?.type === 'text' || b?.type === 'thinking').map(b => b.text ?? b.thinking ?? '').join('\n');
@@ -229,8 +236,9 @@ export function displayBlocks(t) {
       const tm = message.__timing;
       blocks.splice(firstBlock, 0, { kind: 'thinking', key: `h${mi}`, hidden: true, tokens: reasoning, durationMs: tm?.first && tm.start ? tm.first - tm.start : null });
     }
-    if (message.errorMessage && message.stopReason !== 'aborted') { flush(); blocks.push({ kind: 'error', key: `e${mi}`, text: message.errorMessage }); }
-    if (message.stopReason === 'aborted') { flush(); blocks.push({ kind: 'notice', key: `a${mi}`, text: 'Interrupted' }); }
+    const aborted = isAbortMessage(message);
+    if (message.errorMessage && !aborted) { flush(); blocks.push({ kind: 'error', key: `e${mi}`, text: message.errorMessage }); }
+    if (aborted) { flush(); blocks.push({ kind: 'notice', key: `a${mi}`, text: 'Interrupted' }); }
   });
   flush();
   closeTurn();
