@@ -46,7 +46,15 @@ export async function checkReading({ app, page, id }) {
     await page.locator('.tool-group-head', { hasText: 'Inspect test log' }).click();
     const row = page.locator('[data-tool-id="reading-test-call"]');
     step('open the command row');
+    const probe = async () => row.locator('.tool-call-head').evaluate(el => {
+      const r = el.getBoundingClientRect(), top = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+      return { expanded: el.getAttribute('aria-expanded'), hit: top === el || el.contains(top) ? 'self' : `${top?.tagName}.${top?.className}`, follow: document.querySelectorAll('.transcript-follow').length };
+    });
+    const beforeClick = await probe();
     await row.locator('.tool-call-head').click();
+    await page.waitForTimeout(150);
+    const afterClick = await probe();
+    if (afterClick.expanded !== 'true') throw new Error(`row did not open: before ${JSON.stringify(beforeClick)} after ${JSON.stringify(afterClick)}`);
     step('scroll the command output');
     await row.locator('.tool-output').evaluate(el => { el.scrollTop = 72; window.__readingRow = el.closest('.tool-call'); });
     step('API call ends');
