@@ -86,7 +86,10 @@ window.pidesk.subscribe(({ channel, payload }) => {
           scheduleStats(payload.id);
         }
         if (payload.event.type === 'compaction_end') { reloadTranscript(payload.id); refreshStats(payload.id); } } // history now starts with the summary
-      if (payload.event.type === 'agent_settled') scheduleStats(payload.id);
+      if (payload.event.type === 'agent_settled') {
+        scheduleStats(payload.id);
+        if (transcriptOf(payload.id).queued?.length) setTranscript(payload.id, { ...transcriptOf(payload.id), queued: [] });
+      }
       break;
     }
     case 'open-settings':
@@ -101,6 +104,9 @@ window.pidesk.subscribe(({ channel, payload }) => {
     case 'status':
       set(s => ({ sessions: s.sessions.map(x => x.id === payload.id ? { ...x, status: payload.status, streaming: payload.streaming ?? (payload.status === 'connected' ? x.streaming : false), statusMessage: payload.message, compacting: payload.compacting ?? x.compacting } : x) }));
       if (payload.status === 'error' || (payload.status === 'disconnected' && payload.message)) notify(payload.message ?? 'Session disconnected', 'error');
+      if (payload.status === 'error' || payload.status === 'disconnected') {
+        if (transcriptOf(payload.id).queued?.length) setTranscript(payload.id, { ...transcriptOf(payload.id), queued: [] });
+      }
       if (payload.status === 'disconnected') set(s => ({ questions: { ...s.questions, [payload.id]: [] } }));
       break;
     case 'sessions':
@@ -276,12 +282,18 @@ export async function sendPrompt(id, text, attachments = []) {
   if (command === 'new') { newSession(); return; }
   const session = state.sessions.find(s => s.id === id);
   warnIfNoImages(session?.model, attachments);
-  // Sent while Pi works: show it at once (dimmed) until Pi takes it before its next model call.
-  const queued = session?.streaming && !text.startsWith('/') ? { id: Math.random().toString(36).slice(2), text, images: attachments.filter(a => a.kind === 'image') } : null;
-  if (queued) setTranscript(id, { ...transcriptOf(id), queued: [...(transcriptOf(id).queued ?? []), queued] });
-  try { await api('prompt', id, text, attachments); }
+  // A message sent while Pi works interrupts the active run and starts a fresh turn. Show it as an
+  // optimistic user message at once; Pi's message_end replaces it, and a failed send removes it again.
+  const streaming = !!session?.streaming;
+  // Let the main process decide from Pi's real state: the renderer's streaming flag can lag a moment.
+  // A normal message always asks to interrupt; main only aborts if Pi is actually running.
+  const interrupt = !text.startsWith('/');
+  const images = attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }));
+  const optimistic = streaming && interrupt ? { role: 'user', content: [{ type: 'text', text }, ...images], timestamp: Date.now(), __optimistic: true } : null;
+  if (optimistic) setTranscript(id, { ...transcriptOf(id), messages: [...transcriptOf(id).messages, optimistic] });
+  try { await api('prompt', id, text, attachments, { interrupt }); }
   catch (error) {
-    if (queued) setTranscript(id, { ...transcriptOf(id), queued: (transcriptOf(id).queued ?? []).filter(q => q.id !== queued.id) });
+    if (optimistic) setTranscript(id, { ...transcriptOf(id), messages: transcriptOf(id).messages.filter(m => m !== optimistic) });
     throw error;
   }
 }

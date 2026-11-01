@@ -537,9 +537,17 @@ export class SessionManager extends EventEmitter {
 
 
   // attachments: [{ kind: 'image', name, mimeType, data (base64) } | { kind: 'file', name, path?, data? }]
-  async prompt(id, text, attachments = []) {
+  // interrupt: a message sent while Pi works replaces the active run (as in Codex/ChatGPT), instead of
+  // waiting for the current assistant turn and its tool calls to finish like a steering message does.
+  async prompt(id, text, attachments = [], { interrupt = false } = {}) {
     const record = this.record(id);
-    const session = await this.ensureStarted(id);
+    let session = await this.ensureStarted(id);
+    let runtime = this.runtimes.get(id);
+    let interrupted = false;
+    if (interrupt && runtime?.streaming) {
+      ({ session, runtime } = await this.#interruptForPrompt(id, session, runtime));
+      interrupted = true;
+    }
     await this.#syncProviders(this.runtimes.get(id)).catch(() => {});
     // The first message names the conversation at once (its first line), and the model then suggests a
     // better title, as Claude does; a title the user set by hand is never replaced.
@@ -560,9 +568,40 @@ export class SessionManager extends EventEmitter {
     // Always 'steer' (Pi ignores it when idle): a message sent while Pi works reaches the model before its
     // next call, as in Claude Code, instead of waiting for the whole run to finish ('followUp'). Not keyed on
     // runtime.streaming, which can lag a moment behind Pi and then made the prompt fail.
-    const sent = await session.prompt(message, { ...(images.length ? { images } : {}), streamingBehavior: 'steer' });
+    const send = target => target.prompt(message, { ...(images.length ? { images } : {}), streamingBehavior: 'steer' });
+    let sent = await send(session);
+    // The renderer can be a moment behind Pi. If the prompt was queued instead of starting a fresh
+    // turn, abort the run that accepted it and send it again; otherwise a stale flag brings back the
+    // old "new message waits for the current reply" behaviour.
+    if (interrupt && !interrupted && sent?.disposition === 'queued') {
+      ({ session, runtime } = await this.#interruptForPrompt(id, session, runtime));
+      interrupted = true;
+      sent = await send(session);
+    }
     if (nameIt && !nameIt.startsWith('/')) session.prompt(`/pidesk-title ${Buffer.from(nameIt).toString('base64')}`).catch(() => {});
-    return sent;
+    return { ...(sent && typeof sent === 'object' ? sent : {}), interrupted };
+  }
+
+  // Stop the active run before sending a replacement prompt. Wait for agent_settled so the next prompt
+  // starts a fresh turn; if a tool ignores the abort, hard-stop this Pi and reconnect from its session file.
+  async #interruptForPrompt(id, session, runtime) {
+    session.abortBash().catch(() => {});
+    session.clearQueue().catch(() => {});
+    const settled = session.nextSettled(6000).catch(() => {});
+    await session.abort().catch(() => {});
+    const finished = await Promise.race([
+      settled.then(() => true),
+      new Promise(resolve => setTimeout(() => resolve(false), 4000)),
+    ]);
+    if (finished) return { session, runtime: this.runtimes.get(id) ?? runtime };
+    // A tool that ignores the abort signal must not make the new message wait for it.
+    const record = this.record(id);
+    const env = this.env(record.environmentId);
+    await this.close(id).catch(() => {});
+    if (env) await this.stopRelay(env, id).catch(() => {});
+    this.emit('status', { id, status: 'disconnected', message: 'Stopped' });
+    const fresh = await this.ensureStarted(id);
+    return { session: fresh, runtime: this.runtimes.get(id) };
   }
 
   // Put attached files where the session's Pi can read them: as-is on this machine, uploaded to the host.

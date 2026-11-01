@@ -195,16 +195,18 @@ try {
   const levels = await page.locator('.user-bubble').last().locator('.ub-li').evaluateAll(els => els.map(el => getComputedStyle(el).getPropertyValue('--depth').trim()).join(','));
   check('sent lists keep their levels in your message', levels === '0,1,0', levels);
   await S('05b2-list-message');
-  // a message sent while Pi works shows at once (dimmed) and reaches Pi without waiting for the run to end
-  await send('long ' + 'q'.repeat(1500));
+  // a message sent while Pi works interrupts the active reply and starts a fresh turn
+  await send('long ' + 'q'.repeat(30000));
   await page.locator('.send-button.stop').waitFor({ timeout: 30000 });
-  const queuedAt = Date.now();
-  await send('queued while working');
-  await page.locator('.user-row.queued', { hasText: 'queued while working' }).waitFor({ timeout: 1000 });
-  const queuedMs = Date.now() - queuedAt;
-  await waitText('.markdown', 'echo: queued while working', 60000);
-  check('a message sent while Pi works shows at once and is answered', queuedMs < 1000 && await page.locator('.user-row.queued').count() === 0 && await page.locator('.user-bubble', { hasText: 'queued while working' }).count() === 1, `${queuedMs} ms to show`);
-  await page.locator('.send-button.stop').waitFor({ state: 'detached', timeout: 60000 });
+  const interruptedAt = Date.now();
+  await send('interrupt and answer this');
+  await page.locator('.user-bubble', { hasText: 'interrupt and answer this' }).waitFor({ timeout: 2000 });
+  const optimisticMs = Date.now() - interruptedAt;
+  await waitText('.markdown', 'echo: interrupt and answer this', 15000);
+  const interruptMs = Date.now() - interruptedAt;
+  check('a new message interrupts a running reply and starts a fresh turn', interruptMs < 10000 && await page.locator('.user-row.queued').count() === 0, `${interruptMs} ms to answer`);
+  check('the interrupting message shows immediately and is not queued', optimisticMs < 2000 && await page.locator('.user-bubble', { hasText: 'interrupt and answer this' }).count() === 1, `${optimisticMs} ms to show`);
+  await page.locator('.send-button.stop').waitFor({ state: 'detached', timeout: 30000 });
   check('composer continues 1. 2. 3. lists', listed === '1. first\n2. ' && ended === '1. first\n', JSON.stringify({ listed, ended }));
 
   await waitNew('.markdown', 'Tool result', () => send('[[write:notes/plan.md|# Plan\n- ship M1]]'));

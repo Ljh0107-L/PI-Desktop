@@ -96,7 +96,7 @@ function SessionView({ session }) {
         <div className="dock">
           <ConnectionBanner session={session} />
           <GoalBanner session={session} />
-          <Composer session={session} autoFocus placeholder={questions.length ? 'Answer Pi’s question…' : session.streaming ? 'Queue a follow-up…' : 'Reply to Pi…'} onSubmit={(text, attachments) => sendPrompt(session.id, text, attachments)} />
+          <Composer session={session} autoFocus placeholder={questions.length ? 'Answer Pi’s question…' : session.streaming ? 'Send to interrupt…' : 'Reply to Pi…'} onSubmit={(text, attachments) => sendPrompt(session.id, text, attachments)} />
           <ComposerBar session={session} />
         </div>
         {terminalOpen && <TerminalPanel session={session} />}

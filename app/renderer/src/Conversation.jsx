@@ -354,7 +354,7 @@ function AskBlock({ call, tool }) {
 function WorkingRow({ session, transcript }) {
   const [, tick] = useState(0);
   useEffect(() => { const t = setInterval(() => tick(n => n + 1), 1000); return () => clearInterval(t); }, []);
-  if (session?.status === 'connecting') return null;
+  if (session?.status === 'connecting') return <div className="working"><span className="working-dot" /><span className="shimmer">Connecting…</span></div>;
   const messages = transcript.messages;
   let from = messages.length; while (from > 0 && messages[from - 1].role !== 'user') from--;
   const turn = messages.slice(from);
@@ -363,7 +363,11 @@ function WorkingRow({ session, transcript }) {
   // Real output tokens of the model calls finished so far this turn (no live estimate).
   const tokens = turn.reduce((n, m) => n + (m.role === 'assistant' ? m.usage?.output ?? 0 : 0), 0);
   const lastBlock = live?.content?.filter(Boolean).at(-1);
-  const state = session?.compacting || transcript.compacting ? 'Compacting conversation' : !live || !live.content?.length || lastBlock?.type === 'thinking' ? 'Thinking' : lastBlock?.type === 'toolCall' ? 'Working' : 'Writing';
+  const pending = messages.at(-1)?.__optimistic;
+  const state = pending ? 'Interrupting…'
+    : session?.compacting || transcript.compacting ? 'Compacting conversation'
+    : !live || !live.content?.length || lastBlock?.type === 'thinking' ? 'Thinking'
+    : lastBlock?.type === 'toolCall' ? 'Working' : 'Writing';
   const elapsed = startedAt ? Math.max(0, Date.now() - startedAt) : 0;
   return (
     <div className="working">
@@ -436,7 +440,7 @@ export function Transcript({ session, transcript, questions }) {
           : <div className="block-error"><Icon name="alert" size={15} /> {transcript.error}</div>)}
         {blocks.map(block => {
           switch (block.kind) {
-            case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!!session && session.id !== 'pending' && session.status === 'connected' && !block.text.startsWith('/')} />;
+            case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!!session && session.id !== 'pending' && session.status === 'connected' && !session.streaming && !block.text.startsWith('/')} />;
             case 'goal': return <GoalMarker key={block.key} objective={block.objective} />;
             case 'text': return <Markdown key={block.key} text={block.text} streaming={block.streaming} />;
             case 'usage': return <TurnFooter key={block.key} text={block.text} changes={block.changes} sessionId={session?.id} last={block === lastUsage} />;
