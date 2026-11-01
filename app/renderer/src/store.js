@@ -195,12 +195,22 @@ export function pickRecent(environmentId, cwd) { set(s => ({ draft: { ...s.draft
 export const setSettings = settings => set({ settings });
 export const setEnvironments = environments => set({ environments });
 
+// Hovering a conversation in the sidebar starts its Pi, so it is usually running by the time it opens.
+const warmed = new Map();
+export function warmSession(id) {
+  if (state.activeId === id || Date.now() - (warmed.get(id) ?? 0) < 60000) return;
+  warmed.set(id, Date.now());
+  api('warmSession', id).catch(() => {});
+}
+
 export async function openSession(id, { record = true } = {}) {
   if (record) navigate({ view: 'session', activeId: id });
   set({ activeId: id, view: 'session', paletteOpen: false });
   loadBranch(id);
+  // Once it is open, keep a spare Pi in its folder so Fork (or a new session there) needn't start one.
+  setTimeout(() => { if (state.activeId === id) api('warmFolder', id).catch(() => {}); }, 1500);
   const t = transcriptOf(id);
-  if (t.loaded) return;
+  if (t.loaded) { api('focusSession', id).catch(() => {}); return; } // the sweep never stops the open conversation
   try {
     const messages = await api('messages', id);
     // Live events may have arrived while history loaded; history is authoritative for completed messages.

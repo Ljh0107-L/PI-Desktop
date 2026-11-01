@@ -20,14 +20,9 @@ export async function checkReading({ app, page, id }) {
   const result = { content: [{ type: 'text', text: Array.from({ length: 100 }, (_, i) => `log line ${i}`).join('\n') }] };
   try {
     await app.evaluate(({ BrowserWindow }, id) => BrowserWindow.getAllWindows()[0].webContents.send('pidesk:event', { channel: 'status', payload: { id, status: 'connecting' } }), id);
-    step('centered loading spinner');
-    await page.getByRole('status', { name: 'Loading conversation' }).waitFor();
-    const centered = await page.locator('.transcript-shell').evaluate(el => {
-      const parent = el.getBoundingClientRect(), spinner = el.querySelector('.transcript-loading .spinner').getBoundingClientRect();
-      return Math.abs(spinner.x + spinner.width / 2 - parent.x - parent.width / 2) < 1 && Math.abs(spinner.y + spinner.height / 2 - parent.y - parent.height / 2) < 1;
-    });
-    assert.ok(centered, 'initial loading spinner should be centered');
-    assert.equal(await page.locator('.transcript-loading').innerText(), '');
+    step('a loaded conversation is never covered by a spinner');
+    await page.waitForTimeout(150);
+    assert.equal(await page.locator('.transcript-loading').count(), 0, 'Pi starting must not hide history that is already loaded');
     await app.evaluate(({ BrowserWindow }, id) => BrowserWindow.getAllWindows()[0].webContents.send('pidesk:event', { channel: 'status', payload: { id, status: 'connected' } }), id);
     await send([
       { type: 'message_end', message: { role: 'user', content: 'Disclosure regression fixture', timestamp: stamp } },

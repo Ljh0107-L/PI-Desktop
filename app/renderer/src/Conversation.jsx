@@ -414,7 +414,9 @@ export function Transcript({ session, transcript, questions }) {
   useEffect(() => { setExpanded({}); followLatest(); }, [session?.id]);
   const disclosure = useMemo(() => ({ expanded, setExpanded, pauseFollowing }), [expanded, pauseFollowing]);
   const working = session?.streaming || session?.compacting || transcript.compacting || session?.status === 'connecting';
-  const loading = !transcript.error && !['error', 'disconnected'].includes(session?.status) && !transcript.live && (!transcript.loaded || session?.status === 'connecting');
+  // Only while there is nothing to show yet: history now comes from the session file while Pi starts, and
+  // a new conversation already shows your message.
+  const loading = !transcript.error && !transcript.loaded;
   return (
     <DisclosureContext.Provider value={disclosure}>
     <div className="transcript-shell">

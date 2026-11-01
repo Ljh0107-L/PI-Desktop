@@ -69,11 +69,35 @@ async function suite(envId, label, cwd) {
   await time(label, 'list commands', 1000, () => manager.commands(a.id));
   await time(label, 'load history', 1000, () => manager.messages(a.id));
   const b = await time(label, 'fork', label === 'ssh' ? 4000 : 2500, () => manager.fork(a.id));
+  // Fork again with a spare Pi kept warm in the folder (as while the conversation is open).
+  await manager.warmFolder(a.id);
+  for (let i = 0; i < 200 && ![...manager.spares.values()].some(sp => manager.runtimes.get(sp.id)?.status === 'connected'); i++) await new Promise(r => setTimeout(r, 50));
+  const bw = await time(label, 'fork (spare Pi in the folder)', 500, () => manager.fork(a.id));
+  await manager.delete(bw.id);
   await time(label, 'edit message (idle)', 2000, async () => { const d = settled(a.id); await manager.editMessage(a.id, 1, 'second message', 'edited'); await d; });
   // edit while a long reply is streaming: abort, branch, resend
   done = settled(a.id); await manager.prompt(a.id, 'long ' + 'z'.repeat(4000));
   await new Promise(r => setTimeout(r, 400));
   await time(label, 'edit message (while streaming)', 3000, async () => { const d = settled(a.id); await manager.editMessage(a.id, 1, 'edited', 'edited again'); await d; });
+  // Pi stopped (e.g. by the idle sweep): opening shows the history from the session file at once.
+  await manager.close(b.id);
+  await manager.stopRelay(manager.env(envId), b.id);
+  await new Promise(r => setTimeout(r, 300));
+  const shown = await time(label, 'open history (Pi not running)', label === 'ssh' ? 800 : 300, () => manager.messages(b.id));
+  if (!shown?.some(m => m.role === 'user')) { failed++; console.log('FAIL  history from the session file was empty'); }
+  await manager.ensureStarted(b.id);
+  // The idle sweep stops a Pi nobody used for a while (not the conversation on screen).
+  manager.focused = null;
+  manager.runtimes.get(b.id).lastUsed = 0;
+  await time(label, 'idle sweep stops an unused Pi', 3000, async () => {
+    const stopped = await manager.sweep();
+    if (!stopped.includes(b.id)) throw new Error('idle Pi was not stopped');
+    for (let i = 0; i < 20; i++) {
+      if (!(await manager.relaySessions(manager.env(envId))).find(s => s.id === b.id)?.alive) return;
+      await new Promise(r => setTimeout(r, 100));
+    }
+    throw new Error('Pi still running after the sweep');
+  });
   await time(label, 'close (detach)', 1000, () => manager.close(b.id));
   await time(label, 'reopen detached session', 2500, () => manager.messages(b.id));
   await time(label, 'archive', 1500, () => manager.archive(b.id));

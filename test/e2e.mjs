@@ -459,9 +459,12 @@ check('remote command finished while the app was closed', existsSync(join(remote
 check('local command finished while the app was closed', existsSync(join(localProject, 'local-after-quit.txt')));
 ({ app, page } = await launch({ userData: profile, env }));
 try {
+  const openAt = Date.now();
   await page.locator('.session-row', { hasText: 'hello from the server' }).click();
   await waitText('.markdown', 'Tool result: after-quit', 90000);
+  const remoteOpenMs = Date.now() - openAt;
   check('reopened remote session shows the reply produced while closed', true);
+  check('after a restart, a conversation shows its history without waiting for Pi to start', remoteOpenMs < (process.env.CI ? 3000 : 1500), `${remoteOpenMs} ms (SSH)`);
   await page.locator('.session-row').first().waitFor();
   check('sessions restored after restart', await page.locator('.session-row').count() === 2);
   await page.locator('.session-row', { hasText: 'hello from the desktop' }).click();

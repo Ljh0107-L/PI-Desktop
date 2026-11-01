@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { MenuItem, Popover, Spinner, useResizable } from './ui.jsx';
-import { api, askConfirm, deleteSession, forkSession, goBack, goForward, newSession, notify, openSession, openSettings, toggleSidebar, useStore } from './store.js';
+import { api, askConfirm, deleteSession, forkSession, goBack, goForward, newSession, notify, openSession, openSettings, toggleSidebar, useStore, warmSession } from './store.js';
 
 export function SessionMenuItems({ session, close, onRename }) {
   const active = useStore(s => s.activeId === session.id);
@@ -35,7 +35,7 @@ function SessionRow({ session, active }) {
         ? <input className="rename-input" autoFocus value={title} onChange={e => setTitle(e.target.value)}
             onBlur={() => { setEditing(false); if (title.trim() && title !== session.title) api('rename', session.id, title.trim()); }}
             onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); if (e.key === 'Escape') { setTitle(session.title); setEditing(false); } }} />
-        : <button className="session-row-main" onClick={() => openSession(session.id)} onDoubleClick={() => { setTitle(session.title); setEditing(true); }} title={session.title}>
+        : <button className="session-row-main" onClick={() => openSession(session.id)} onMouseEnter={() => warmSession(session.id)} onDoubleClick={() => { setTitle(session.title); setEditing(true); }} title={session.title}>
             <span className="session-title">{session.title}</span>
             {indicator && <span className="session-indicator">{indicator}</span>}
           </button>}

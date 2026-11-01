@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { execFile } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { PiSession } from '../../core/pi-session.mjs';
@@ -12,6 +13,25 @@ import { listRelaySessions, prepareRemote, runSsh, stopRelaySession } from './re
 
 const titleFrom = text => { const line = text.trim().replace(/^\/goal\s+/, '').split('\n')[0].replace(/\s+/g, ' '); return line.length > 60 ? line.slice(0, 57) + '…' : line || 'New session'; };
 const remoteBase = path => path.split('/').filter(Boolean).pop() ?? path;
+// The visible history: the branch ending at `leafId`, with compactions as markers (shared by the live
+// get_entries path and the session-file path).
+function branchMessages(entries, leafId) {
+  const byId = new Map(entries.map(e => [e.id, e]));
+  const path = [];
+  for (let e = byId.get(leafId); e; e = byId.get(e.parentId)) path.push(e);
+  path.reverse();
+  const out = [];
+  for (const e of path) {
+    if (e.type === 'message' && e.message) out.push(e.message);
+    else if (e.type === 'compaction') out.push({ role: 'compactionSummary', summary: e.summary, tokensBefore: e.tokensBefore, timestamp: Date.parse(e.timestamp) || 0 });
+  }
+  return out;
+}
+
+// Process lifecycle: a Pi is kept running while it may be needed soon, and stopped when it is not.
+const IDLE_STOP_MS = 20 * 60 * 1000; // an idle Pi nobody has looked at for this long is stopped
+const MAX_IDLE_PER_ENV = 6;          // and at most this many idle Pis stay up per machine (least recently used go first)
+const SWEEP_MS = 60 * 1000;
 
 export class SessionManager extends EventEmitter {
   runtimes = new Map();   // session id -> { session, status, streaming, questions: Map, starting, lastSeq }
@@ -22,6 +42,9 @@ export class SessionManager extends EventEmitter {
 
   constructor({ store, environments, local, piVersion, piPackageDir, bridgePath, relayPath, cacheDir }) {
     super();
+    this.focused = null; // the session on screen: never stopped by the sweep
+    this.sweeper = setInterval(() => this.sweep().catch(() => {}), SWEEP_MS);
+    this.sweeper.unref?.();
     this.store = store;
     this.environments = environments; // () => [environment]
     this.local = local;               // { node, piCli, agentDir, extraEnv, runDir, uploadDir }
@@ -295,7 +318,7 @@ export class SessionManager extends EventEmitter {
     runtime.status = runtime.autoReconnect ? 'reconnecting' : 'connecting';
     this.emit('status', { id, status: runtime.status });
     runtime.starting = this.#start(record, runtime).then(session => {
-      runtime.status = 'connected'; runtime.starting = null; runtime.retry = 0;
+      runtime.status = 'connected'; runtime.starting = null; runtime.retry = 0; runtime.lastUsed = Date.now();
       this.emit('status', { id, status: 'connected', streaming: runtime.streaming });
       return session;
     }, error => {
@@ -398,6 +421,7 @@ export class SessionManager extends EventEmitter {
   }
 
   #onEvent(record, runtime, event) {
+    runtime.lastUsed = Date.now();
     if (event.type === 'agent_start') { runtime.streaming = true; this.emit('status', { id: record.id, status: runtime.status, streaming: true }); }
     if (event.type === 'agent_settled') { runtime.streaming = false; this.#save(record, { lastActiveAt: Date.now() }); this.emit('status', { id: record.id, status: runtime.status, streaming: false }); }
     this.emit('event', { id: record.id, event });
@@ -539,24 +563,93 @@ export class SessionManager extends EventEmitter {
 
   // Full visible history: the active branch of the session tree, including messages from before any
   // compaction (Pi's get_messages returns only what the model still sees), with compactions as markers.
+  // Visible history. A running Pi answers from memory; otherwise the session file is read directly (local
+  // file, or one `cat` over the shared SSH connection) while Pi starts in the background, so opening a
+  // conversation never waits for a cold Pi.
   async messages(id) {
-    const session = await this.ensureStarted(id);
+    this.focus(id);
+    const runtime = this.runtimes.get(id);
+    if (runtime?.status === 'connected') return this.#liveHistory(runtime.session);
+    const record = this.record(id);
+    let fromFile = false;
+    const starting = this.ensureStarted(id);
+    starting.then(session => {
+      // Pi was mid-reply when we attached: the file may lack what finished meanwhile; reload from Pi.
+      if (fromFile && session.initialState?.isStreaming) this.emit('resync', { id });
+    }, () => {});
+    if (record.piSessionFile) {
+      try {
+        const messages = await this.#historyFromFile(record);
+        fromFile = true;
+        return messages;
+      } catch { /* unreadable: ask Pi */ }
+    }
+    return this.#liveHistory(await starting);
+  }
+  async #liveHistory(session) {
     try {
       const { entries, leafId } = await session.request('get_entries', {}, { timeout: 60000 });
-      const byId = new Map(entries.map(e => [e.id, e]));
-      const path = [];
-      for (let e = byId.get(leafId); e; e = byId.get(e.parentId)) path.push(e);
-      path.reverse();
-      const out = [];
-      for (const e of path) {
-        if (e.type === 'message' && e.message) out.push(e.message);
-        else if (e.type === 'compaction') out.push({ role: 'compactionSummary', summary: e.summary, tokensBefore: e.tokensBefore, timestamp: Date.parse(e.timestamp) || 0 });
-      }
-      return out;
+      return branchMessages(entries, leafId);
     } catch {
       return session.messages();
     }
   }
+  async #historyFromFile(record) {
+    const env = this.env(record.environmentId);
+    const text = env.kind === 'local'
+      ? await readFile(record.piSessionFile, 'utf8')
+      : await runSsh(env, `cat ${shellQuote(record.piSessionFile)}`, { timeout: 30000 });
+    const entries = [];
+    for (const line of text.split('\n')) {
+      if (!line) continue;
+      try { const entry = JSON.parse(line); if (entry?.id) entries.push(entry); } catch { /* torn last line */ }
+    }
+    if (!entries.length) throw new Error('empty session file');
+    return branchMessages(entries, entries.at(-1).id); // Pi resumes at the last entry it wrote
+  }
+
+  // ---------------------------------------------------------------- warm-up and lifecycle
+  focus(id) { this.focused = id; this.touch(id); }
+  touch(id) { const runtime = this.runtimes.get(id); if (runtime) runtime.lastUsed = Date.now(); }
+  // Likely to be opened soon (hovered in the sidebar): start its Pi now.
+  warm(id) {
+    if (!this.store.sessions.some(s => s.id === id)) return false;
+    this.ensureStarted(id).then(() => this.touch(id), () => {});
+    return true;
+  }
+  // A spare Pi in the open conversation's folder, so Fork (and a new session there) adopts a running Pi.
+  async warmFolder(id) {
+    const record = this.store.sessions.find(s => s.id === id);
+    if (!record || record.archived) return false;
+    return this.prewarm({ environmentId: record.environmentId, cwd: record.cwd, model: record.model, thinkingLevel: record.thinkingLevel });
+  }
+  #idle(runtime) {
+    return runtime.status === 'connected' && !runtime.streaming && !runtime.starting && !runtime.questions.size && runtime.goal?.status !== 'active';
+  }
+  // Stop Pis that are idle and either unused for IDLE_STOP_MS or beyond MAX_IDLE_PER_ENV on their machine.
+  // A stopped session restarts on its next use; its history stays readable from the session file.
+  async sweep(now = Date.now()) {
+    const spareIds = new Set([...this.spares.values()].map(sp => sp.id));
+    const idle = [];
+    for (const [id, runtime] of this.runtimes) {
+      if (id === this.focused || spareIds.has(id) || !this.#idle(runtime)) continue;
+      const record = this.store.sessions.find(s => s.id === id);
+      if (record) idle.push({ id, record, used: runtime.lastUsed ?? 0 });
+    }
+    const stop = new Set(idle.filter(x => now - x.used > IDLE_STOP_MS).map(x => x.id));
+    const byEnv = new Map();
+    for (const x of idle) { if (!byEnv.has(x.record.environmentId)) byEnv.set(x.record.environmentId, []); byEnv.get(x.record.environmentId).push(x); }
+    for (const list of byEnv.values()) list.sort((a, b) => b.used - a.used).slice(MAX_IDLE_PER_ENV).forEach(x => stop.add(x.id));
+    await Promise.all([...stop].map(async id => {
+      const record = this.store.sessions.find(s => s.id === id);
+      const env = record && this.environments().find(e => e.id === record.environmentId);
+      await this.close(id);
+      if (env) await this.stopRelay(env, id).catch(() => {});
+      this.emit('status', { id, status: 'idle' });
+    }));
+    return [...stop];
+  }
+
   async stats(id) { const runtime = this.runtimes.get(id); if (runtime?.status !== 'connected') return null; return runtime.session.request('get_session_stats'); }
 
   rename(id, title) {
@@ -593,23 +686,42 @@ export class SessionManager extends EventEmitter {
     this.emit('sessions');
   }
 
-  // A new session that continues from a copy of this one's history.
+  // A new session that continues from a copy of this one's history. A spare Pi already running in the
+  // same folder (kept warm while the conversation is open) takes it over: switch to the source file and
+  // clone it, with no Pi to start. Without one, a fresh Pi does the same.
   async fork(id) {
     const source = this.record(id);
     if (!source.piSessionFile) throw new Error('Send a message before forking this conversation.');
     const env = this.env(source.environmentId);
-    const record = {
-      id: randomUUID(), title: `${source.title} (fork)`, environmentId: source.environmentId, environmentLabel: env.label, cwd: source.cwd,
-      project: source.project, model: source.model, thinkingLevel: source.thinkingLevel, piSessionFile: source.piSessionFile,
+    const fields = {
+      title: `${source.title} (fork)`, environmentId: source.environmentId, environmentLabel: env.label, cwd: source.cwd,
+      project: source.project, noFolder: source.noFolder, model: source.model, thinkingLevel: source.thinkingLevel,
       createdAt: Date.now(), updatedAt: Date.now(),
     };
+    const key = `${source.environmentId}\n${source.cwd}`;
+    const spare = this.spares.get(key);
+    let record, session;
+    if (spare && this.runtimes.get(spare.id)?.status === 'connected') {
+      this.spares.delete(key);
+      clearTimeout(spare.timer);
+      // The spare's runtime and relay session are keyed by its id and hold its record object: keep both.
+      record = Object.assign(spare.record, fields, { piSessionFile: source.piSessionFile });
+      delete record.spare;
+      session = this.runtimes.get(record.id).session;
+      const switched = await session.request('switch_session', { sessionPath: source.piSessionFile }, { timeout: 60000 });
+      if (switched?.cancelled) throw new Error('Forking was cancelled.');
+    } else {
+      record = { id: randomUUID(), ...fields, piSessionFile: source.piSessionFile };
+    }
     this.store.sessions.unshift(record);
     this.store.saveSessions();
     this.emit('sessions');
-    const session = await this.ensureStarted(record.id); // a Pi on the source file…
+    session ??= await this.ensureStarted(record.id); // a fresh Pi on the source file
     await session.request('clone', {}, { timeout: 60000 }); // …that switches to a copy of it
     const state = await session.state();
     session.request('set_session_name', { name: record.title }).catch(() => {});
+    if (source.model && (state.model?.provider !== source.model.provider || state.model?.id !== source.model.id)) await session.setModel(source.model.provider, source.model.id).catch(() => {});
+    if (source.thinkingLevel && state.thinkingLevel !== source.thinkingLevel) await session.request('set_thinking_level', { level: source.thinkingLevel }).catch(() => {});
     this.#save(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId });
     return this.#view(record);
   }
@@ -659,6 +771,7 @@ export class SessionManager extends EventEmitter {
   }
 
   async shutdown() {
+    clearInterval(this.sweeper);
     for (const key of [...this.spares.keys()]) this.#dropSpare(key);
     await Promise.all([...this.runtimes.keys()].map(id => this.close(id)));
     await this.egress?.close();
