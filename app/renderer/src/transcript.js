@@ -39,10 +39,10 @@ function generation(m) {
   // Prefer first→last from the stream; keep full API duration for replay/burst or
   // untimed history. The burst guard avoids a relay replay looking like 10k tok/s.
   let ms = m.durationMs;
-  if (t?.first && t?.last && t.last > t.first) {
+  if (t?.first && t?.last && t.last > t.first && (t.chars ?? 0) >= 20) {
     const window = t.last - t.first;
     const chars = t.chars ?? 0;
-    if (!chars || chars / window <= 20) ms = window;
+    if (chars / window <= 20) ms = window;
   }
   if (!Number.isFinite(ms) || ms <= 0) return null;
   // Some gateways (notably Cursor's Gemini path) report a token count that is

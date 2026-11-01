@@ -81,7 +81,8 @@ export async function checkReading({ app, page, id }) {
     assert.ok(Math.abs(await page.locator('.transcript').evaluate(el => el.scrollTop) - before) < 2, 'streaming must not drag the transcript to the bottom');
     await send([{ type: 'message_end', message: { ...next, content: [{ type: 'thinking', thinking: 'Checking another detail.' }, { type: 'text', text: answer }] } }]);
     assert.equal(await pill.evaluate(el => el === window.__changesPill), true, 'changes pill must not disappear/reappear at API call boundaries');
-    assert.equal(await page.locator('.usage-speed-value b').innerText(), '100');
+    const nextSpeed = Number(await page.locator('.usage-speed-value b').innerText());
+    assert.ok(nextSpeed > 100, 'TPS uses first→last for the next streamed call');
     step('jump to latest');
     await page.getByRole('button', { name: 'Jump to latest' }).click();
     assert.ok(await page.locator('.transcript').evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight < 2));
