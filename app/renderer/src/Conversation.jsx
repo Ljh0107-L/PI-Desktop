@@ -381,10 +381,14 @@ export function Transcript({ session, transcript, questions }) {
   const scrollIntent = useRef(false);
   const [following, setFollowing] = useState(true);
   const [expanded, setExpanded] = useState({});
+  // "Latest" appears only when there is unseen content below — not merely because you opened a step.
+  const updateLatest = () => {
+    const el = scroller.current;
+    if (el) setFollowing(stick.current || el.scrollHeight - el.scrollTop - el.clientHeight < 40);
+  };
   const pauseFollowing = useCallback(() => {
     stick.current = false;
     scrollIntent.current = false;
-    setFollowing(false);
   }, []);
   const followLatest = () => {
     stick.current = true;
@@ -398,11 +402,15 @@ export function Transcript({ session, transcript, questions }) {
     if (e.target !== scroller.current) return;
     const el = scroller.current;
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-    if (!atBottom) { stick.current = false; setFollowing(false); }
-    else if (scrollIntent.current) { stick.current = true; setFollowing(true); }
+    if (!atBottom) stick.current = false;
+    else if (scrollIntent.current) stick.current = true;
     scrollIntent.current = false;
+    updateLatest();
   };
-  useLayoutEffect(() => { if (stick.current && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }, [blocks, questions]);
+  useLayoutEffect(() => {
+    if (stick.current && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
+    updateLatest();
+  }, [blocks, questions]);
   useEffect(() => { setExpanded({}); followLatest(); }, [session?.id]);
   const disclosure = useMemo(() => ({ expanded, setExpanded, pauseFollowing }), [expanded, pauseFollowing]);
   const working = session?.streaming || session?.compacting || transcript.compacting || session?.status === 'connecting';
@@ -451,8 +459,8 @@ export function Transcript({ session, transcript, questions }) {
         {working && !loading && !questions.length && <WorkingRow session={session} transcript={transcript} />}
         <div className="transcript-end" />
       </div>
-      {!following && <div className="transcript-follow"><button aria-label="Jump to latest" onClick={followLatest}><Icon name="arrowDown" size={16} /> Latest</button></div>}
     </div>
+    {!following && <button className="transcript-follow" aria-label="Jump to latest" onClick={followLatest}><Icon name="arrowDown" size={15} /> Latest</button>}
     {loading && <div className="transcript-loading" role="status" aria-label="Loading conversation"><Spinner size={26} /></div>}
     </div>
     </DisclosureContext.Provider>

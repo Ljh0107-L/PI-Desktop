@@ -204,9 +204,6 @@ code, pre, kbd { font-family: var(--mono); }
 .transcript-loading { position: absolute; inset: 0; display: grid; place-items: center; pointer-events: none; color: var(--muted); }
 .reasoning-tokens { flex-shrink: 0; color: var(--faint); font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .reasoning-tokens::before { content: '·'; margin-right: 6px; }
-.transcript-follow { position: sticky; bottom: 12px; height: 0; display: flex; justify-content: center; pointer-events: none; z-index: 2; }
-.transcript-follow button { transform: translateY(-100%); pointer-events: auto; display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-radius: 18px; background: var(--bg-raised); border: 0.5px solid var(--border-strong); color: var(--text-2); font-size: 12.5px; }
-.transcript-follow button:hover { background: var(--surface); }
 .user-row { display: flex; justify-content: flex-end; margin: 12px 0 2px; }
 .user-bubble { max-width: 82%; background: #2a2a2a; border: 0.5px solid var(--hairline); border-radius: 18px; padding: 9px 15px; white-space: pre-wrap; word-break: break-word; font-size: 15px; line-height: 1.55; }
 
@@ -941,3 +938,7 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 
 /* messages sent while Pi works: shown at once, dimmed until Pi takes them */
 .user-row.queued .user-bubble { opacity: .55; }
+
+/* jump back to the newest content: floats at the bottom of the conversation, outside its scroll */
+.transcript-follow { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 3; display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: 15px; background: var(--bg-raised); border: 0.5px solid var(--border-strong); box-shadow: var(--shadow-card); color: var(--text-2); font-size: 13px; }
+.transcript-follow:hover { background: var(--surface); color: var(--text); }
