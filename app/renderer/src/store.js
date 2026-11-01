@@ -14,6 +14,7 @@ function saveTiming(id, message) {
 }
 
 const listeners = new Set();
+const deleting = new Set(); // Suppress stale session-list events while deletion is being acknowledged.
 let state = {
   ready: false,
   settings: null, environments: [], sessions: [], catalog: [], catalogError: null,
@@ -98,7 +99,7 @@ window.pidesk.subscribe(({ channel, payload }) => {
       if (payload.status === 'disconnected') set(s => ({ questions: { ...s.questions, [payload.id]: [] } }));
       break;
     case 'sessions':
-      set({ sessions: payload });
+      set({ sessions: payload.filter(s => !deleting.has(s.id)) });
       break;
     case 'question':
       set(s => ({ questions: { ...s.questions, [payload.id]: [...(s.questions[payload.id] ?? []).filter(q => q.requestId !== payload.question.requestId), payload.question] } }));
@@ -243,8 +244,16 @@ export async function sendPrompt(id, text, attachments = []) {
   if (command === 'compact') { await api('compact', id); return; }
   if (command === 'fork') { await forkSession(id); return; }
   if (command === 'new') { newSession(); return; }
-  warnIfNoImages(state.sessions.find(s => s.id === id)?.model, attachments);
-  await api('prompt', id, text, attachments);
+  const session = state.sessions.find(s => s.id === id);
+  warnIfNoImages(session?.model, attachments);
+  // Sent while Pi works: show it at once (dimmed) until Pi takes it before its next model call.
+  const queued = session?.streaming && !text.startsWith('/') ? { id: Math.random().toString(36).slice(2), text, images: attachments.filter(a => a.kind === 'image') } : null;
+  if (queued) setTranscript(id, { ...transcriptOf(id), queued: [...(transcriptOf(id).queued ?? []), queued] });
+  try { await api('prompt', id, text, attachments); }
+  catch (error) {
+    if (queued) setTranscript(id, { ...transcriptOf(id), queued: (transcriptOf(id).queued ?? []).filter(q => q.id !== queued.id) });
+    throw error;
+  }
 }
 
 // Pi drops images for models without image input; say so instead of failing silently.
@@ -261,9 +270,27 @@ export async function forkSession(id) {
 }
 
 export async function deleteSession(id) {
-  await api('deleteSession', id);
+  if (deleting.has(id)) return;
+  const removed = state.sessions.find(s => s.id === id);
+  const index = state.sessions.findIndex(s => s.id === id);
+  deleting.add(id);
+  // The click takes effect immediately; SSH/process cleanup must not hold the interface hostage.
   set(s => ({ sessions: s.sessions.filter(x => x.id !== id) }));
   if (state.activeId === id) newSession();
+  try {
+    await api('deleteSession', id);
+    const without = object => Object.fromEntries(Object.entries(object).filter(([key]) => key !== id));
+    set(s => ({ transcripts: without(s.transcripts), questions: without(s.questions), stats: without(s.stats), files: without(s.files),
+      history: s.history.filter(v => v.activeId !== id), future: s.future.filter(v => v.activeId !== id) }));
+  } catch (error) {
+    // Don't silently lose the conversation or navigate away from whatever the user opened meanwhile.
+    if (removed) set(s => {
+      const sessions = s.sessions.filter(x => x.id !== id);
+      sessions.splice(Math.max(0, index), 0, removed);
+      return { sessions };
+    });
+    throw error;
+  } finally { deleting.delete(id); }
 }
 
 export async function editMessage(id, ordinal, originalText, text, attachments = []) {

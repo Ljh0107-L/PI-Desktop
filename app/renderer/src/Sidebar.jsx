@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
-import { MenuItem, Popover, Spinner } from './ui.jsx';
+import { MenuItem, Popover, Spinner, useResizable } from './ui.jsx';
 import { api, askConfirm, deleteSession, forkSession, goBack, goForward, newSession, notify, openSession, openSettings, toggleSidebar, useStore } from './store.js';
 
 export function SessionMenuItems({ session, close, onRename }) {
@@ -82,8 +82,10 @@ export function Sidebar() {
     }
     return [...map.values()];
   }, [sessions]);
+  const [sidebarWidth, sidebarHandle] = useResizable('sidebar', 284, 220, 480, 'right');
   return (
-    <aside className="sidebar">
+    <aside className="sidebar" style={{ width: sidebarWidth }}>
+      {sidebarHandle}
       <div className="sidebar-top drag">
         <div className="window-tools">
           <button className="tool-button" onClick={toggleSidebar} aria-label="Hide sidebar" title="Hide sidebar"><Icon name="sidebarToggle" size={19} /></button>

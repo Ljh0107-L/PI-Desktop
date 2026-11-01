@@ -1,10 +1,29 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { Markdown, Spinner } from './ui.jsx';
 import { changesOf, displayBlocks, formatTokens, toolSummary } from './transcript.js';
-import { api, editMessage, notify, openChanges, useStore } from './store.js';
+import { api, editMessage, notify, openChanges } from './store.js';
 import { changeStats, hunkLines } from './diffs.js';
 import { Composer } from './Composer.jsx';
+
+// Disclosure state belongs to the transcript, not a transient grouped row. A streamed thought can
+// become a work group, and groups can split when text arrives. Preserve the user's choices by step ID.
+const DisclosureContext = createContext(null);
+function useDisclosure(ids) {
+  const { expanded, setExpanded, pauseFollowing } = useContext(DisclosureContext);
+  const keys = Array.isArray(ids) ? ids : [ids];
+  const open = keys.some(id => expanded[id]);
+  const setOpen = action => {
+    pauseFollowing();
+    setExpanded(previous => {
+      const next = typeof action === 'function' ? action(keys.some(id => previous[id])) : action;
+      return { ...previous, ...Object.fromEntries(keys.map(id => [id, next])) };
+    });
+  };
+  return [open, setOpen];
+}
+const groupIds = items => items.flatMap(item => item.kind === 'tools'
+  ? item.calls.map(call => `group:tool:${call.id}`) : [`group:${item.key}`]);
 
 const textOf = result => (result?.content ?? []).map(c => c.text ?? '').join('').replace(/\s+$/, '');
 
@@ -70,7 +89,7 @@ const Caret = ({ open }) => <Icon name={open ? 'caretDown' : 'caretRight'} size=
 const outputText = text => text.length > 8000 ? text.slice(0, 8000) + '\n…' : text;
 
 function ToolCall({ call, tool }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useDisclosure(`tool:${call.id}`);
   const { verb, subject, detail, mono, title } = describeCall(call);
   const status = tool?.status ?? 'pending';
   const output = textOf(tool?.result);
@@ -78,8 +97,8 @@ function ToolCall({ call, tool }) {
   const hunks = call.name === 'edit' ? editHunks(call.arguments) : call.name === 'write' ? [{ oldText: null, newText: String(call.arguments?.content ?? '') }] : [];
   const stats = hunks.length && status !== 'error' ? changeStats({ hunks }) : null;
   return (
-    <div className={`step tool-call ${status} ${open ? 'open' : ''}`}>
-      <div className="step-head tool-call-head" role="button" tabIndex={0} onClick={() => setOpen(o => !o)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
+    <div className={`step tool-call ${status} ${open ? 'open' : ''}`} data-tool-id={call.id}>
+      <div className="step-head tool-call-head" role="button" tabIndex={0} aria-expanded={open} onClick={() => setOpen(o => !o)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
         {status === 'running' && <Spinner size={12} />}
         <FadeText className="step-text" title={title ?? filePath ?? undefined}>
           {verb && <span className="step-verb">{verb}</span>}
@@ -113,7 +132,7 @@ function ToolCall({ call, tool }) {
 function ToolGroup({ calls, tools, live }) {
   const running = calls.some(c => tools[c.id]?.status === 'running' || (!tools[c.id] && live));
   const failed = calls.filter(c => tools[c.id]?.status === 'error').length;
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useDisclosure(calls.map(c => `group:tool:${c.id}`));
   return (
     <div className="tool-group">
       <button className="tool-group-head" onClick={() => setOpen(o => !o)}>
@@ -130,14 +149,16 @@ function ToolGroup({ calls, tools, live }) {
 // One reasoning step inside a folded group: its first line, opening to the full text.
 const firstLine = text => String(text ?? '').split('\n').map(l => l.replace(/[*_`#>]/g, '').trim()).find(Boolean) ?? '';
 const thoughtLabel = ms => ms > 800 ? `Thought for ${seconds(ms)}` : 'Thought';
+const ReasoningTokens = ({ tokens }) => tokens > 0 ? <span className="reasoning-tokens" title="Reasoning tokens reported by the provider">{formatTokens(tokens)} tokens</span> : null;
 function WorkNote({ item }) {
-  const [open, setOpen] = useState(false);
-  if (item.hidden || item.redacted || !item.text) return <div className="step static"><div className="step-head"><span className="step-text">{thoughtLabel(item.durationMs)}</span></div></div>;
+  const [open, setOpen] = useDisclosure(`note:${item.key}`);
+  if (item.hidden || item.redacted || !item.text) return <div className="step static"><div className="step-head"><span className="step-text">{thoughtLabel(item.durationMs)}</span><ReasoningTokens tokens={item.tokens} /></div></div>;
   return (
     <div className={`step thought ${open ? 'open' : ''}`}>
-      <div className="step-head" role="button" tabIndex={0} onClick={() => setOpen(o => !o)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
+      <div className="step-head" role="button" tabIndex={0} aria-expanded={open} onClick={() => setOpen(o => !o)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
         {item.streaming && <Spinner size={12} />}
         <FadeText className="step-text">{open ? thoughtLabel(item.durationMs) : firstLine(item.text) || 'Thought'}</FadeText>
+        <ReasoningTokens tokens={item.tokens} />
         <Caret open={open} />
       </div>
       {open && <div className="step-detail step-markdown"><Markdown text={item.text} /></div>}
@@ -148,7 +169,7 @@ function WorkNote({ item }) {
 // Consecutive steps folded into one line ("Ran 2 commands, edited plan.md (1 failed) +12"), opening to a card
 // with one row per step.
 function WorkGroup({ items, tools, live }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useDisclosure(groupIds(items));
   const calls = items.flatMap(i => i.kind === 'tools' ? i.calls : []);
   const running = items.some(i => i.streaming) || calls.some(c => tools[c.id]?.status === 'running' || (!tools[c.id] && live));
   const failed = calls.filter(c => tools[c.id]?.status === 'error').length;
@@ -160,7 +181,7 @@ function WorkGroup({ items, tools, live }) {
   const thinkingNow = running && latest?.kind === 'thinking' && latest.streaming;
   return (
     <div className={`tool-group work ${open ? 'open' : ''}`}>
-      <div className="tool-group-head" role="button" tabIndex={0} onClick={() => setOpen(o => !o)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
+      <div className="tool-group-head" role="button" tabIndex={0} aria-expanded={open} onClick={() => setOpen(o => !o)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
         {running && <Spinner size={12} />}
         <FadeText className={`group-summary ${thinkingNow ? 'shimmer' : ''}`}>{thinkingNow ? firstLine(latest.text) || 'Thinking' : summary || 'Working'}</FadeText>
         {failed > 0 && <span className="group-failed">({failed} failed)</span>}
@@ -181,17 +202,18 @@ const seconds = ms => ms < 60000 ? `${Math.max(1, Math.round(ms / 1000))}s` : `$
 
 // Reasoning comes in four shapes: streamed in full, summarized by the provider, redacted, or hidden
 // entirely (billed but never sent). Only the first two have text to open.
-function Thinking({ text, streaming, redacted, hidden, durationMs }) {
-  const [open, setOpen] = useState(false);
+function Thinking({ text, streaming, redacted, hidden, durationMs, blockKey, tokens }) {
+  const [open, setOpen] = useDisclosure([`group:${blockKey}`, `note:${blockKey}`]);
   const label = durationMs > 800 ? `Thought for ${seconds(durationMs)}` : 'Thought';
   if (hidden || redacted || !text) {
-    return <div className="thinking"><div className="tool-group-head static">{streaming ? <span className="shimmer">Thinking</span> : <span>{label}</span>}</div></div>;
+    return <div className="thinking"><div className="tool-group-head static">{streaming ? <span className="shimmer">Thinking</span> : <span>{label}</span>}<ReasoningTokens tokens={tokens} /></div></div>;
   }
   const latest = streaming ? text.trim().split('\n').filter(l => l.trim()).at(-1)?.replace(/[*_`#>]/g, '').trim() : null;
   return (
     <div className="thinking">
       <button className="tool-group-head" onClick={() => setOpen(o => !o)}>
         {streaming ? <span className="shimmer thinking-latest">{latest || 'Thinking'}</span> : <span>{label}</span>}
+        <ReasoningTokens tokens={tokens} />
         <Icon name={open ? 'caretDown' : 'caretRight'} size={14} />
       </button>
       {open && <div className="thinking-body"><Markdown text={text} /></div>}
@@ -304,8 +326,8 @@ function UserMessage({ block, sessionId, editable }) {
 }
 
 // Where Pi summarized the earlier conversation (automatically, on return after the cache expired, or by hand).
-function CompactionMarker({ summary, tokensBefore }) {
-  const [open, setOpen] = useState(false);
+function CompactionMarker({ summary, tokensBefore, blockKey }) {
+  const [open, setOpen] = useDisclosure(`compaction:${blockKey}`);
   return (
     <div className="compaction">
       <button className="compaction-line" onClick={() => setOpen(o => !o)}>
@@ -329,10 +351,10 @@ function AskBlock({ call, tool }) {
 }
 
 // While Pi works: what it is doing, for how long, and how many tokens it has produced this turn.
-function WorkingRow({ session, transcript, connectingLabel }) {
+function WorkingRow({ session, transcript }) {
   const [, tick] = useState(0);
   useEffect(() => { const t = setInterval(() => tick(n => n + 1), 1000); return () => clearInterval(t); }, []);
-  if (session?.status === 'connecting') return <div className="working"><span className="working-dot" /><span className="shimmer">{connectingLabel}</span></div>;
+  if (session?.status === 'connecting') return null;
   const messages = transcript.messages;
   let from = messages.length; while (from > 0 && messages[from - 1].role !== 'user') from--;
   const turn = messages.slice(from);
@@ -354,26 +376,51 @@ function WorkingRow({ session, transcript, connectingLabel }) {
 }
 
 export function Transcript({ session, transcript, questions }) {
-  // While a session starts, say which step it is on (setting up the host, then starting Pi there).
-  const prep = useStore(s => s.envStatus[session?.environmentId]);
-  const connectingLabel = session?.environmentId && session.environmentId !== 'local'
-    ? (prep?.status === 'preparing' ? `${prep.message?.replace(/…$/, '') || 'Setting up'} on ${session.environmentLabel}…` : `Starting Pi on ${session.environmentLabel ?? 'the server'}…`)
-    : 'Starting Pi…';
   const scroller = useRef(null);
   const stick = useRef(true);
+  const scrollIntent = useRef(false);
+  const [following, setFollowing] = useState(true);
+  const [expanded, setExpanded] = useState({});
+  const pauseFollowing = useCallback(() => {
+    stick.current = false;
+    scrollIntent.current = false;
+    setFollowing(false);
+  }, []);
+  const followLatest = () => {
+    stick.current = true;
+    setFollowing(true);
+    scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
+  };
   const blocks = useMemo(() => displayBlocks(transcript), [transcript]);
   const lastUsage = blocks.findLast(b => b.kind === 'usage');
-  const onScroll = () => {
+  const onScroll = e => {
+    // Output panes also scroll. Their events must not re-enable transcript auto-follow.
+    if (e.target !== scroller.current) return;
     const el = scroller.current;
-    stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    if (!atBottom) { stick.current = false; setFollowing(false); }
+    else if (scrollIntent.current) { stick.current = true; setFollowing(true); }
+    scrollIntent.current = false;
   };
   useLayoutEffect(() => { if (stick.current && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }, [blocks, questions]);
-  useEffect(() => { stick.current = true; if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }, [session?.id]);
+  useEffect(() => { setExpanded({}); followLatest(); }, [session?.id]);
+  const disclosure = useMemo(() => ({ expanded, setExpanded, pauseFollowing }), [expanded, pauseFollowing]);
   const working = session?.streaming || session?.compacting || transcript.compacting || session?.status === 'connecting';
+  const loading = !transcript.error && !['error', 'disconnected'].includes(session?.status) && !transcript.live && (!transcript.loaded || session?.status === 'connecting');
   return (
-    <div className="transcript" ref={scroller} onScroll={onScroll}>
+    <DisclosureContext.Provider value={disclosure}>
+    <div className="transcript-shell">
+    <div className="transcript" ref={scroller} onScroll={onScroll}
+      onWheelCapture={e => {
+        if (e.target.closest('.tool-output, .tool-command, .diff')) { pauseFollowing(); return; }
+        if (e.deltaY < 0) pauseFollowing();
+        scrollIntent.current = true;
+      }}
+      onPointerDown={e => { if (e.target === scroller.current) scrollIntent.current = true; }}
+      onKeyDown={e => {
+        if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'].includes(e.key)) scrollIntent.current = true;
+      }}>
       <div className="transcript-inner">
-        {!transcript.loaded && <div className="transcript-loading"><Spinner /> Loading conversation…</div>}
         {transcript.error && <div className="block-error"><Icon name="alert" size={15} /> {transcript.error}</div>}
         {blocks.map(block => {
           switch (block.kind) {
@@ -381,8 +428,8 @@ export function Transcript({ session, transcript, questions }) {
             case 'goal': return <GoalMarker key={block.key} objective={block.objective} />;
             case 'text': return <Markdown key={block.key} text={block.text} streaming={block.streaming} />;
             case 'usage': return <TurnFooter key={block.key} text={block.text} changes={block.changes} sessionId={session?.id} last={block === lastUsage} />;
-            case 'compaction': return <CompactionMarker key={block.key} {...block} />;
-            case 'thinking': return <Thinking key={block.key} {...block} />;
+            case 'compaction': return <CompactionMarker key={block.key} {...block} blockKey={block.key} />;
+            case 'thinking': return <Thinking key={block.key} {...block} blockKey={block.key} />;
             case 'work': return <WorkGroup key={block.key} items={block.items} tools={transcript.tools} live={!!transcript.live} />;
             case 'tools': return <ToolGroup key={block.key} calls={block.calls} tools={transcript.tools} live={!!transcript.live} />;
             case 'ask': return transcript.tools[block.call.id]?.status === 'done' ? <AskBlock key={block.key} call={block.call} tool={transcript.tools[block.call.id]} /> : null;
@@ -392,10 +439,22 @@ export function Transcript({ session, transcript, questions }) {
             default: return null;
           }
         })}
+        {(transcript.queued ?? []).map(q => (
+          <div key={q.id} className="user-row queued" aria-label="Queued message">
+            <div className="user-stack">
+              {q.images?.length > 0 && <div className="user-images">{q.images.map((img, i) => <img key={i} src={`data:${img.mimeType};base64,${img.data}`} alt="" />)}</div>}
+              {q.text && <div className="user-bubble"><UserText text={q.text} /></div>}
+            </div>
+          </div>
+        ))}
         {questions.map(q => <QuestionCard key={q.requestId} sessionId={session.id} question={q} />)}
-        {working && !questions.length && <WorkingRow session={session} transcript={transcript} connectingLabel={connectingLabel} />}
+        {working && !loading && !questions.length && <WorkingRow session={session} transcript={transcript} />}
         <div className="transcript-end" />
       </div>
+      {!following && <div className="transcript-follow"><button aria-label="Jump to latest" onClick={followLatest}><Icon name="arrowDown" size={16} /> Latest</button></div>}
     </div>
+    {loading && <div className="transcript-loading" role="status" aria-label="Loading conversation"><Spinner size={26} /></div>}
+    </div>
+    </DisclosureContext.Provider>
   );
 }

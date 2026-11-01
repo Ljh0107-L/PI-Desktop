@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import hljs from 'highlight.js/lib/common';
 import { Icon } from './Icons.jsx';
-import { MenuItem, Markdown, Popover, Spinner } from './ui.jsx';
+import { MenuItem, Markdown, Popover, Spinner, useResizable } from './ui.jsx';
 import { changeStats, hunkLines } from './diffs.js';
 import { api, closeFile, notify, openFile, set as setStore, setFilePaneOpen, useStore } from './store.js';
 
@@ -145,6 +145,9 @@ export function FilePane({ session }) {
   const state = useStore(s => s.files[session.id]) ?? { tabs: [], active: null };
   const maximized = useStore(s => s.filePaneMax);
   const [tree, setTree] = useState(true);
+  // The pane and its file tree are both draggable (double-click a handle to reset).
+  const [paneWidth, paneHandle] = useResizable('file-pane', 760, 420, 1400, 'left');
+  const [treeWidth, treeHandle] = useResizable('file-tree', 280, 180, 520, 'left');
   const [menu, setMenu] = useState(false);
   const [version, setVersion] = useState(0);
   const menuRef = useRef(null);
@@ -155,7 +158,8 @@ export function FilePane({ session }) {
   const absolute = path => path.startsWith('/') ? path : `${session.cwd.replace(/\/$/, '')}/${path}`;
   const target = state.active ? absolute(state.active) : session.cwd;
   return (
-    <aside className={`file-pane ${state.active || state.changes ? 'has-file' : ''} ${maximized ? 'maximized' : ''}`}>
+    <aside className={`file-pane ${state.active || state.changes ? 'has-file' : ''} ${maximized ? 'maximized' : ''}`} style={maximized ? undefined : { width: paneWidth }}>
+      {!maximized && paneHandle}
       <div className="fp-bar">
         <div className="fp-tabs">
           {state.tabs.map(path => (
@@ -188,7 +192,9 @@ export function FilePane({ session }) {
           ? <Preview sessionId={session.id} path={state.active} refreshKey={refresh} />
           : state.changes ? <ChangesView sessionId={session.id} changes={state.changes} />
           : <div className="fp-preview fp-placeholder"><Icon name="folder" size={26} /><span>Open files appear here</span></div>}
-        {tree && <div className="fp-tree"><TreeDir sessionId={session.id} rel="" depth={0} active={state.active} version={refresh} /></div>}
+        {tree && (state.active || state.changes
+          ? <div className="fp-tree-wrap" style={{ width: treeWidth }}>{treeHandle}<div className="fp-tree"><TreeDir sessionId={session.id} rel="" depth={0} active={state.active} version={refresh} /></div></div>
+          : <div className="fp-tree"><TreeDir sessionId={session.id} rel="" depth={0} active={state.active} version={refresh} /></div>)}
       </div>
     </aside>
   );

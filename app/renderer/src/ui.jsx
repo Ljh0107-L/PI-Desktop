@@ -148,3 +148,27 @@ export function Modal({ title, onClose, children, width = 640, footer, bare }) {
 export const envIcon = env => env?.kind === 'ssh' ? 'terminal' : 'laptop';
 export const shortPath = (path, home) => home && path?.startsWith(home) ? '~' + path.slice(home.length) : path;
 export const baseName = path => path?.split('/').filter(Boolean).pop() ?? path ?? '';
+
+// A width the user can drag (sidebar, file pane, file tree), remembered across launches.
+// `edge`: which side of the element the handle sits on; dragging away from the element widens it.
+export function useResizable(key, initial, min, max, edge = 'right') {
+  const storageKey = `pidesk.width.${key}`;
+  const clamp = w => Math.round(Math.min(max, Math.max(min, w)));
+  const [width, setWidth] = useState(() => { const saved = Number(localStorage.getItem(storageKey)); return saved ? clamp(saved) : initial; });
+  const onPointerDown = e => {
+    e.preventDefault();
+    const startX = e.clientX, startW = width;
+    let last = startW;
+    document.body.classList.add('resizing');
+    const move = ev => { last = clamp(startW + (edge === 'right' ? ev.clientX - startX : startX - ev.clientX)); setWidth(last); };
+    const up = () => {
+      window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
+      document.body.classList.remove('resizing');
+      localStorage.setItem(storageKey, String(last));
+    };
+    window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+  };
+  const reset = () => { setWidth(initial); localStorage.removeItem(storageKey); };
+  const handle = <div className={`resize-handle ${edge}`} role="separator" aria-orientation="vertical" onPointerDown={onPointerDown} onDoubleClick={reset} />;
+  return [width, handle];
+}

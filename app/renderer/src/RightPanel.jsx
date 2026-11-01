@@ -30,19 +30,19 @@ function UsageCard({ transcript }) {
   const total = usageOf(transcript.messages);
   // Measured speed only (provider token counts ÷ generation time), updated when a reply finishes.
   const recent = turns.slice(-14).map(t => t.tps).filter(v => v != null);
-  const speed = [...turns].reverse().find(t => t.tps != null)?.tps ?? null;
+  const speed = last.tps; // Don't present an older call's speed as this one's when timing is missing.
   const peak = Math.max(...recent, 1);
   const rows = [
     ['Input', last.input + last.cacheWrite, total.input + total.cacheWrite],
     ['Cached', last.cacheRead, total.cacheRead],
     ['Output', last.output, total.output],
-    ...(total.reasoningReported && total.reasoning > 0 ? [['Reasoning', last.reasoning, total.reasoning]] : []),
+    ...(total.reasoningReported ? [['Reasoning', last.reasoningReported ? last.reasoning : null, total.reasoning]] : []),
   ];
   return (
     <Card title="Usage">
       <div className="usage">
         <div className="usage-speed">
-          <div className="usage-speed-value"><b>{fmtTps(speed)}</b><span>tok/s</span></div>
+          <div className="usage-speed-value" title="Output tokens ÷ API call duration (includes first-token latency and reasoning)"><b>{fmtTps(speed)}</b><span>tok/s</span></div>
           <div className="spark" aria-hidden="true">{recent.map((v, i) => <span key={i} style={{ height: `${Math.max(8, v / peak * 100)}%` }} />)}</div>
         </div>
         <div className="usage-table">

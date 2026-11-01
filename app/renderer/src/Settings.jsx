@@ -233,7 +233,6 @@ function ProviderEditor({ initial, onDone }) {
 
 function ModelsPage() {
   const providers = useStore(s => s.settings.providers);
-  const catalog = useStore(s => s.catalog);
   const builtin = useStore(s => s.settings.builtinProviders);
   const [editing, setEditing] = useState(null); // provider id | 'new'
   return (
@@ -243,7 +242,6 @@ function ModelsPage() {
       </div>
       <ul className="rows">
         {providers.map(p => {
-          const count = catalog.filter(m => m.provider === p.id).length;
           return (
             <li key={p.id} className="row-card">
               <div className="row-head">
@@ -251,7 +249,6 @@ function ModelsPage() {
                 <div className="row-identity">
                   <span className="row-name">{p.name ?? builtin[p.id] ?? p.id}</span>
                 </div>
-                <span className="row-meta">{count} {count === 1 ? 'model' : 'models'}{p.kind === 'custom' ? ` · ${p.baseUrl.replace(/^https?:\/\//, '')}` : ''}</span>
                 <div className="row-actions">
                   <button className="button small" onClick={() => setEditing(editing === p.id ? null : p.id)}>Edit</button>
                   <button className="button small danger" onClick={async () => { setSettings(await api('deleteProvider', p.id)); loadCatalog(); }}>Remove</button>
@@ -448,7 +445,6 @@ function UsagePage() {
     { label: 'Total tokens', value: fmtTokens(totals.tokens) },
     { label: 'Today', value: fmtTokens(days[today] ?? 0) },
     { label: 'Active days', value: String(activeDays) },
-    { label: 'Est. cost', value: totals.cost ? `$${totals.cost < 100 ? totals.cost.toFixed(2) : Math.round(totals.cost).toLocaleString()}` : '—' },
   ];
   return <>
     <section className="section">
@@ -479,7 +475,6 @@ function UsagePage() {
           </li>
         ))}
       </ol> : <div className="grouped-empty">No usage yet — it appears here after your first reply.</div>}
-      <p className="section-foot">Counts every model reply: input, cached and output tokens. Conversations on SSH hosts count from this version on.</p>
     </section>
   </>;
 }

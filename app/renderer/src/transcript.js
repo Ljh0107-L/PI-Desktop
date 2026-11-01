@@ -25,18 +25,15 @@ export function fromHistory(messages, timings = {}) {
 // Pi's usage: input = uncached prompt tokens, cacheRead / cacheWrite = cached prompt tokens, output
 // (which already includes `reasoning` when the provider reports it).
 //
-// Speed must survive hidden or summarized reasoning: such models think silently (or stream only a short
-// summary), so output tokens far exceed what was streamed, and the first visible token comes late.
-// Measuring from that token would overstate the speed, so for those replies the window starts when
-// the reply started streaming instead.
+// Pi measures durationMs at the source with a monotonic clock, from API stream creation to completion.
+// Renderer delta arrival times are NOT generation times: proxies buffer chunks, SSH replays them, and
+// background windows can deliver several seconds of output in one frame. Dividing all output by that
+// tiny receive window produced 1000+ tok/s spikes. Use the full per-call duration, including hidden
+// reasoning / first-token latency, and never synthesize a speed for untimed history.
 function generation(m) {
-  const t = m.__timing, out = m.usage?.output ?? 0;
-  if (!t?.end || !out) return null;
-  const streamedTokens = t.est ?? (t.chars ?? 0) / 4;
-  const hiddenWork = (m.usage.reasoning ?? 0) > streamedTokens * 0.5 || out > streamedTokens * 1.6 + 20;
-  const from = hiddenWork || !t.first ? t.start : t.first;
-  const ms = (t.last ?? t.end) - from; // to the last streamed token, not the closing usage chunk
-  return ms > 50 ? { ms, out, hiddenWork } : null;
+  const out = m.usage?.output, ms = m.durationMs;
+  if (!Number.isFinite(out) || out <= 0 || !Number.isFinite(ms) || ms <= 0) return null;
+  return { ms, out, hiddenWork: (m.usage.reasoning ?? 0) > 0 };
 }
 export function usageOf(messages) {
   const u = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0, reasoningReported: false, cost: 0, genMs: 0, genOut: 0, hiddenWork: false, start: null, end: null, calls: 0 };
@@ -114,8 +111,14 @@ export function applyEvent(t, event) {
         const timing = t.live?.__t0 ? { start: t.live.__t0, first: t.live.__tFirst ?? null, end: now, last: t.live.__tLast ?? null, chars: t.live.__chars ?? 0, est: t.live.__est ?? null, think: t.live.__thinkStart ? (t.live.__thinkEnd ?? now) - t.live.__thinkStart : null } : null;
         return { ...t, live: null, messages: [...t.messages, timing ? { ...message, __timing: timing } : message] };
       }
-      // Your message arrived from Pi: it replaces the optimistic copy shown while editing.
-      if (message.role === 'user') return { ...t, messages: [...t.messages.filter(m => !m.__optimistic), message] };
+      // Your message arrived from Pi: it replaces the optimistic copy shown while editing, and the dimmed
+      // copy of a message sent while Pi was working.
+      if (message.role === 'user') {
+        const sent = userText(message);
+        const queued = t.queued ?? [];
+        const i = queued.findIndex(q => sent === q.text || sent.startsWith(q.text));
+        return { ...t, queued: i < 0 ? queued : queued.filter((_, j) => j !== i), messages: [...t.messages.filter(m => !m.__optimistic), message] };
+      }
       return { ...t, messages: [...t.messages, message] };
     }
     case 'compaction_start': return { ...t, compacting: true };
@@ -137,12 +140,15 @@ export function displayBlocks(t) {
   const all = t.live ? [...t.messages, t.live] : t.messages;
   let group = null;
   const flush = () => { if (group) { blocks.push(group); group = null; } };
-  let turn = [];
-  const closeTurn = (key, live) => {
-    if (turn.length && !live) {
+  let turn = [], turnKey = 'start';
+  const closeTurn = () => {
+    if (turn.length) {
       const usage = usageOf(turn);
       const text = turn.flatMap(m => (m.content ?? []).filter(c => c?.type === 'text').map(c => c.text)).join('\n\n').trim();
-      if (usage.calls) blocks.push({ kind: 'usage', key, usage, text, changes: changesOf(turn, t.tools) });
+      const changes = changesOf(turn, t.tools);
+      // Keep this footer mounted while the next API call is streaming. Its stable key follows the user
+      // prompt, not the changing index at the end of the transcript.
+      if (usage.calls || changes.length) blocks.push({ kind: 'usage', key: `usage:${turnKey}`, usage, text, changes });
     }
     turn = [];
   };
@@ -151,9 +157,10 @@ export function displayBlocks(t) {
     if (message.role === 'assistant') turn.push(message);
     if (message.role === 'user') {
       flush();
-      closeTurn(`s${mi}`, false);
+      closeTurn();
+      turnKey = message.timestamp ?? `u${mi}`;
       const parts = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content ?? [];
-      let text = parts.filter(c => c.type === 'text').map(c => c.text).join('\n');
+      let text = stripImageNotes(parts.filter(c => c.type === 'text').map(c => c.text).join('\n'));
       if (text.startsWith('/pidesk-')) return;
       // Attached files travel as a trailing list of paths (see SessionManager.prompt).
       let files = [];
@@ -166,7 +173,7 @@ export function displayBlocks(t) {
     // A goal started with /goal (the bridge's hidden prompt): show what was set.
     if (message.role === 'custom' && message.customType === 'pidesk-goal') {
       const objective = /^The user set a goal[\s\S]*?<objective>\n([\s\S]*?)\n<\/objective>/.exec(typeof message.content === 'string' ? message.content : '')?.[1];
-      if (objective) { flush(); closeTurn(`s${mi}`, false); blocks.push({ kind: 'goal', key: `g${mi}`, objective }); }
+      if (objective) { flush(); closeTurn(); turnKey = `goal:${mi}`; blocks.push({ kind: 'goal', key: `g${mi}`, objective }); }
       // A goal continuation is a new prompt: the reply before it is an answer, not folded work.
       else { flush(); blocks.push({ kind: 'break', key: `x${mi}` }); }
       return;
@@ -205,7 +212,7 @@ export function displayBlocks(t) {
     if (message.stopReason === 'aborted') { flush(); blocks.push({ kind: 'notice', key: `a${mi}`, text: 'Interrupted' }); }
   });
   flush();
-  closeTurn('s-end', !!t.live);
+  closeTurn();
   return collapseWork(blocks);
 }
 
@@ -220,7 +227,9 @@ export function collapseWork(blocks) {
     let j = i;
     while (j < blocks.length && STEP.has(blocks[j].kind)) j++;
     const run = blocks.slice(i, j);
-    if (run.length > 1 || run[0].kind === 'tools') out.push({ kind: 'work', key: run[0].key, items: run });
+    // Keep the group identity when hidden reasoning is inserted before its first call on message_end.
+    const firstCall = run.find(b => b.kind === 'tools')?.calls[0];
+    if (run.length > 1 || run[0].kind === 'tools') out.push({ kind: 'work', key: firstCall?.id ? `work:${firstCall.id}` : run[0].key, items: run });
     else out.push(run[0]);
     i = j;
   }
@@ -285,7 +294,11 @@ export function changesOf(messages, tools = {}) {
   return [...byPath.values()];
 }
 
-const userText = m => (typeof m.content === 'string' ? m.content : (m.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n'));
+// Pi adds a note for the model after each resized image ("[Image: original 3768x1800, displayed at …]").
+// It stays in what the model reads; the conversation never shows it.
+export const IMAGE_NOTE = /\n*\[Image: original \d+x\d+, displayed at \d+x\d+\. Multiply coordinates by [\d.]+ to map to original image\.\]/g;
+export const stripImageNotes = text => String(text ?? '').replace(IMAGE_NOTE, '').replace(/\s+$/, '');
+const userText = m => stripImageNotes(typeof m.content === 'string' ? m.content : (m.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n'));
 // Editing your ordinal-th message: keep everything before it and show the new text in its place at once,
 // so the conversation never blanks while Pi branches and reloads.
 export function rewindTo(t, ordinal, text, images = []) {

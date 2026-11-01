@@ -448,8 +448,10 @@ export class SessionManager extends EventEmitter {
       const paths = await this.#placeFiles(record, files);
       message = `${text}${text ? '\n\n' : ''}Attached files:\n${paths.map(p => `- ${p}`).join('\n')}`;
     }
-    const runtime = this.runtimes.get(id);
-    const sent = await session.prompt(message, { ...(images.length ? { images } : {}), ...(runtime.streaming && !message.startsWith('/') ? { streamingBehavior: 'followUp' } : {}) });
+    // Always 'steer' (Pi ignores it when idle): a message sent while Pi works reaches the model before its
+    // next call, as in Claude Code, instead of waiting for the whole run to finish ('followUp'). Not keyed on
+    // runtime.streaming, which can lag a moment behind Pi and then made the prompt fail.
+    const sent = await session.prompt(message, { ...(images.length ? { images } : {}), streamingBehavior: 'steer' });
     if (nameIt && !nameIt.startsWith('/')) session.prompt(`/pidesk-title ${Buffer.from(nameIt).toString('base64')}`).catch(() => {});
     return sent;
   }
@@ -576,10 +578,11 @@ export class SessionManager extends EventEmitter {
   // Remove a session for good: its Pi process, its session file, and the record.
   async delete(id) {
     const record = this.record(id);
-    await this.close(id);
     const env = this.environments().find(e => e.id === record.environmentId);
+    // close() marks the runtime as closing synchronously. Stop the relay alongside detaching instead
+    // of paying for two round trips in sequence; file removal still waits for both.
+    await Promise.all([this.close(id), env ? this.stopRelay(env, id).catch(() => {}) : null]);
     if (env) {
-      await this.stopRelay(env, id).catch(() => {});
       if (record.piSessionFile) {
         if (env.kind === 'local') rmSync(record.piSessionFile, { force: true });
         else await runSsh(env, `rm -f ${shellQuote(record.piSessionFile)}`).catch(() => {});
@@ -622,7 +625,9 @@ export class SessionManager extends EventEmitter {
       await settled;
     }
     const { messages } = await session.request('get_fork_messages');
-    const same = m => m.text?.trim() === String(originalText ?? '').trim();
+    // The desktop shows messages without Pi's notes about resized images; compare them the same way.
+    const plain = text => String(text ?? '').replace(/\n*\[Image: original \d+x\d+, displayed at \d+x\d+\. Multiply coordinates by [\d.]+ to map to original image\.\]/g, '').trim();
+    const same = m => plain(m.text) === plain(originalText);
     let target = messages[ordinal];
     if (!target || (originalText && !same(target))) target = [...messages].reverse().find(same);
     if (!target) throw new Error('That message can no longer be edited.');

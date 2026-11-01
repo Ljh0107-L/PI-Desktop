@@ -10,6 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { launch, shot } from './harness.mjs';
 import { startMockLlm } from './mock-llm.mjs';
+import './transcript.mjs';
+import { checkReading } from './reading.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -92,10 +94,13 @@ try {
   await S('02-add-provider');
   await page.click('form.editor button[type=submit]');
   await page.locator('.row-card', { hasText: 'Mock Lab' }).waitFor();
-  await page.locator('.row-card', { hasText: '2 models' }).waitFor({ timeout: 30000 });
+  await page.locator('form.editor').waitFor({ state: 'detached' });
   const savedSettings = JSON.parse(readFileSync(join(profile, 'settings.json'), 'utf8'));
-  const beta = savedSettings.providers.find(p => p.name === 'Mock Lab')?.models?.find(m => m.id === 'beta-1');
-  check('provider added via Settings: two models picked, parameters saved', (await page.locator('.row-card', { hasText: 'Mock Lab' }).innerText()).includes('2 models') && beta?.contextWindow === 204800 && beta?.thinkingLevelMap?.minimal === 'low', JSON.stringify({ cw: beta?.contextWindow, map: beta?.thinkingLevelMap }));
+  const provider = savedSettings.providers.find(p => p.name === 'Mock Lab');
+  const beta = provider?.models?.find(m => m.id === 'beta-1');
+  check('provider added via Settings: two models picked, parameters saved', provider?.models?.length === 2 && beta?.contextWindow === 204800 && beta?.thinkingLevelMap?.minimal === 'low', JSON.stringify({ cw: beta?.contextWindow, map: beta?.thinkingLevelMap }));
+  const providerRow = page.locator('.row-card', { hasText: 'Mock Lab' });
+  check('provider list omits model count and URL', !(await providerRow.locator('.row-meta').count()) && !(await providerRow.innerText()).includes(mock.baseUrl('mock-lab')));
   await S('03-providers');
   // ---- add the SSH connection the way Codex does: pick it from ~/.ssh/config
   await page.click('.settings-sidebar-nav .nav-item:has-text("Connections")');
@@ -137,8 +142,12 @@ try {
   await page.locator('.thinking', { hasText: 'Thought for' }).last().waitFor({ timeout: 15000 });
   const hiddenRow = await page.locator('.thinking', { hasText: 'Thought for' }).last().innerText();
   const tpsAfter = Number((await page.locator('.usage-speed-value b').innerText()).replace(/[^\d.]/g, ''));
-  check('hidden reasoning shown as "Thought for…" and speed not inflated', /^Thought for \d+s$/.test(hiddenRow.trim()) && tpsAfter > 0 && tpsAfter < 600, `${hiddenRow.replace(/\s+/g, ' ')} · ${tpsAfter} tok/s`);
+  check('hidden reasoning shown as "Thought for…" and speed not inflated', /^Thought for \d+s[\s\S]*400 tokens$/.test(hiddenRow.trim()) && tpsAfter > 0 && tpsAfter < 600, `${hiddenRow.replace(/\s+/g, ' ')} · ${tpsAfter} tok/s`);
   await S('04b-usage-card');
+  await page.locator('.send-button.stop').waitFor({ state: 'detached' });
+  const readingSession = (await page.evaluate(() => window.pidesk.invoke('listSessions'))).find(s => s.title.includes('hello from the desktop'));
+  await checkReading({ app, page, id: readingSession.id });
+  check('streaming preserves expanded commands and reading position; TPS updates per API call', true);
   // Manual compaction from the conversation menu leaves a marker with the summary.
   for (const word of ['alpha', 'beta', 'gamma']) await waitNew('.markdown', `echo: ${word} `, () => send(`${word} `.repeat(60)));
   await page.locator('.send-button.stop').waitFor({ state: 'detached', timeout: 30000 });
@@ -181,6 +190,16 @@ try {
   const levels = await page.locator('.user-bubble').last().locator('.ub-li').evaluateAll(els => els.map(el => getComputedStyle(el).getPropertyValue('--depth').trim()).join(','));
   check('sent lists keep their levels in your message', levels === '0,1,0', levels);
   await S('05b2-list-message');
+  // a message sent while Pi works shows at once (dimmed) and reaches Pi without waiting for the run to end
+  await send('long ' + 'q'.repeat(1500));
+  await page.locator('.send-button.stop').waitFor({ timeout: 30000 });
+  const queuedAt = Date.now();
+  await send('queued while working');
+  await page.locator('.user-row.queued', { hasText: 'queued while working' }).waitFor({ timeout: 1000 });
+  const queuedMs = Date.now() - queuedAt;
+  await waitText('.markdown', 'echo: queued while working', 60000);
+  check('a message sent while Pi works shows at once and is answered', queuedMs < 1000 && await page.locator('.user-row.queued').count() === 0 && await page.locator('.user-bubble', { hasText: 'queued while working' }).count() === 1, `${queuedMs} ms to show`);
+  await page.locator('.send-button.stop').waitFor({ state: 'detached', timeout: 60000 });
   check('composer continues 1. 2. 3. lists', listed === '1. first\n2. ' && ended === '1. first\n', JSON.stringify({ listed, ended }));
 
   await waitNew('.markdown', 'Tool result', () => send('[[write:notes/plan.md|# Plan\n- ship M1]]'));
@@ -247,6 +266,9 @@ try {
   const usageStats = await page.locator('.usage-stats').innerText();
   const ranked = (await page.locator('.model-rank-name').allInnerTexts()).map(t => t.split('\n')[0]);
   check('Settings → Usage shows total tokens, today\'s activity and a model ranking', /Total tokens\s+[\d.]+[KM]?/.test(usageStats) && await page.locator('.heat-cell.l1, .heat-cell.l2, .heat-cell.l3, .heat-cell.l4').count() >= 1 && ranked.includes('alpha-1') && ranked.includes('beta-1'), `${usageStats.replace(/\s+/g, ' ')} · ${ranked.join(', ')}`);
+  check('Usage has three equal cards, no cost card or footer copy', await page.locator('.usage-stat').count() === 3 && !usageStats.includes('cost') && !(await page.locator('.settings-content .section-foot').count()));
+  const cardWidths = await page.locator('.usage-stat').evaluateAll(els => els.map(el => el.getBoundingClientRect().width));
+  check('Usage summary cards share the available width', Math.max(...cardWidths) - Math.min(...cardWidths) < 1);
   await S('06b-usage');
   await page.click('.nav-item.back');
   await waitNew('.markdown', 'echo: after rotating the key', () => send('after rotating the key'));
@@ -403,7 +425,16 @@ try {
   await page.locator('.session-row', { hasText: '(fork)' }).click({ button: 'right' });
   const menuItems = (await page.locator('.popover .menu-item').allInnerTexts()).map(t => t.trim()).join('|');
   await page.click('.popover .menu-item:has-text("Delete")');
-  await page.click('.modal .button.danger-solid');
+  const deleteUiMs = await page.evaluate(async () => {
+    const start = performance.now();
+    document.querySelector('.modal .button.danger-solid').click();
+    while ([...document.querySelectorAll('.session-row')].some(row => row.textContent.includes('(fork)'))) {
+      if (performance.now() - start > 1500) break;
+      await new Promise(requestAnimationFrame);
+    }
+    return performance.now() - start;
+  });
+  check('Delete updates the interface without waiting for background cleanup', deleteUiMs < (process.env.CI ? 500 : 150), `${Math.round(deleteUiMs)} ms`);
   await page.locator('.session-row', { hasText: '(fork)' }).waitFor({ state: 'detached', timeout: 15000 });
   check('right-click menu is Rename / Fork / Archive / Delete, and Delete removes the session', menuItems === 'Rename|Fork|Archive|Delete', menuItems);
 

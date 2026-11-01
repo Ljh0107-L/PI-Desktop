@@ -1,0 +1,94 @@
+// Drive renderer events deterministically, without spending tokens or writing fake session history.
+// Mirrors live calls → hidden reasoning on completion → another model call → streaming answer.
+import assert from 'node:assert/strict';
+
+export async function checkReading({ app, page, id }) {
+  const send = async events => {
+    await app.evaluate(({ BrowserWindow }, { id, events }) => {
+      const wc = BrowserWindow.getAllWindows()[0].webContents;
+      for (const event of events) wc.send('pidesk:event', { channel: 'event', payload: { id, event } });
+    }, { id, events });
+    await page.waitForTimeout(80);
+  };
+  const stamp = Date.now();
+  const call = { type: 'toolCall', id: 'reading-test-call', name: 'bash', arguments: { command: 'tail -100 test.log', description: 'Inspect test log' } };
+  const assistant = { role: 'assistant', timestamp: stamp + 1, content: [call], usage: { output: 500, reasoning: 200 }, durationMs: 10000 };
+  const changed = { type: 'toolCall', id: 'reading-test-write', name: 'write', arguments: { path: 'reading.txt', content: 'retained change' } };
+  const result = { content: [{ type: 'text', text: Array.from({ length: 100 }, (_, i) => `log line ${i}`).join('\n') }] };
+  try {
+    await app.evaluate(({ BrowserWindow }, id) => BrowserWindow.getAllWindows()[0].webContents.send('pidesk:event', { channel: 'status', payload: { id, status: 'connecting' } }), id);
+    await page.getByRole('status', { name: 'Loading conversation' }).waitFor();
+    const centered = await page.locator('.transcript-shell').evaluate(el => {
+      const parent = el.getBoundingClientRect(), spinner = el.querySelector('.transcript-loading .spinner').getBoundingClientRect();
+      return Math.abs(spinner.x + spinner.width / 2 - parent.x - parent.width / 2) < 1 && Math.abs(spinner.y + spinner.height / 2 - parent.y - parent.height / 2) < 1;
+    });
+    assert.ok(centered, 'initial loading spinner should be centered');
+    assert.equal(await page.locator('.transcript-loading').innerText(), '');
+    await app.evaluate(({ BrowserWindow }, id) => BrowserWindow.getAllWindows()[0].webContents.send('pidesk:event', { channel: 'status', payload: { id, status: 'connected' } }), id);
+    await send([
+      { type: 'message_end', message: { role: 'user', content: 'Disclosure regression fixture', timestamp: stamp } },
+      { type: 'agent_start' },
+      { type: 'message_end', message: { role: 'assistant', timestamp: stamp + 0.5, content: [changed, { type: 'text', text: 'Change completed.' }], usage: { output: 10 }, durationMs: 1000 } },
+      { type: 'tool_execution_end', toolCallId: changed.id, result: { content: [] }, isError: false },
+      { type: 'message_start', message: assistant },
+      { type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: 0, toolCall: call } },
+      { type: 'tool_execution_start', toolCallId: call.id },
+      { type: 'tool_execution_update', toolCallId: call.id, partialResult: result },
+    ]);
+    const pill = page.locator('.changes-pill', { hasText: 'reading.txt' });
+    await pill.evaluate(el => { window.__changesPill = el; });
+    await page.locator('.tool-group-head', { hasText: 'Inspect test log' }).click();
+    const row = page.locator('[data-tool-id="reading-test-call"]');
+    await row.locator('.tool-call-head').click();
+    await row.locator('.tool-output').evaluate(el => { el.scrollTop = 72; window.__readingRow = el.closest('.tool-call'); });
+    await send([{ type: 'message_end', message: assistant }]);
+    assert.equal(await page.locator('.usage-speed-value b').innerText(), '50.0', 'TPS updates after this API call, while the agent is still running');
+    assert.equal(await row.evaluate(el => el === window.__readingRow), true, 'final reasoning must not remount the tool row');
+    assert.equal(await row.locator('.tool-call-head').getAttribute('aria-expanded'), 'true');
+    assert.equal(await row.locator('.tool-output').evaluate(el => el.scrollTop), 72);
+    assert.equal(await page.locator('.reasoning-tokens', { hasText: '200 tokens' }).count(), 1, 'hidden reasoning usage is visible even with no reasoning text');
+    assert.equal(await pill.evaluate(el => el === window.__changesPill), true);
+
+    const next = { role: 'assistant', timestamp: stamp + 2, content: [], usage: { output: 200 }, durationMs: 2000 };
+    await send([
+      { type: 'tool_execution_end', toolCallId: call.id, result, isError: false },
+      { type: 'message_end', message: { role: 'toolResult', toolCallId: call.id, content: result.content } },
+      { type: 'message_start', message: next },
+      { type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', contentIndex: 0, delta: 'Checking another detail.' } },
+    ]);
+    // New content appears below, but the opened command and both scroll positions stay put.
+    const before = await page.locator('.transcript').evaluate(el => el.scrollTop);
+    const answer = Array.from({ length: 50 }, (_, i) => `Answer paragraph ${i}`).join('\n\n');
+    await send([
+      { type: 'message_update', assistantMessageEvent: { type: 'text_start', contentIndex: 1 } },
+      { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 1, delta: answer } },
+    ]);
+    assert.equal(await row.locator('.tool-call-head').getAttribute('aria-expanded'), 'true');
+    assert.equal(await row.locator('.tool-output').evaluate(el => el.scrollTop), 72);
+    assert.ok(Math.abs(await page.locator('.transcript').evaluate(el => el.scrollTop) - before) < 2, 'streaming must not drag the transcript to the bottom');
+    await send([{ type: 'message_end', message: { ...next, content: [{ type: 'thinking', thinking: 'Checking another detail.' }, { type: 'text', text: answer }] } }]);
+    assert.equal(await pill.evaluate(el => el === window.__changesPill), true, 'changes pill must not disappear/reappear at API call boundaries');
+    assert.equal(await page.locator('.usage-speed-value b').innerText(), '100');
+    await page.getByRole('button', { name: 'Jump to latest' }).click();
+    assert.ok(await page.locator('.transcript').evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight < 2));
+    // A standalone thought changes into a work card: retain its open state too.
+    const thinking = { role: 'assistant', timestamp: stamp + 3, content: [] };
+    await send([
+      { type: 'message_start', message: thinking },
+      { type: 'message_update', assistantMessageEvent: { type: 'thinking_delta', contentIndex: 0, delta: 'A thought to inspect' } },
+    ]);
+    await page.locator('.thinking .tool-group-head', { hasText: 'A thought to inspect' }).click();
+    await send([{ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: 1, toolCall: { ...call, id: 'second-reading-call' } } }]);
+    assert.equal(await page.locator('.work-body .step-markdown', { hasText: 'A thought to inspect' }).count(), 1);
+    await send([{ type: 'message_end', message: { ...thinking, content: [{ type: 'text', text: 'Untimed history' }], usage: { output: 10 } } }]);
+    assert.equal(await page.locator('.usage-speed-value b').innerText(), '—', 'untimed call must not inherit a previous speed');
+  } finally {
+    await send([{ type: 'agent_settled' }]);
+    await app.evaluate(({ BrowserWindow }, id) => {
+      BrowserWindow.getAllWindows()[0].webContents.send('pidesk:event', { channel: 'resync', payload: { id } });
+    }, id);
+    await page.locator('.user-bubble', { hasText: 'Disclosure regression fixture' }).waitFor({ state: 'detached' });
+    const latest = page.getByRole('button', { name: 'Jump to latest' });
+    if (await latest.count()) await latest.click();
+  }
+}
