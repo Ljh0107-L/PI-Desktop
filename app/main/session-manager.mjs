@@ -12,6 +12,32 @@ import { startEgressProxy, hostPortOf } from '../../core/egress-proxy.mjs';
 import { listRelaySessions, prepareRemote, runSsh, stopRelaySession } from './remote-setup.mjs';
 
 const titleFrom = text => { const line = text.trim().replace(/^\/goal\s+/, '').split('\n')[0].replace(/\s+/g, ' '); return line.length > 60 ? line.slice(0, 57) + '…' : line || 'New session'; };
+
+// Codex-style projectless path: <root>/<YYYY-MM-DD>/<prompt-slug>[-N] with work/ and outputs/.
+// The thread directory is the working directory, so separate No-folder conversations do not
+// share files, while a conversation keeps the same directory when it is resumed or forked.
+const projectlessSlug = prompt => {
+  const words = String(prompt ?? '').toLowerCase().match(/[a-z0-9]+/g);
+  return words?.length ? words.slice(0, 6).join('-').slice(0, 80) : 'new-chat';
+};
+const projectlessDate = (now = new Date()) => `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+function makeProjectlessDir(root, prompt) {
+  const dateDir = join(root, projectlessDate());
+  mkdirSync(dateDir, { recursive: true });
+  const base = projectlessSlug(prompt);
+  for (let i = 0; i < 100; i++) {
+    const dir = join(dateDir, i === 0 ? base : `${base}-${i + 1}`);
+    try { mkdirSync(dir); }
+    catch (error) { if (error?.code === 'EEXIST') continue; throw error; }
+    try { mkdirSync(join(dir, 'work')); mkdirSync(join(dir, 'outputs')); }
+    catch { /* the thread directory itself is still usable */ }
+    return { cwd: dir, outputDirectory: join(dir, 'outputs'), workspaceRoot: root };
+  }
+  const dir = join(dateDir, `${base}-${randomUUID().slice(0, 8)}`);
+  mkdirSync(dir);
+  try { mkdirSync(join(dir, 'work')); mkdirSync(join(dir, 'outputs')); } catch { /* best effort */ }
+  return { cwd: dir, outputDirectory: join(dir, 'outputs'), workspaceRoot: root };
+}
 const remoteBase = path => path.split('/').filter(Boolean).pop() ?? path;
 // The visible history: the branch ending at `leafId`, with compactions as markers (shared by the live
 // get_entries path and the session-file path).
@@ -212,7 +238,7 @@ export class SessionManager extends EventEmitter {
   // in advance; the first message then adopts it instead of waiting for SSH + Pi start-up.
   spares = new Map(); // `${environmentId}\n${cwd}` -> { id, record, timer }
   async prewarm({ environmentId, cwd: chosen, model, thinkingLevel }) {
-    if (!environmentId) return false;
+    if (!environmentId || !chosen) return false; // No-folder path needs the first prompt to name its directory.
     const { cwd } = await this.workspace(environmentId, chosen).catch(() => ({}));
     if (!cwd) return false;
     const key = `${environmentId}\n${cwd}`;
@@ -244,26 +270,51 @@ export class SessionManager extends EventEmitter {
     if (env && runtime) this.stopRelay(env, spare.id).catch(() => {});
   }
 
-  // "No folder": sessions work in a default workspace, ~/Pi on this Mac and ~/pi on a host.
-  async workspace(environmentId, cwd) {
+  // "No folder": each conversation gets a Codex-style projectless directory under a
+  // shared root. The root is configurable; new conversations are isolated by prompt/date.
+  async workspace(environmentId, cwd, { prompt } = {}) {
     if (cwd) return { cwd, noFolder: false };
     const env = this.env(environmentId);
     if (env.kind === 'local') {
-      const dir = process.env.PIDESK_DEFAULT_WORKSPACE ?? join(homedir(), 'Pi');
-      mkdirSync(dir, { recursive: true });
-      return { cwd: dir, noFolder: true };
+      const root = process.env.PIDESK_DEFAULT_WORKSPACE ?? join(homedir(), 'Pi');
+      mkdirSync(root, { recursive: true });
+      return { ...makeProjectlessDir(root, prompt), noFolder: true };
     }
     this.defaultDirs ??= new Map();
     if (!this.defaultDirs.has(env.id)) {
       const out = await runSsh(env, 'mkdir -p "$HOME/pi" && cd "$HOME/pi" && pwd', { timeout: 30000 });
       this.defaultDirs.set(env.id, out.trim().split('\n').pop());
     }
-    return { cwd: this.defaultDirs.get(env.id), noFolder: true };
+    const root = this.defaultDirs.get(env.id);
+    const base = projectlessSlug(prompt);
+    const script = `set -e
+root=${shellQuote(root)}
+date=${projectlessDate()}
+base=${shellQuote(base)}
+mkdir -p "$root/$date"
+i=1
+while [ "$i" -le 100 ]; do
+  name="$base"
+  [ "$i" -gt 1 ] && name="$base-$i"
+  if mkdir "$root/$date/$name" 2>/dev/null; then
+    mkdir -p "$root/$date/$name/work" "$root/$date/$name/outputs" 2>/dev/null || true
+    printf '%s\n%s\n%s\n' "$root/$date/$name" "$root/$date/$name/outputs" "$root"
+    exit 0
+  fi
+  i=$((i + 1))
+done
+exit 1
+`;
+    const out = await runSsh(env, script, { timeout: 30000 });
+    const [dir, outputDirectory] = out.trim().split('\n');
+    return { cwd: dir, outputDirectory, workspaceRoot: root, noFolder: true };
   }
 
-  async create({ environmentId, cwd: chosen, model, thinkingLevel }) {
+  async create({ environmentId, cwd: chosen, model, thinkingLevel, prompt }) {
     const env = this.env(environmentId);
-    const { cwd, noFolder } = await this.workspace(environmentId, chosen);
+    const freshId = chosen ? null : randomUUID();
+    const workspace = await this.workspace(environmentId, chosen, { prompt });
+    const { cwd, noFolder } = workspace;
     const spareKey = `${environmentId}\n${cwd}`; // cwd is the resolved workspace
     const spare = this.spares.get(spareKey);
     if (spare) {
@@ -289,8 +340,10 @@ export class SessionManager extends EventEmitter {
       return this.#view(record);
     }
     const record = {
-      id: randomUUID(), title: 'New session', environmentId, environmentLabel: env.label, cwd,
+      id: freshId ?? randomUUID(), title: 'New session', environmentId, environmentLabel: env.label, cwd,
       project: noFolder ? 'No folder' : env.kind === 'local' ? basename(cwd) : remoteBase(cwd), noFolder: noFolder || undefined,
+      projectlessRoot: noFolder ? workspace.workspaceRoot : undefined,
+      projectlessOutputDirectory: noFolder ? workspace.outputDirectory : undefined,
       model, thinkingLevel: thinkingLevel ?? 'medium',
       createdAt: Date.now(), updatedAt: Date.now(),
     };

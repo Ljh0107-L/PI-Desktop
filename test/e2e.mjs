@@ -121,6 +121,8 @@ try {
   const nfReply = await page.locator('.markdown', { hasText: 'Tool result' }).last().innerText();
   const nfGroups = await page.locator('.group-head').allInnerTexts();
   check('a session without a folder runs in the default workspace', nfReply.includes('/Pi') && nfGroups.some(g => g.includes('No folder')), JSON.stringify({ nfReply, nfGroups }));
+  const nfPath = /\/Pi\/\d{4}-\d{2}-\d{2}\/[A-Za-z0-9-]+/.exec(nfReply)?.[0];
+  check('No-folder sessions get a Codex-style per-thread workspace', !!nfPath && existsSync(join(nfPath, 'work')) && existsSync(join(nfPath, 'outputs')), nfPath ?? 'no path');
   await page.locator('.session-row', { hasText: '[[bash:pwd]]' }).click({ button: 'right' });
   await page.click('.popover .menu-item:has-text("Archive")');
   await page.locator('.session-row', { hasText: '[[bash:pwd]]' }).waitFor({ state: 'detached' });
