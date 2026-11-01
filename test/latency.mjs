@@ -82,7 +82,13 @@ async function suite(envId, label, cwd) {
   // Pi stopped (e.g. by the idle sweep): opening shows the history from the session file at once.
   await manager.close(b.id);
   await manager.stopRelay(manager.env(envId), b.id);
-  await new Promise(r => setTimeout(r, 300));
+  // The relay acknowledges stop before the Pi process has necessarily exited;
+  // starting the same id again immediately can race the old process's exit.
+  for (let i = 0; i < 50; i++) {
+    if (!(await manager.relaySessions(manager.env(envId))).find(s => s.id === b.id)?.alive) break;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  await new Promise(r => setTimeout(r, 100));
   const shown = await time(label, 'open history (Pi not running)', label === 'ssh' ? 800 : 300, () => manager.messages(b.id));
   if (!shown?.some(m => m.role === 'user')) { failed++; console.log('FAIL  history from the session file was empty'); }
   await manager.ensureStarted(b.id);

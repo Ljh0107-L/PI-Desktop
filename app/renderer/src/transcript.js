@@ -36,10 +36,12 @@ const textOfMessage = m => typeof m.content === 'string'
 function generation(m) {
   const reported = m.usage?.output;
   const t = m.__timing;
-  // Prefer first→last from the stream; keep full API duration for replay/burst or
-  // untimed history. The burst guard avoids a relay replay looking like 10k tok/s.
+  const visible = estimateTokens(textOfMessage(m));
+  // Prefer first→last from the stream; keep full API duration for replay/burst,
+  // hidden reasoning with no streamed text, or untimed history.
+  const coversOutput = visible >= Math.max(20, (Number.isFinite(reported) ? reported : 0) * 0.25);
   let ms = m.durationMs;
-  if (t?.first && t?.last && t.last > t.first && (t.chars ?? 0) >= 20) {
+  if (t?.first && t?.last && t.last > t.first && (t.chars ?? 0) >= 20 && coversOutput) {
     const window = t.last - t.first;
     const chars = t.chars ?? 0;
     if (chars / window <= 20) ms = window;
@@ -49,7 +51,6 @@ function generation(m) {
   // far below the visible answer. Use the visible-text estimate only when the
   // reported count is implausible, and mark the speed as estimated.
   let out = reported, estimated = false;
-  const visible = estimateTokens(textOfMessage(m));
   if ((!Number.isFinite(out) || out <= 0) && visible > 0) { out = visible; estimated = true; }
   else if (visible >= 20 && Number.isFinite(out) && out < visible * 0.6) { out = visible; estimated = true; }
   if (!Number.isFinite(out) || out <= 0) return null;

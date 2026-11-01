@@ -61,7 +61,7 @@ assert.equal(Math.round(fastSpeed.tps), 1783, 'Qwen TPS uses first→last, not f
 const burstSpeed = usageOf([{ ...fast, __timing: { start: 0, first: 1000, last: 1060, end: 1100, chars: 3645, est: 960 } }]);
 assert.equal(Math.round(burstSpeed.tps), 1263, 'buffered replay falls back to API duration');
 // Hidden reasoning has no text stream: use API duration, not the tiny timing window.
-const hidden = { ...message, timestamp: 7000, durationMs: 6000, usage: { output: 400 }, content: [] };
-const hiddenTiming = { start: 0, first: 1000, last: 1155, end: 6000, chars: 0, est: null };
-assert.equal(Math.round(usageOf([{ ...hidden, __timing: hiddenTiming }]).tps), 67, 'hidden reasoning falls back to API duration');
+const hidden = { ...message, timestamp: 7000, durationMs: 6000, usage: { output: 400 }, content: [{ type: 'text', text: 'Answer' }] };
+const hiddenTiming = { start: 0, first: 1000, last: 1155, end: 6000, chars: 30, est: null };
+assert.equal(Math.round(usageOf([{ ...hidden, __timing: hiddenTiming }]).tps), 67, 'hidden reasoning with too little text falls back to API duration');
 console.log('PASS  transcript generation-window TPS: first→last, Cursor estimate, burst fallback');
