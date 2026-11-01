@@ -11,6 +11,7 @@ import { parseArgs } from 'node:util';
 import { launch, shot } from './harness.mjs';
 import { startMockLlm } from './mock-llm.mjs';
 import './transcript.mjs';
+import './projectless.mjs';
 import { checkReading } from './reading.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
@@ -121,8 +122,10 @@ try {
   const nfReply = await page.locator('.markdown', { hasText: 'Tool result' }).last().innerText();
   const nfGroups = await page.locator('.group-head').allInnerTexts();
   check('a session without a folder runs in the default workspace', nfReply.includes('/Pi') && nfGroups.some(g => g.includes('No folder')), JSON.stringify({ nfReply, nfGroups }));
-  const nfPath = /\/Pi\/\d{4}-\d{2}-\d{2}\/[A-Za-z0-9-]+/.exec(nfReply)?.[0];
-  check('No-folder sessions get a Codex-style per-thread workspace', !!nfPath && existsSync(join(nfPath, 'work')) && existsSync(join(nfPath, 'outputs')), nfPath ?? 'no path');
+  // As in Codex: <root>/<YYYY-MM-DD>/<slug of the first prompt>/ with work/ and outputs/.
+  const nfPath = /(\/\S*\/Pi\/\d{4}-\d{2}-\d{2}\/bash-pwd)\b/.exec(nfReply)?.[1];
+  check('a No-folder session gets its own directory named from its first prompt', !!nfPath && existsSync(join(nfPath, 'work')) && existsSync(join(nfPath, 'outputs')), nfPath ?? nfReply);
+  check('the model is told how to use a No-folder directory (projectless prompt section)', mock.requests.some(r => r.system?.includes('started without a project folder')));
   await page.locator('.session-row', { hasText: '[[bash:pwd]]' }).click({ button: 'right' });
   await page.click('.popover .menu-item:has-text("Archive")');
   await page.locator('.session-row', { hasText: '[[bash:pwd]]' }).waitFor({ state: 'detached' });

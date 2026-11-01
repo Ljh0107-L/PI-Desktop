@@ -15,6 +15,7 @@ import { startMockLlm } from './mock-llm.mjs';
 const { values: opts } = parseArgs({ options: { 'ssh-config': { type: 'string', default: '/tmp/pidesk-sshd/ssh_config' }, 'no-ssh': { type: 'boolean', default: false } } });
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const work = mkdtempSync(join(tmpdir(), 'pidesk-latency-'));
+process.env.PIDESK_DEFAULT_WORKSPACE ??= join(work, 'Pi'); // No-folder root on this machine
 const mock = await startMockLlm();
 const store = new Store(join(work, 'profile'), null, { insecureTestStorage: true });
 store.settings.providers = [{ id: 'mock-lab', name: 'Mock Lab', kind: 'custom', api: 'openai-completions', baseUrl: mock.baseUrl('mock-lab'), models: [{ id: 'alpha-1' }, { id: 'beta-1' }] }];
@@ -28,7 +29,7 @@ const manager = new SessionManager({
   store, environments: () => listEnvironments({ sshConfig: opts['ssh-config'], state }), piVersion: '1.4.0',
   bridgePath: join(root, 'agent/pidesk-bridge.js'), relayPath,
   piPackageDir: join(root, 'node_modules/@earendil-works/pi-coding-agent'), cacheDir: join(work, 'downloads'),
-  local: { node: process.execPath, piCli: join(root, 'node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'), agentDir: join(work, 'agent'), runDir: join(work, 'run'), uploadDir: join(work, 'uploads'), extraEnv: {} },
+  local: { node: process.execPath, piCli: join(root, 'node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'), agentDir: join(work, 'agent'), runDir: join(work, 'run'), uploadDir: join(work, 'uploads'), extraEnv: process.versions.electron ? { ELECTRON_RUN_AS_NODE: '1' } : {} },
 });
 
 const rows = [];
@@ -112,6 +113,18 @@ async function suite(envId, label, cwd) {
   for (let i = 0; i < 200 && ![...manager.spares.values()].some(sp => manager.runtimes.get(sp.id)?.status === 'connected'); i++) await new Promise(r => setTimeout(r, 50));
   const c = await time(label, 'create from a pre-warmed Pi', 300, () => manager.create({ environmentId: envId, cwd, model }));
   await manager.delete(c.id);
+  // No folder: the warm Pi runs in the root and moves into the conversation's own directory.
+  await manager.prewarm({ environmentId: envId, model });
+  for (let i = 0; i < 200 && ![...manager.spares.values()].some(sp => manager.runtimes.get(sp.id)?.status === 'connected'); i++) await new Promise(r => setTimeout(r, 50));
+  const nf = await time(label, 'create, No folder, pre-warmed Pi', 1000, () => manager.create({ environmentId: envId, model, prompt: 'Latency check' }));
+  await time(label, 'No folder: tools run in its directory', 5000, async () => {
+    if (!/\/\d{4}-\d{2}-\d{2}\/latency-check(-\d+)?$/.test(nf.cwd)) throw new Error(`unexpected directory ${nf.cwd}`);
+    const done = settled(nf.id);
+    await manager.prompt(nf.id, '[[bash:pwd]]');
+    await done;
+    if (!JSON.stringify(await manager.messages(nf.id)).includes(nf.cwd.split('/').slice(-2).join('/'))) throw new Error('pwd did not run in the conversation directory');
+  });
+  await manager.delete(nf.id);
 }
 
 const localDir = join(work, 'project'); mkdirSync(localDir);

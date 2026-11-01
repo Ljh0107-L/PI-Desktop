@@ -15,6 +15,11 @@
 //    the raw command; the command itself runs through Pi's own bash implementation unchanged.
 // 5. `/pidesk-title` names a new conversation with the session's model (as Claude does) and publishes
 //    the title through the `pidesk-title` status key.
+// 6. No folder (Codex's projectless chats): a conversation started without a folder runs in its own
+//    generated directory, <root>/<YYYY-MM-DD>/<name>/ with work/ and outputs/. When the desktop marks the
+//    Pi as such (PIDESK_PROJECTLESS), a prompt section tells the model how to use it, as Codex does.
+import { existsSync } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { Type } from 'typebox';
 import { createBashToolDefinition } from '@earendil-works/pi-coding-agent';
 
@@ -66,6 +71,24 @@ ${goal.objective}
 
 Work autonomously; you will be prompted to continue after each turn while the goal stays active. When the objective is achieved and verified against current evidence, call update_goal with status "complete".`;
 
+// Codex's projectless guidance, for a generated No-folder directory only: older No-folder conversations
+// ran in the root itself, and a folder the user picked inside the root is a project like any other.
+export function projectlessNote(cwd) {
+  if (process.env.PIDESK_PROJECTLESS !== '1' || !cwd || !/^\d{4}-\d{2}-\d{2}$/.test(basename(dirname(cwd)))) return null;
+  const outputs = join(cwd, 'outputs');
+  const split = existsSync(outputs) && existsSync(join(cwd, 'work'));
+  return [
+    `This conversation was started without a project folder, so it runs in a directory generated for it under ${dirname(dirname(cwd))}.`,
+    "The generated directory name is only a filesystem identifier. Do not infer the user's language, locale, or preferences from its name or path.",
+    'Prefer answering inline in chat unless using local files would make the result more useful.',
+    ...(split
+      ? [`Use work/ for intermediate files, scratch analysis, scripts, drafts, and temporary assets. Use ${outputs} only for user-facing deliverables that should appear as outputs.`,
+        `When referring to saved deliverables in the final response, link only files from ${outputs}.`]
+      : [`When using local files for this conversation, write scratch files, drafts, generated assets, and other outputs under ${cwd}.`]),
+    'Do not write directly in the home directory unless the user explicitly asks.',
+  ].join('\n');
+}
+
 export default function pideskBridge(pi) {
   // Pi re-runs extension factories when it replaces the session (fork, clone, switch), after the boot
   // record has already been removed from the environment, so it is kept for this process here.
@@ -115,6 +138,14 @@ export default function pideskBridge(pi) {
       const tool = ctx?.cwd && ctx.cwd !== process.cwd() ? createBashToolDefinition(ctx.cwd) : bash;
       return tool.execute(id, args, signal, onUpdate, ctx);
     },
+  });
+
+  // ---------------------------------------------------------------- No folder
+  // A structured prompt section (not a replaced prompt), so Pi records it once as a transcript delta.
+  pi.on('before_agent_start', event => {
+    const options = event.systemPromptOptions;
+    const note = options && projectlessNote(options.cwd);
+    if (note) (options.sections ??= {}).projectless = note;
   });
 
   // ---------------------------------------------------------------- titles

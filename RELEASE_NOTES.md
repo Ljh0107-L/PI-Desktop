@@ -3,7 +3,7 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Later versions install themselves: an **Update** button appears next to Settings.
 
 **In this release**
-- **No-folder sessions now follow Codex’s projectless layout:** each new conversation gets `<workspace>/<YYYY-MM-DD>/<prompt-slug>[-N]/` with `work/` and `outputs/` subdirectories, instead of every session sharing `~/Pi`. Existing sessions keep their recorded folder, so nothing moves under them.
+- **No folder works like Codex’s projectless chats:** each new conversation gets its own directory, `~/Pi/<YYYY-MM-DD>/<name from the first message>/` (`~/pi/…` on SSH hosts), with `work/` for scratch files and `outputs/` for deliverables, and the model is told how to use them. A Pi is still kept warm on the new-session screen and moves into the new directory when you send, so starting a No-folder conversation stays instant. Existing conversations keep their folder.
 - **Usage card matches TPS:** when Cursor reports an implausibly low output count, the Output figure now uses the same visible-text estimate as the speed, instead of showing 1 next to a ~47 tok/s reading.
 - **Failed turns do not reset Usage:** an aborted or errored turn no longer becomes the “Last turn” with Input 0 / Output 0; the last completed turn stays visible.
 - **Interrupt is now Codex-style:** Stop aborts the running command, clears queued steering/follow-up messages, and hard-stops a Pi that ignores the abort signal after 4 seconds instead of waiting for the command to finish.

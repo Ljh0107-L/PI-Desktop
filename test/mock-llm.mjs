@@ -26,7 +26,9 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
     const payload = JSON.parse(body);
     const provider = match[1];
     const auth = req.headers.authorization ?? '';
-    requests.push({ provider, model: payload.model, authorization: auth, messageCount: payload.messages?.length ?? 0, at: Date.now() });
+    const system = (payload.messages ?? []).filter(m => m.role === 'system' || m.role === 'developer')
+      .map(m => typeof m.content === 'string' ? m.content : (m.content ?? []).map(c => c.text ?? '').join('')).join('\n');
+    requests.push({ provider, model: payload.model, authorization: auth, messageCount: payload.messages?.length ?? 0, system, at: Date.now() });
 
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     const id = 'chatcmpl-' + requests.length;

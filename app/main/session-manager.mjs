@@ -13,30 +13,37 @@ import { listRelaySessions, prepareRemote, runSsh, stopRelaySession } from './re
 
 const titleFrom = text => { const line = text.trim().replace(/^\/goal\s+/, '').split('\n')[0].replace(/\s+/g, ' '); return line.length > 60 ? line.slice(0, 57) + '…' : line || 'New session'; };
 
-// Codex-style projectless path: <root>/<YYYY-MM-DD>/<prompt-slug>[-N] with work/ and outputs/.
-// The thread directory is the working directory, so separate No-folder conversations do not
-// share files, while a conversation keeps the same directory when it is resumed or forked.
-const projectlessSlug = prompt => {
-  const words = String(prompt ?? '').toLowerCase().match(/[a-z0-9]+/g);
+// ---- No folder, as Codex's projectless chats ----
+// A conversation started without a folder gets its own directory under a shared root (~/Pi here, ~/pi on
+// a host): <root>/<YYYY-MM-DD>/<slug of the first prompt>[-N]/, with work/ for scratch files and outputs/
+// for deliverables. Naming follows Codex: up to six [a-z0-9] words of the prompt, else "new-chat".
+export const projectlessSlug = prompt => {
+  const words = String(prompt ?? '').replace(/^\/goal\s+/, '').toLowerCase().match(/[a-z0-9]+/g);
   return words?.length ? words.slice(0, 6).join('-').slice(0, 80) : 'new-chat';
 };
-const projectlessDate = (now = new Date()) => `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
+const projectlessDay = (now = new Date()) => `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`;
 function makeProjectlessDir(root, prompt) {
-  const dateDir = join(root, projectlessDate());
-  mkdirSync(dateDir, { recursive: true });
+  const day = join(root, projectlessDay());
+  mkdirSync(day, { recursive: true });
   const base = projectlessSlug(prompt);
-  for (let i = 0; i < 100; i++) {
-    const dir = join(dateDir, i === 0 ? base : `${base}-${i + 1}`);
-    try { mkdirSync(dir); }
-    catch (error) { if (error?.code === 'EEXIST') continue; throw error; }
-    try { mkdirSync(join(dir, 'work')); mkdirSync(join(dir, 'outputs')); }
-    catch { /* the thread directory itself is still usable */ }
-    return { cwd: dir, outputDirectory: join(dir, 'outputs'), workspaceRoot: root };
+  const names = [...Array.from({ length: 100 }, (_, i) => (i ? `${base}-${i + 1}` : base)), `${base}-${randomUUID().slice(0, 8)}`];
+  for (const name of names) {
+    const dir = join(day, name);
+    try { mkdirSync(dir); } catch (error) { if (error?.code === 'EEXIST') continue; throw error; }
+    for (const sub of ['work', 'outputs']) try { mkdirSync(join(dir, sub)); } catch { /* the directory itself still works */ }
+    return dir;
   }
-  const dir = join(dateDir, `${base}-${randomUUID().slice(0, 8)}`);
-  mkdirSync(dir);
-  try { mkdirSync(join(dir, 'work')); mkdirSync(join(dir, 'outputs')); } catch { /* best effort */ }
-  return { cwd: dir, outputDirectory: join(dir, 'outputs'), workspaceRoot: root };
+  throw new Error(`No free directory name under ${day}`);
+}
+// The spare Pi kept warm for a new No-folder conversation (it runs in the root until the first message).
+const projectlessSpareKey = environmentId => `${environmentId}\n*no folder*`;
+// A fresh session file for a directory, in Pi's documented layout (docs/session-format.md): a running Pi
+// that switch_session-es to it continues in that directory with a new, empty conversation.
+const sessionDirName = cwd => `--${cwd.replace(/^[/\\]/, '').replace(/[/\\:]/g, '-')}--`;
+function sessionHeader(cwd) {
+  const timestamp = new Date().toISOString();
+  const id = randomUUID();
+  return { name: `${timestamp.replace(/[:.]/g, '-')}_${id}.jsonl`, line: JSON.stringify({ type: 'session', version: 3, id, timestamp, cwd }) + '\n' };
 }
 const remoteBase = path => path.split('/').filter(Boolean).pop() ?? path;
 // The visible history: the branch ending at `leafId`, with compactions as markers (shared by the live
@@ -211,7 +218,8 @@ export class SessionManager extends EventEmitter {
   }
 
   // Environment for every Pi this app starts: 1-hour prompt caching wherever the provider supports it.
-  piEnv() { return { PI_CACHE_RETENTION: 'long' }; }
+  // No-folder conversations also get PIDESK_PROJECTLESS, for the bridge's projectless prompt section.
+  piEnv(record) { return { PI_CACHE_RETENTION: 'long', ...(record?.noFolder ? { PIDESK_PROJECTLESS: '1' } : {}) }; }
 
   #localTransport(target) {
     mkdirSync(this.local.agentDir, { recursive: true });
@@ -234,20 +242,21 @@ export class SessionManager extends EventEmitter {
   #save(record, patch) { Object.assign(record, patch, { updatedAt: Date.now() }); if (record.spare) return; this.store.saveSessions(); this.emit('sessions'); }
 
   // ---------------------------------------------------------------- pre-warming
-  // While the user is on the new-session screen with an environment and folder chosen, start a Pi there
-  // in advance; the first message then adopts it instead of waiting for SSH + Pi start-up.
-  spares = new Map(); // `${environmentId}\n${cwd}` -> { id, record, timer }
-  async prewarm({ environmentId, cwd: chosen, model, thinkingLevel }) {
-    if (!environmentId || !chosen) return false; // No-folder path needs the first prompt to name its directory.
-    const { cwd } = await this.workspace(environmentId, chosen).catch(() => ({}));
+  // While the user is on the new-session screen, start a Pi in advance where the next conversation will
+  // run; the first message then adopts it instead of waiting for SSH + Pi start-up. With No folder the
+  // spare runs in the root and moves into the conversation's own directory when the first message names it.
+  spares = new Map(); // `${environmentId}\n${cwd}` (or projectlessSpareKey) -> { id, record, timer }
+  async prewarm({ environmentId, cwd: chosen, model, thinkingLevel, noFolder }) {
+    if (!environmentId) return false;
+    const env = this.environments().find(e => e.id === environmentId);
+    if (!env || (env.kind === 'ssh' && !env.enabled)) return false;
+    const cwd = chosen || await this.projectlessRoot(environmentId).catch(() => null);
     if (!cwd) return false;
-    const key = `${environmentId}\n${cwd}`;
+    const key = chosen ? `${environmentId}\n${cwd}` : projectlessSpareKey(environmentId);
     for (const [k] of this.spares) if (k !== key) this.#dropSpare(k);
     const existing = this.spares.get(key);
     if (existing) { this.#armSpare(key, existing); return true; }
-    const env = this.environments().find(e => e.id === environmentId);
-    if (!env || (env.kind === 'ssh' && !env.enabled)) return false;
-    const record = { id: randomUUID(), title: 'New session', environmentId, environmentLabel: env.label, cwd, model, thinkingLevel: thinkingLevel ?? 'medium', spare: true };
+    const record = { id: randomUUID(), title: 'New session', environmentId, environmentLabel: env.label, cwd, noFolder: (!chosen || noFolder) || undefined, model, thinkingLevel: thinkingLevel ?? 'medium', spare: true };
     const spare = { id: record.id, record };
     this.spares.set(key, spare);
     this.#armSpare(key, spare);
@@ -263,6 +272,9 @@ export class SessionManager extends EventEmitter {
     const spare = this.spares.get(key);
     if (!spare) return;
     this.spares.delete(key);
+    this.#stopSpare(spare);
+  }
+  #stopSpare(spare) {
     clearTimeout(spare.timer);
     const runtime = this.runtimes.get(spare.id);
     this.close(spare.id).catch(() => {});
@@ -270,88 +282,108 @@ export class SessionManager extends EventEmitter {
     if (env && runtime) this.stopRelay(env, spare.id).catch(() => {});
   }
 
-  // "No folder": each conversation gets a Codex-style projectless directory under a
-  // shared root. The root is configurable; new conversations are isolated by prompt/date.
-  async workspace(environmentId, cwd, { prompt } = {}) {
-    if (cwd) return { cwd, noFolder: false };
+  // ---------------------------------------------------------------- No folder
+  // The shared root of No-folder conversations: ~/Pi on this Mac, ~/pi on a host.
+  async projectlessRoot(environmentId) {
     const env = this.env(environmentId);
     if (env.kind === 'local') {
       const root = process.env.PIDESK_DEFAULT_WORKSPACE ?? join(homedir(), 'Pi');
       mkdirSync(root, { recursive: true });
-      return { ...makeProjectlessDir(root, prompt), noFolder: true };
+      return root;
     }
     this.defaultDirs ??= new Map();
     if (!this.defaultDirs.has(env.id)) {
       const out = await runSsh(env, 'mkdir -p "$HOME/pi" && cd "$HOME/pi" && pwd', { timeout: 30000 });
       this.defaultDirs.set(env.id, out.trim().split('\n').pop());
     }
-    const root = this.defaultDirs.get(env.id);
-    const base = projectlessSlug(prompt);
-    const script = `set -e
-root=${shellQuote(root)}
-date=${projectlessDate()}
-base=${shellQuote(base)}
-mkdir -p "$root/$date"
-i=1
-while [ "$i" -le 100 ]; do
-  name="$base"
-  [ "$i" -gt 1 ] && name="$base-$i"
-  if mkdir "$root/$date/$name" 2>/dev/null; then
-    mkdir -p "$root/$date/$name/work" "$root/$date/$name/outputs" 2>/dev/null || true
-    printf '%s\n%s\n%s\n' "$root/$date/$name" "$root/$date/$name/outputs" "$root"
-    exit 0
-  fi
-  i=$((i + 1))
-done
-exit 1
-`;
-    const out = await runSsh(env, script, { timeout: 30000 });
-    const [dir, outputDirectory] = out.trim().split('\n');
-    return { cwd: dir, outputDirectory, workspaceRoot: root, noFolder: true };
+    return this.defaultDirs.get(env.id);
+  }
+  // A new conversation's own directory, named from its first prompt.
+  async #projectlessDir(env, prompt) {
+    const root = await this.projectlessRoot(env.id);
+    if (env.kind === 'local') return makeProjectlessDir(root, prompt);
+    const script = [
+      'set -e',
+      `root=${shellQuote(root)}; day=${projectlessDay()}; base=${shellQuote(projectlessSlug(prompt))}`,
+      'mkdir -p "$root/$day"',
+      'i=1',
+      'while [ "$i" -le 100 ]; do',
+      '  name=$base; if [ "$i" -gt 1 ]; then name="$base-$i"; fi',
+      `  if mkdir "$root/$day/$name" 2>/dev/null; then mkdir -p "$root/$day/$name/work" "$root/$day/$name/outputs" || true; printf '%s\\n' "$root/$day/$name"; exit 0; fi`,
+      '  i=$((i + 1))',
+      'done',
+      'echo "no free directory name under $root/$day" >&2; exit 1',
+    ].join('\n');
+    return (await runSsh(env, script, { timeout: 30000 })).trim().split('\n').pop();
+  }
+  // Move a running Pi into `cwd`: a fresh session file for that directory, then switch_session to it.
+  async #moveInto(environmentId, session, cwd) {
+    const env = this.env(environmentId);
+    const { name, line } = sessionHeader(cwd);
+    let file;
+    if (env.kind === 'local') {
+      const dir = join(this.local.agentDir, 'sessions', sessionDirName(cwd));
+      mkdirSync(dir, { recursive: true });
+      file = join(dir, name);
+      writeFileSync(file, line, { flag: 'wx' });
+    } else {
+      const facts = await this.prepare(env.id);
+      const dir = `${facts.agentDir}/sessions/${sessionDirName(cwd)}`;
+      file = `${dir}/${name}`;
+      await runSsh(env, `mkdir -p ${shellQuote(dir)} && cat > ${shellQuote(file)}`, { input: line, timeout: 30000 });
+    }
+    const result = await session.request('switch_session', { sessionPath: file }, { timeout: 60000 });
+    if (result?.cancelled) throw new Error('Moving the pre-warmed Pi was cancelled.');
   }
 
   async create({ environmentId, cwd: chosen, model, thinkingLevel, prompt }) {
     const env = this.env(environmentId);
-    const freshId = chosen ? null : randomUUID();
-    const workspace = await this.workspace(environmentId, chosen, { prompt });
-    const { cwd, noFolder } = workspace;
-    const spareKey = `${environmentId}\n${cwd}`; // cwd is the resolved workspace
+    const noFolder = !chosen;
+    const cwd = noFolder ? await this.#projectlessDir(env, prompt) : chosen;
+    const fields = {
+      title: 'New session', environmentId, environmentLabel: env.label, cwd, noFolder: noFolder || undefined,
+      project: noFolder ? 'No folder' : env.kind === 'local' ? basename(cwd) : remoteBase(cwd),
+    };
+    const spareKey = noFolder ? projectlessSpareKey(environmentId) : `${environmentId}\n${cwd}`;
     const spare = this.spares.get(spareKey);
     if (spare) {
-      // Adopt the warm Pi: same id, so its relay session and runtime carry over.
       this.spares.delete(spareKey);
       clearTimeout(spare.timer);
-      const record = Object.assign(spare.record, { spare: undefined, environmentLabel: env.label, project: noFolder ? 'No folder' : env.kind === 'local' ? basename(cwd) : remoteBase(cwd), noFolder: noFolder || undefined, createdAt: Date.now(), updatedAt: Date.now() });
-      delete record.spare;
-      this.store.sessions.unshift(record);
-      if (!noFolder) this.store.touchRecent(environmentId, cwd);
-      this.store.saveSessions();
-      this.emit('sessions');
-      try {
-        const session = await this.ensureStarted(record.id, record);
-        await Promise.all([
-          model && (record.model?.provider !== model.provider || record.model?.id !== model.id) ? session.setModel(model.provider, model.id).catch(error => this.emit('notice', { id: record.id, level: 'warning', message: error.message })) : null,
-          thinkingLevel && thinkingLevel !== record.thinkingLevel ? session.request('set_thinking_level', { level: thinkingLevel }).catch(() => {}) : null,
-        ]);
-        this.#save(record, { model, thinkingLevel: thinkingLevel ?? record.thinkingLevel });
-        return this.#view(record);
-      } catch { /* the warm Pi failed: fall through to a fresh start with this record */ }
-      await this.ensureStarted(record.id);
-      return this.#view(record);
+      try { return await this.#adopt(spare.record, fields, { model, thinkingLevel }); }
+      catch { this.#stopSpare(spare); } // the warm Pi failed or could not move: start a fresh one below
     }
-    const record = {
-      id: freshId ?? randomUUID(), title: 'New session', environmentId, environmentLabel: env.label, cwd,
-      project: noFolder ? 'No folder' : env.kind === 'local' ? basename(cwd) : remoteBase(cwd), noFolder: noFolder || undefined,
-      projectlessRoot: noFolder ? workspace.workspaceRoot : undefined,
-      projectlessOutputDirectory: noFolder ? workspace.outputDirectory : undefined,
-      model, thinkingLevel: thinkingLevel ?? 'medium',
-      createdAt: Date.now(), updatedAt: Date.now(),
-    };
+    const record = { id: randomUUID(), ...fields, model, thinkingLevel: thinkingLevel ?? 'medium', createdAt: Date.now(), updatedAt: Date.now() };
+    this.#add(record);
+    await this.ensureStarted(record.id);
+    return this.#view(record);
+  }
+  #add(record) {
     this.store.sessions.unshift(record);
-    if (!noFolder) this.store.touchRecent(environmentId, cwd);
+    if (!record.noFolder) this.store.touchRecent(record.environmentId, record.cwd);
     this.store.saveSessions();
     this.emit('sessions');
-    await this.ensureStarted(record.id);
+  }
+  // Take over a pre-warmed Pi. No folder: it runs in the root, so it first moves into the conversation's
+  // directory; that starts a fresh session there, so the model and effort are compared against Pi's state.
+  async #adopt(spareRecord, fields, { model, thinkingLevel }) {
+    const session = await this.ensureStarted(spareRecord.id, spareRecord);
+    let current = { model: spareRecord.model, thinkingLevel: spareRecord.thinkingLevel };
+    if (fields.noFolder) {
+      await this.#moveInto(spareRecord.environmentId, session, fields.cwd);
+      current = await session.state();
+    }
+    const record = Object.assign(spareRecord, fields, { createdAt: Date.now(), updatedAt: Date.now() });
+    delete record.spare;
+    if (fields.noFolder) Object.assign(record, { piSessionFile: current.sessionFile, piSessionId: current.sessionId });
+    this.#add(record);
+    const wantModel = model ?? record.model;
+    const wantLevel = thinkingLevel ?? record.thinkingLevel;
+    await Promise.all([
+      wantModel && (current.model?.provider !== wantModel.provider || current.model?.id !== wantModel.id)
+        ? session.setModel(wantModel.provider, wantModel.id).catch(error => this.emit('notice', { id: record.id, level: 'warning', message: error.message })) : null,
+      wantLevel && wantLevel !== current.thinkingLevel ? session.request('set_thinking_level', { level: wantLevel }).catch(() => {}) : null,
+    ]);
+    this.#save(record, { model: wantModel, thinkingLevel: wantLevel });
     return this.#view(record);
   }
 
@@ -400,7 +432,7 @@ exit 1
     let session;
     if (env.kind === 'local') {
       mkdirSync(this.local.agentDir, { recursive: true });
-      const spawn = relaySpawnSpec({ cwd: record.cwd, node: this.local.node, piCli: this.local.piCli, agentDir: this.local.agentDir, extensions: [this.bridgePath], piArgs, extraEnv: { ...this.local.extraEnv, ...this.piEnv() } });
+      const spawn = relaySpawnSpec({ cwd: record.cwd, node: this.local.node, piCli: this.local.piCli, agentDir: this.local.agentDir, extensions: [this.bridgePath], piArgs, extraEnv: { ...this.local.extraEnv, ...this.piEnv(record) } });
       const transport = localRelayTransport({ node: this.local.node, relayPath: this.relayPath, runDir: this.local.runDir, extraEnv: this.local.extraEnv });
       session = new PiSession({ id: record.id, boot, transport, relay: { sinceSeq: runtime.lastSeq, spawn } });
     } else {
@@ -409,7 +441,7 @@ exit 1
       // The remote port is fixed per session: the relay's Pi keeps HTTPS_PROXY across reconnects.
       if (egressProxy && !record.egressPort) this.#save(record, { egressPort: 30000 + Math.floor(Math.random() * 30000) });
       const egress = egressProxy && { localPort: egressProxy.port, remotePort: record.egressPort };
-      const spawn = relaySpawnSpec({ cwd: record.cwd, node: facts.node, piCli: facts.piCli, agentDir: facts.agentDir, extensions: [facts.bridge], piArgs, extraEnv: { TMPDIR: facts.tmpDir, ...this.piEnv(), ...(egress ? egressEnv(egress.remotePort) : {}) } });
+      const spawn = relaySpawnSpec({ cwd: record.cwd, node: facts.node, piCli: facts.piCli, agentDir: facts.agentDir, extensions: [facts.bridge], piArgs, extraEnv: { TMPDIR: facts.tmpDir, ...this.piEnv(record), ...(egress ? egressEnv(egress.remotePort) : {}) } });
       const sharedOnHost = [...this.runtimes.values()].filter(r => r !== runtime && r.shared && r.envId === env.id && r.session && !r.closing).length;
       runtime.envId = env.id; runtime.shared = sharedOnHost < 6;
       const transport = sshRelayTransport({ host: env.host, sshOptions: env.sshArgs ?? [], node: facts.node, relayPath: facts.relay, runDir: facts.runDir, egress, shared: runtime.shared });
@@ -696,7 +728,7 @@ exit 1
   async warmFolder(id) {
     const record = this.store.sessions.find(s => s.id === id);
     if (!record || record.archived) return false;
-    return this.prewarm({ environmentId: record.environmentId, cwd: record.cwd, model: record.model, thinkingLevel: record.thinkingLevel });
+    return this.prewarm({ environmentId: record.environmentId, cwd: record.cwd, model: record.model, thinkingLevel: record.thinkingLevel, noFolder: record.noFolder });
   }
   #idle(runtime) {
     return runtime.status === 'connected' && !runtime.streaming && !runtime.starting && !runtime.questions.size && runtime.goal?.status !== 'active';
