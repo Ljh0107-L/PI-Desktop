@@ -286,6 +286,11 @@ export async function sendPrompt(id, text, attachments = []) {
   }
 }
 
+export function clearQueued(id) {
+  if (!transcriptOf(id).queued?.length) return;
+  setTranscript(id, { ...transcriptOf(id), queued: [] });
+}
+
 // Pi drops images for models without image input; say so instead of failing silently.
 function warnIfNoImages(model, attachments) {
   if (!model || !attachments.some(a => a.kind === 'image')) return;

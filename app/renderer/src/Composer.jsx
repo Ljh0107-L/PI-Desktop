@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { MenuItem, MenuSection, Modal, Popover, Spinner, baseName, envIcon, shortPath } from './ui.jsx';
-import { api, getState, notify, openSettings, setDraft, setEnvironments, useStore } from './store.js';
+import { api, clearQueued, getState, notify, openSettings, setDraft, setEnvironments, useStore } from './store.js';
 import { cachedDir, listDir, prefetchDir } from './dirs.js';
 
 const EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -363,7 +363,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
           }} />
         {onCancel && <button type="button" className="button ghost small" onClick={onCancel}>Cancel</button>}
         {streaming && !canSend && !onCancel
-          ? <button className="send-button stop" onClick={() => api('abort', session.id)} aria-label="Stop" title="Stop"><Icon name="stop" size={22} /></button>
+          ? <button className="send-button stop" onClick={() => { clearQueued(session.id); api('abort', session.id); }} aria-label="Stop" title="Stop"><Icon name="stop" size={22} /></button>
           : <button className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={submit} aria-label="Send"><Icon name="arrowUp" size={17} stroke={2.4} /></button>}
       </div>
     </div>

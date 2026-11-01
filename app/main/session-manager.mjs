@@ -523,7 +523,8 @@ export class SessionManager extends EventEmitter {
     const session = runtime.session;
     // Codex-style interrupt: stop the running command and discard queued steering/follow-up
     // messages immediately, instead of letting the current tool finish and then consuming them.
-    await Promise.allSettled([session.abortBash(), session.clearQueue()]);
+    session.abortBash().catch(() => {});
+    session.clearQueue().catch(() => {});
     const finished = await Promise.race([
       session.abort().then(() => true, () => true),
       new Promise(resolve => setTimeout(() => resolve(false), 4000)),
