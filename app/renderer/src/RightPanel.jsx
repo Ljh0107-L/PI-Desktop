@@ -18,7 +18,7 @@ function Card({ title, children, open: initial = true, aside }) {
   );
 }
 
-const fmtTps = v => v == null ? '—' : v >= 100 ? String(Math.round(v)) : v.toFixed(1);
+const fmtTps = (v, estimated) => v == null ? '—' : `${estimated ? '~' : ''}${v >= 100 ? Math.round(v) : v.toFixed(1)}`;
 
 // Speed and token usage per turn, where a turn is one model call (one assistant message): the last turn's
 // speed with a trend of recent turns, and input / cached / output tokens for the last turn and the session.
@@ -31,6 +31,7 @@ function UsageCard({ transcript }) {
   // Measured speed only (provider token counts ÷ generation time), updated when a reply finishes.
   const recent = turns.slice(-14).map(t => t.tps).filter(v => v != null);
   const speed = last.tps; // Don't present an older call's speed as this one's when timing is missing.
+  const speedEstimated = last.speedEstimated;
   const peak = Math.max(...recent, 1);
   const rows = [
     ['Input', last.input + last.cacheWrite, total.input + total.cacheWrite],
@@ -42,7 +43,7 @@ function UsageCard({ transcript }) {
     <Card title="Usage">
       <div className="usage">
         <div className="usage-speed">
-          <div className="usage-speed-value" title="Output tokens ÷ API call duration (includes first-token latency and reasoning)"><b>{fmtTps(speed)}</b><span>tok/s</span></div>
+          <div className="usage-speed-value" title={speedEstimated ? "Estimated: the provider reported too few output tokens; speed uses the visible answer text. Output tokens ÷ first→last generation window (or API duration when timing is unavailable)." : "Output tokens ÷ first→last generation window; falls back to full API duration when timing is unavailable or a relay replay is detected."}><b>{fmtTps(speed, speedEstimated)}</b><span>tok/s</span></div>
           <div className="spark" aria-hidden="true">{recent.map((v, i) => <span key={i} style={{ height: `${Math.max(8, v / peak * 100)}%` }} />)}</div>
         </div>
         <div className="usage-table">

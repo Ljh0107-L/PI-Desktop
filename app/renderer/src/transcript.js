@@ -25,18 +25,38 @@ export function fromHistory(messages, timings = {}) {
 // Pi's usage: input = uncached prompt tokens, cacheRead / cacheWrite = cached prompt tokens, output
 // (which already includes `reasoning` when the provider reports it).
 //
-// Pi measures durationMs at the source with a monotonic clock, from API stream creation to completion.
-// Renderer delta arrival times are NOT generation times: proxies buffer chunks, SSH replays them, and
-// background windows can deliver several seconds of output in one frame. Dividing all output by that
-// tiny receive window produced 1000+ tok/s spikes. Use the full per-call duration, including hidden
-// reasoning / first-token latency, and never synthesize a speed for untimed history.
+// TPS is the generation-phase rate: output tokens ÷ (last streamed token - first streamed token).
+// `__timing` comes from the live stream and is persisted per message. When it is missing, fall back
+// to Pi's durationMs (full API call, including first-token latency and queueing). A very dense burst
+// (e.g. a relay replaying a buffered response) is not a generation window, so it also falls back to
+// durationMs instead of reporting an artificial 10k tok/s.
+const textOfMessage = m => typeof m.content === 'string'
+  ? m.content
+  : (m.content ?? []).filter(b => b?.type === 'text' || b?.type === 'thinking').map(b => b.text ?? b.thinking ?? '').join('\n');
 function generation(m) {
-  const out = m.usage?.output, ms = m.durationMs;
-  if (!Number.isFinite(out) || out <= 0 || !Number.isFinite(ms) || ms <= 0) return null;
-  return { ms, out, hiddenWork: (m.usage.reasoning ?? 0) > 0 };
+  const reported = m.usage?.output;
+  const t = m.__timing;
+  // Prefer first→last from the stream; keep full API duration for replay/burst or
+  // untimed history. The burst guard avoids a relay replay looking like 10k tok/s.
+  let ms = m.durationMs;
+  if (t?.first && t?.last && t.last > t.first) {
+    const window = t.last - t.first;
+    const chars = t.chars ?? 0;
+    if (!chars || chars / window <= 20) ms = window;
+  }
+  if (!Number.isFinite(ms) || ms <= 0) return null;
+  // Some gateways (notably Cursor's Gemini path) report a token count that is
+  // far below the visible answer. Use the visible-text estimate only when the
+  // reported count is implausible, and mark the speed as estimated.
+  let out = reported, estimated = false;
+  const visible = estimateTokens(textOfMessage(m));
+  if ((!Number.isFinite(out) || out <= 0) && visible > 0) { out = visible; estimated = true; }
+  else if (visible >= 20 && Number.isFinite(out) && out < visible * 0.6) { out = visible; estimated = true; }
+  if (!Number.isFinite(out) || out <= 0) return null;
+  return { ms, out, reported: Number.isFinite(reported) ? reported : null, estimated, hiddenWork: (m.usage.reasoning ?? 0) > 0 };
 }
 export function usageOf(messages) {
-  const u = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0, reasoningReported: false, cost: 0, genMs: 0, genOut: 0, hiddenWork: false, start: null, end: null, calls: 0 };
+  const u = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0, reasoningReported: false, cost: 0, genMs: 0, genOut: 0, speedEstimated: false, hiddenWork: false, start: null, end: null, calls: 0 };
   for (const m of messages) {
     if (m.role !== 'assistant' || !m.usage) continue;
     u.calls += 1;
@@ -44,7 +64,7 @@ export function usageOf(messages) {
     if (m.usage.reasoning != null) { u.reasoningReported = true; u.reasoning += m.usage.reasoning; }
     u.cost += m.usage.cost?.total ?? 0;
     const g = generation(m);
-    if (g) { u.genMs += g.ms; u.genOut += g.out; u.hiddenWork ||= g.hiddenWork; }
+    if (g) { u.genMs += g.ms; u.genOut += g.out; u.speedEstimated ||= g.estimated; u.hiddenWork ||= g.hiddenWork; }
     const t = m.__timing;
     if (t?.start && t.end) { u.start = Math.min(u.start ?? t.start, t.start); u.end = Math.max(u.end ?? t.end, t.end); }
   }
