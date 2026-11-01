@@ -81,6 +81,8 @@ export class PiSession extends EventEmitter {
   messages() { return this.request('get_messages').then(data => data.messages); }
   state() { return this.request('get_state'); }
   abort() { return this.request('abort'); }
+  abortBash() { return this.request('abort_bash'); }
+  clearQueue() { return this.request('clear_queue'); }
 
   // Resolves on the next agent_settled event (subscribe before prompting).
   nextSettled(timeout = 60000) {

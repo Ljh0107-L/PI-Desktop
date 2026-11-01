@@ -1,5 +1,5 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, safeStorage, shell } from 'electron';
-import { existsSync, readFileSync, statSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { open, readdir, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, dirname, extname, join, posix, resolve } from 'node:path';
@@ -78,6 +78,33 @@ const BUILTIN_PROVIDERS = {
   xai: 'xAI', groq: 'Groq', mistral: 'Mistral', moonshotai: 'Moonshot (Kimi)', zai: 'Z.ai (GLM)', fireworks: 'Fireworks', together: 'Together',
 };
 
+// Pi's compaction trigger is contextTokens > contextWindow - reserveTokens. Equalising
+// the reserve with each model's max output makes it exactly "compact when the remaining
+// context is smaller than the largest possible reply", instead of the 16K default that
+// lets a 1M-context model overflow before compaction.
+function syncCompactionReserves() {
+  const agentDir = join(app.getPath('userData'), 'agent');
+  const path = join(agentDir, 'settings.json');
+  let settings = {};
+  try { settings = JSON.parse(readFileSync(path, 'utf8')); } catch { /* first run */ }
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) settings = {};
+  const overrides = { ...(settings.compaction?.modelOverrides ?? {}) };
+  for (const provider of store.settings.providers ?? []) {
+    for (const model of provider.models ?? []) {
+      const maxTokens = Number(model.maxTokens);
+      if (!provider.id || !model.id || !Number.isFinite(maxTokens) || maxTokens <= 0) continue;
+      const key = `${provider.id}/${model.id}`;
+      overrides[key] = { ...(overrides[key] ?? {}), reserveTokens: Math.floor(maxTokens) };
+    }
+  }
+  settings.compaction = { ...(settings.compaction ?? {}), modelOverrides: overrides };
+  try {
+    mkdirSync(agentDir, { recursive: true });
+    writeFileSync(path, JSON.stringify(settings, null, 2) + '\n');
+    chmodSync(path, 0o600);
+  } catch { /* settings are best effort; Pi keeps its defaults if this cannot be written */ }
+}
+
 function publicSettings() {
   const s = store.settings;
   return { ...s, providers: s.providers.map(p => ({ ...p, hasKey: store.hasKey(p.id) })), builtinProviders: BUILTIN_PROVIDERS };
@@ -146,6 +173,7 @@ const api = {
     if (index >= 0) providers[index] = clean; else providers.push(clean);
     if (key) store.setKey(provider.id, key);
     store.saveSettings();
+    syncCompactionReserves();
     manager.invalidateCatalog();
     manager.providersChanged();
     // Provider reachability may differ: redo host setup now, in the background, not at the next message.
@@ -157,6 +185,7 @@ const api = {
     store.settings.providers = store.settings.providers.filter(p => p.id !== id);
     store.setKey(id, null);
     store.saveSettings();
+    syncCompactionReserves();
     manager.invalidateCatalog();
     manager.providersChanged();
     return publicSettings();
@@ -287,6 +316,7 @@ app.whenReady().then(() => {
   ]));
   if (process.platform === 'darwin' && !app.isPackaged) app.dock?.setIcon(nativeImage.createFromPath(join(root, 'build/icon.png')));
   store = new Store(app.getPath('userData'), safeStorage, { insecureTestStorage: process.env.PIDESK_INSECURE_TEST_STORAGE === '1' });
+  syncCompactionReserves();
   manager = new SessionManager({
     store, environments, piVersion,
     bridgePath: join(root, 'agent/pidesk-bridge.js'),

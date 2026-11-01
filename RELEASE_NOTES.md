@@ -3,6 +3,10 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Later versions install themselves: an **Update** button appears next to Settings.
 
 **In this release**
+- **Interrupt is now Codex-style:** Stop aborts the running command, clears queued steering/follow-up messages, and hard-stops a Pi that ignores the abort signal after 4 seconds instead of waiting for the command to finish.
+- **Compaction reserve follows max output:** Pi Desktop now sets each model's compaction reserve to its max output length, so it compacts when `context - input < max output` instead of letting a 1M-context model overflow first.
+- **TPS for tool calls:** tool-call arguments count toward the generation window, while a large write body can no longer be mistaken for a missing token count and inflate the speed.
+- Model output limits were reviewed and tightened for the configured DeepSeek, Qwen and Cursor models.
 - The Context meter now refreshes after every model call, on the same boundary as the Usage/TPS card, instead of waiting for the whole agent run to settle.
 - Interrupting a run no longer leaves a red “This operation was aborted” error box; user stops are shown as a neutral “Interrupted” notice. Real provider failures still show as errors.
 - Cursor bridge streams now report a clear error instead of closing the socket when an internal exception occurs, so Pi no longer surfaces an opaque “terminated” transport failure.

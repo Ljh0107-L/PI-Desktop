@@ -517,7 +517,28 @@ export class SessionManager extends EventEmitter {
     return true;
   }
 
-  async abort(id) { const runtime = this.runtimes.get(id); if (runtime?.session) await runtime.session.abort(); }
+  async abort(id) {
+    const runtime = this.runtimes.get(id);
+    if (!runtime?.session) return;
+    const session = runtime.session;
+    // Codex-style interrupt: stop the running command and discard queued steering/follow-up
+    // messages immediately, instead of letting the current tool finish and then consuming them.
+    await Promise.allSettled([session.abortBash(), session.clearQueue()]);
+    const finished = await Promise.race([
+      session.abort().then(() => true, () => true),
+      new Promise(resolve => setTimeout(() => resolve(false), 4000)),
+    ]);
+    // A tool that ignores the abort signal must not leave the UI waiting forever.
+    // Stop this Pi (the session file remains the source of truth; the next prompt
+    // reconnects) so an interrupt is actually an interrupt.
+    if (!finished && this.runtimes.get(id) === runtime && runtime.streaming) {
+      const record = this.record(id);
+      const env = this.env(record.environmentId);
+      await this.close(id).catch(() => {});
+      if (env) await this.stopRelay(env, id).catch(() => {});
+      this.emit('status', { id, status: 'disconnected', message: 'Stopped' });
+    }
+  }
 
   async setModel(id, provider, modelId) {
     const record = this.record(id);

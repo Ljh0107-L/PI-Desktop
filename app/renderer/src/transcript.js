@@ -40,13 +40,26 @@ export const isAbortMessage = m => m?.stopReason === 'aborted' || isAbortText(m?
 const textOfMessage = m => typeof m.content === 'string'
   ? m.content
   : (m.content ?? []).filter(b => b?.type === 'text' || b?.type === 'thinking').map(b => b.text ?? b.thinking ?? '').join('\n');
+// Tool calls are output tokens too. Counting their name/arguments keeps the TPS
+// generation window meaningful for tool-only turns (Cursor reports no usage
+// before it waits for the tool result, so the bridge estimates from these).
+const toolCallText = m => typeof m.content === 'string'
+  ? ''
+  : (m.content ?? []).filter(b => b?.type === 'toolCall').map(b => `${b.name ?? ''} ${JSON.stringify(b.arguments ?? {})}`).join('\n');
 function generation(m) {
   const reported = m.usage?.output;
   const t = m.__timing;
-  const visible = estimateTokens(textOfMessage(m));
+  const answerText = textOfMessage(m);
+  const allText = [answerText, toolCallText(m)].filter(Boolean).join('\n');
+  // Tool arguments are real output too, so they count when checking whether the
+  // streamed text covers the reported token count. They must not be used to
+  // "correct" a plausible reported count: a write tool's file body is huge and
+  // would otherwise inflate TPS. Only the visible answer text is a fallback.
+  const visibleOutput = estimateTokens(allText);
+  const visibleAnswer = estimateTokens(answerText);
   // Prefer first→last from the stream; keep full API duration for replay/burst,
   // hidden reasoning with no streamed text, or untimed history.
-  const coversOutput = visible >= Math.max(20, (Number.isFinite(reported) ? reported : 0) * 0.25);
+  const coversOutput = visibleOutput >= Math.max(20, (Number.isFinite(reported) ? reported : 0) * 0.25);
   let ms = m.durationMs;
   if (t?.first && t?.last && t.last > t.first && (t.chars ?? 0) >= 20 && coversOutput) {
     const window = t.last - t.first;
@@ -58,8 +71,8 @@ function generation(m) {
   // far below the visible answer. Use the visible-text estimate only when the
   // reported count is implausible, and mark the speed as estimated.
   let out = reported, estimated = false;
-  if ((!Number.isFinite(out) || out <= 0) && visible > 0) { out = visible; estimated = true; }
-  else if (visible >= 20 && Number.isFinite(out) && out < visible * 0.6) { out = visible; estimated = true; }
+  if ((!Number.isFinite(out) || out <= 0) && visibleOutput > 0) { out = visibleOutput; estimated = true; }
+  else if (visibleAnswer >= 20 && Number.isFinite(out) && out < visibleAnswer * 0.6) { out = visibleAnswer; estimated = true; }
   if (!Number.isFinite(out) || out <= 0) return null;
   return { ms, out, reported: Number.isFinite(reported) ? reported : null, estimated, hiddenWork: (m.usage.reasoning ?? 0) > 0 };
 }

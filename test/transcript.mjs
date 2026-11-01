@@ -78,3 +78,9 @@ assert.equal(interruptedBlocks.some(b => b.kind === 'notice' && b.text === 'Inte
 const failed = { ...message, timestamp: 9000, stopReason: 'error', errorMessage: 'terminated', content: [] };
 assert.equal(displayBlocks({ ...emptyTranscript(), loaded: true, messages: [{ role: 'user', content: 'do work', timestamp: 8500 }, failed] }).some(b => b.kind === 'error'), true, 'real failures stay errors');
 console.log('PASS  aborted turns render as interruption notices, not errors');
+
+// Tool arguments count for the generation window, but a large write body must not
+// be mistaken for a low reported token count and inflate the estimated speed.
+const writeCall = { ...message, timestamp: 10000, usage: { output: 100 }, content: [{ type: 'toolCall', name: 'write', arguments: { path: 'a.txt', content: 'x'.repeat(10000) } }], __timing: { start: 0, first: 1000, last: 2000, end: 2100, chars: 10000, est: 2500 } };
+assert.equal(usageOf([writeCall]).speedEstimated, false, 'large tool arguments do not replace a plausible reported output');
+console.log('PASS  tool-call TPS: arguments cover the window without inflating reported output');
