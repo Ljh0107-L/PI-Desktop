@@ -45,6 +45,7 @@ console.log('PASS  transcript regressions: source-timed TPS, replay, missing tim
 const longGreeting = { ...message, timestamp: 5000, durationMs: 5886, usage: { output: 16 }, content: [{ type: 'text', text: 'x'.repeat(662) }] };
 const estimatedSpeed = usageOf([longGreeting]);
 assert.equal(estimatedSpeed.speedEstimated, true);
+assert.equal(estimatedSpeed.output, estimatedSpeed.genOut, 'Usage Output uses the same visible-text estimate as TPS');
 assert.equal(Math.round(estimatedSpeed.tps), 28, 'estimated Cursor TPS with API-duration fallback');
 // Cursor timing: first→last is the generation window; visible text is used because output=16 is implausible.
 const cursorTiming = { start: 0, first: 1000, last: 3190, end: 3300, chars: 662, est: 185 };

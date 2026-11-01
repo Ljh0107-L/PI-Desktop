@@ -81,10 +81,13 @@ export function usageOf(messages) {
   for (const m of messages) {
     if (m.role !== 'assistant' || !m.usage) continue;
     u.calls += 1;
-    u.input += m.usage.input ?? 0; u.cacheRead += m.usage.cacheRead ?? 0; u.cacheWrite += m.usage.cacheWrite ?? 0; u.output += m.usage.output ?? 0;
+    u.input += m.usage.input ?? 0; u.cacheRead += m.usage.cacheRead ?? 0; u.cacheWrite += m.usage.cacheWrite ?? 0;
     if (m.usage.reasoning != null) { u.reasoningReported = true; u.reasoning += m.usage.reasoning; }
     u.cost += m.usage.cost?.total ?? 0;
     const g = generation(m);
+    // Keep the Usage card consistent with the speed: when the provider count is
+    // implausibly low, show the same visible-text estimate TPS uses.
+    u.output += g?.estimated ? g.out : (m.usage.output ?? 0);
     if (g) { u.genMs += g.ms; u.genOut += g.out; u.speedEstimated ||= g.estimated; u.hiddenWork ||= g.hiddenWork; }
     const t = m.__timing;
     if (t?.start && t.end) { u.start = Math.min(u.start ?? t.start, t.start); u.end = Math.max(u.end ?? t.end, t.end); }

@@ -24,7 +24,7 @@ const fmtTps = (v, estimated) => v == null ? '—' : `${estimated ? '~' : ''}${v
 // speed with a trend of recent turns, and input / cached / output tokens for the last turn and the session.
 // Figures update as each turn finishes.
 function UsageCard({ transcript }) {
-  const turns = (transcript?.messages ?? []).filter(m => m.role === 'assistant' && m.usage).map(m => usageOf([m]));
+  const turns = (transcript?.messages ?? []).filter(m => m.role === 'assistant' && m.usage && m.stopReason !== 'error' && m.stopReason !== 'aborted').map(m => usageOf([m]));
   if (!turns.length) return null;
   const last = turns.at(-1);
   const total = usageOf(transcript.messages);
