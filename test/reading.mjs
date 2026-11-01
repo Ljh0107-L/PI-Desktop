@@ -3,6 +3,9 @@
 import assert from 'node:assert/strict';
 
 export async function checkReading({ app, page, id }) {
+  page.setDefaultTimeout(5000);
+  let label = 'start';
+  const step = name => { label = name; };
   const send = async events => {
     await app.evaluate(({ BrowserWindow }, { id, events }) => {
       const wc = BrowserWindow.getAllWindows()[0].webContents;
@@ -17,6 +20,7 @@ export async function checkReading({ app, page, id }) {
   const result = { content: [{ type: 'text', text: Array.from({ length: 100 }, (_, i) => `log line ${i}`).join('\n') }] };
   try {
     await app.evaluate(({ BrowserWindow }, id) => BrowserWindow.getAllWindows()[0].webContents.send('pidesk:event', { channel: 'status', payload: { id, status: 'connecting' } }), id);
+    step('centered loading spinner');
     await page.getByRole('status', { name: 'Loading conversation' }).waitFor();
     const centered = await page.locator('.transcript-shell').evaluate(el => {
       const parent = el.getBoundingClientRect(), spinner = el.querySelector('.transcript-loading .spinner').getBoundingClientRect();
@@ -35,12 +39,17 @@ export async function checkReading({ app, page, id }) {
       { type: 'tool_execution_start', toolCallId: call.id },
       { type: 'tool_execution_update', toolCallId: call.id, partialResult: result },
     ]);
+    step('changes pill rendered');
     const pill = page.locator('.changes-pill', { hasText: 'reading.txt' });
     await pill.evaluate(el => { window.__changesPill = el; });
+    step('open the command group');
     await page.locator('.tool-group-head', { hasText: 'Inspect test log' }).click();
     const row = page.locator('[data-tool-id="reading-test-call"]');
+    step('open the command row');
     await row.locator('.tool-call-head').click();
+    step('scroll the command output');
     await row.locator('.tool-output').evaluate(el => { el.scrollTop = 72; window.__readingRow = el.closest('.tool-call'); });
+    step('API call ends');
     await send([{ type: 'message_end', message: assistant }]);
     assert.equal(await page.locator('.usage-speed-value b').innerText(), '50.0', 'TPS updates after this API call, while the agent is still running');
     assert.equal(await row.evaluate(el => el === window.__readingRow), true, 'final reasoning must not remount the tool row');
@@ -49,6 +58,7 @@ export async function checkReading({ app, page, id }) {
     assert.equal(await page.locator('.reasoning-tokens', { hasText: '200 tokens' }).count(), 1, 'hidden reasoning usage is visible even with no reasoning text');
     assert.equal(await pill.evaluate(el => el === window.__changesPill), true);
 
+    step('next API call streams');
     const next = { role: 'assistant', timestamp: stamp + 2, content: [], usage: { output: 200 }, durationMs: 2000 };
     await send([
       { type: 'tool_execution_end', toolCallId: call.id, result, isError: false },
@@ -69,9 +79,11 @@ export async function checkReading({ app, page, id }) {
     await send([{ type: 'message_end', message: { ...next, content: [{ type: 'thinking', thinking: 'Checking another detail.' }, { type: 'text', text: answer }] } }]);
     assert.equal(await pill.evaluate(el => el === window.__changesPill), true, 'changes pill must not disappear/reappear at API call boundaries');
     assert.equal(await page.locator('.usage-speed-value b').innerText(), '100');
+    step('jump to latest');
     await page.getByRole('button', { name: 'Jump to latest' }).click();
     assert.ok(await page.locator('.transcript').evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight < 2));
     // A standalone thought changes into a work card: retain its open state too.
+    step('thought becomes a work card');
     const thinking = { role: 'assistant', timestamp: stamp + 3, content: [] };
     await send([
       { type: 'message_start', message: thinking },
@@ -82,7 +94,12 @@ export async function checkReading({ app, page, id }) {
     assert.equal(await page.locator('.work-body .step-markdown', { hasText: 'A thought to inspect' }).count(), 1);
     await send([{ type: 'message_end', message: { ...thinking, content: [{ type: 'text', text: 'Untimed history' }], usage: { output: 10 } } }]);
     assert.equal(await page.locator('.usage-speed-value b').innerText(), '—', 'untimed call must not inherit a previous speed');
+  } catch (error) {
+    await page.screenshot({ path: `/tmp/pidesk-e2e/shots/zz-reading-${label.replace(/\W+/g, '-')}.png` }).catch(() => {});
+    const dom = await page.locator('.transcript-inner').innerHTML().catch(() => '');
+    throw new Error(`reading fixture failed at "${label}": ${error.message.split('\n')[0]}\n${dom.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').slice(-1500)}`);
   } finally {
+    page.setDefaultTimeout(30000);
     await send([{ type: 'agent_settled' }]);
     await app.evaluate(({ BrowserWindow }, id) => {
       BrowserWindow.getAllWindows()[0].webContents.send('pidesk:event', { channel: 'resync', payload: { id } });
