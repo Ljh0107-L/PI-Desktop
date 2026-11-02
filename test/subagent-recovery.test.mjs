@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
 import { AssistantMessageEventStream } from '@earendil-works/pi-ai';
+import { createBashToolDefinition } from '@earendil-works/pi-coding-agent';
 import { Type } from 'typebox';
 import { childBashParameters, createSubagentTool, LENGTH_RECOVERY_PROMPT, pruneLengthTurn, subagentResponseDiagnostics } from '../agent/pidesk-subagent.mjs';
 
@@ -242,13 +243,18 @@ for (const timeout of [undefined, 7, 600, 0, -1]) test(`bash omitted default ver
   assert.equal(declared.additionalProperties, false);
 });
 
-test('explicit invalid timeout null is blocked before normalized omission can select a default', async () => {
+test('optional null timeout follows Pi normalization and still receives a bounded default', async () => {
   const f = fixture(async (_request, n) => n === 1 ? reply('toolUse', [call('bash', { command: 'test', timeout: null })]) : reply());
-  let invoked = false;
-  f.ctx.executeTool = async () => { invoked = true; return structuredClone(ok); };
   await run(f);
-  assert.equal(invoked, false, 'an invalid explicit null must not become an omitted/defaulted argument');
-  assert.ok(f.requests[1].transcript.messages.some(m => m.role === 'toolResult' && m.isError && /Invalid timeout/.test(text(m))));
+  assert.equal(f.executions.length, 1);
+  assert.equal(f.executions[0].args.timeout, 120, 'nullable wire representations of omitted optional fields must not lose the default bound');
+});
+
+test('native bash rejects explicit nonpositive timeouts before executing a shell', async () => {
+  const bash = createBashToolDefinition(process.cwd());
+  for (const timeout of [0, -1]) {
+    await assert.rejects(bash.execute('invalid-timeout', { command: 'exit 0', timeout }, new AbortController().signal), /Invalid timeout/);
+  }
 });
 
 test('replacement bash schemas that explicitly accept null keep their own timeout contract', async () => {

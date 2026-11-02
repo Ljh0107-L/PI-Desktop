@@ -214,13 +214,13 @@ export function createSubagentTool({ concurrency = 3, defaultTimeoutMs = 300000,
               release = await pool.acquire(signal);
               signal.throwIfAborted();
               result.status = 'running'; result.runStartedAt = Date.now(); emit(true);
-              const defaultTimedTools = new Set();
               const tools = ctx.tools.filter(t => TOOL_NAMES.has(t.name)).map(tool => {
                 const parameters = childBashParameters(tool);
-                if (parameters !== tool.parameters) defaultTimedTools.add(tool.name);
                 return { ...tool, parameters,
                   async execute(_toolId, args, toolSignal, update) {
                     signal.throwIfAborted();
+                    // Apply the default after Pi's normal validation (which treats a null
+                    // optional, non-nullable field as omitted). Explicit numeric values survive.
                     const input = parameters !== tool.parameters && args.timeout === undefined ? { ...args, timeout: 120 } : args;
                     const actionId = Symbol();
                     activeTools.set(actionId, `running ${tool.name} (${blockedToolSummary(tool.name, args)})`);
@@ -237,13 +237,6 @@ export function createSubagentTool({ concurrency = 3, defaultTimeoutMs = 300000,
               agent = new Agent({
                 initialState: { systemPrompt, model, thinkingLevel: ctx.thinkingLevel ?? 'medium', tools },
                 sessionId: result.id,
-                beforeToolCall: ({ toolCall }) => {
-                  // Pi normalizes optional null fields away before execution. Check the
-                  // original call so an explicit invalid null is not turned into our default.
-                  if (defaultTimedTools.has(toolCall.name) && toolCall.arguments?.timeout === null) {
-                    return { block: true, reason: 'Invalid timeout: use a positive number of seconds, or omit timeout for the subagent default; null is not a timeout.' };
-                  }
-                },
                 prepareRequest: (_request, runSignal) => {
                   signal.throwIfAborted();
                   runSignal?.throwIfAborted();
