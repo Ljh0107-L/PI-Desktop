@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
-import { AssistantMessageEventStream } from '@earendil-works/pi-ai';
+import { AssistantMessageEventStream, registerSessionResourceCleanup } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 import { createSubagentTool, SUBAGENT_PROMPT } from '../agent/pidesk-subagent.mjs';
 import { outputs, usageOf } from '../app/renderer/src/transcript.js';
@@ -72,6 +72,15 @@ test('one concurrency pool applies across simultaneous batches; results retain t
   assert.equal(c.peak(), 3);
   assert.ok([...a.details.results, ...b.details.results].every(r => r.status === 'completed'));
   assert.deepEqual(a.details.results.map(r => r.name), tasks(6).map(t => t.name));
+});
+
+test('provider session resources are cleaned up for each child, not the parent', async () => {
+  const ids = [];
+  const unregister = registerSessionResourceCleanup(id => ids.push(id));
+  try {
+    const result = await run(createSubagentTool(), context(), tasks(2));
+    assert.deepEqual(ids.sort(), result.details.results.map(r => r.id).sort());
+  } finally { unregister(); }
 });
 
 test('coding calls go through the parent pipeline and report successful file outputs', async () => {

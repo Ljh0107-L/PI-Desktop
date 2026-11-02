@@ -3,7 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { Agent } from '@earendil-works/pi-agent-core';
-import { isRetryableAssistantError } from '@earendil-works/pi-ai';
+import { cleanupSessionResources, isRetryableAssistantError } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
 
 const MAX_TASKS = 6;
@@ -137,7 +137,7 @@ export function createSubagentTool({ concurrency = 3, maxTurns = 12, defaultTime
               agent = new Agent({
                 initialState: { systemPrompt, model, thinkingLevel: ctx.thinkingLevel ?? 'medium', tools },
                 sessionId: result.id,
-                streamFn: (m, context, options) => ctx.modelRegistry.streamSimple(m, context, { ...options, cacheRetention: 'long' }),
+                streamFn: (m, context, options) => ctx.modelRegistry.streamSimple(m, context, { ...options, cacheRetention: 'long', maxRetries: 0, timeoutMs: params.timeoutSeconds ? params.timeoutSeconds * 1000 : defaultTimeoutMs }),
                 finishTurn: () => result.turns >= maxTurns ? { action: 'end' } : undefined,
               });
               signal.addEventListener('abort', abort, { once: true });
@@ -175,7 +175,11 @@ export function createSubagentTool({ concurrency = 3, maxTurns = 12, defaultTime
               signal.removeEventListener('abort', abort);
               unsubscribe?.();
               agent?.abort();
-              if (agent) await agent.waitForIdle();
+              if (agent) {
+                await agent.waitForIdle();
+                try { cleanupSessionResources(result.id); }
+                catch { if (result.status === 'completed') result.status = 'failed'; result.error = 'Subagent provider resource cleanup failed'; }
+              }
               delete result.currentTool;
               release?.(); emit(true);
             }

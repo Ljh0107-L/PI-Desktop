@@ -25,7 +25,7 @@ const remoteInstall = join(work, 'remote-install');
 for (const dir of [localProject, remoteProject]) mkdirSync(dir, { recursive: true });
 writeFileSync(join(localProject, 'README.md'), '# demo-app\n');
 for (const f of ['denied.txt', 'notes/plan.md', 'local-after-quit.txt']) rmSync(join(localProject, f), { force: true });
-for (const f of ['survived.txt', 'after-quit.txt']) rmSync(join(remoteProject, f), { force: true });
+for (const f of ['survived.txt', 'after-quit.txt', 'subagent-result.txt', 'background-subagent-1.txt', 'background-subagent-2.txt']) rmSync(join(remoteProject, f), { force: true });
 // Simulate the network dropping: kill this machine's ssh client for the remote session's relay connection.
 const dropSsh = () => { try { execFileSync('pkill', ['-f', `pidesk-test.*${remoteInstall}/ext/pidesk-relay.mjs.*attach`]); return true; } catch { return false; } };
 
@@ -428,6 +428,15 @@ try {
   check('delegated file writes appear in Outputs', existsSync(join(remoteProject, 'subagent-result.txt')));
   check('subagents do not create sidebar conversations or extra windows', (await app.windows()).length === 1 && await page.locator('.session-row').count() === 2);
   await S('08b-subagents');
+  await waitNew('.markdown', 'Subagents: 2/2 completed', async () => {
+    await send('[[subagents-background]]');
+    await page.waitForFunction(() => {
+      const state = window.__pideskState();
+      return Object.values(state.transcripts[state.activeId]?.tools ?? {}).some(t => t.status === 'running' && t.args?.command?.includes('background-subagent'));
+    }, undefined, { timeout: 15000 });
+    check('dropped SSH during delegated work', dropSsh());
+  }, 60000);
+  check('subagents finish on the host through a dropped desktop connection', [1, 2].every(i => existsSync(join(remoteProject, `background-subagent-${i}.txt`))));
 
   // concurrent sessions: start a remote run, switch to local, run there, both complete
   await send('remote run ' + 'x'.repeat(300));

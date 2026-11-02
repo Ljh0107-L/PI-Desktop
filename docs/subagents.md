@@ -43,7 +43,7 @@ Independent context is **not** filesystem or OS isolation. Subagents share the p
 
 The built-in prompts are `SUBAGENT_PROMPT` and `CHILD_PROMPT` in `agent/pidesk-subagent.mjs`; the bridge injects delegation guidance as a structured system-prompt section before each run. They cover useful task selection, context transfer, user restrictions, shared-file coordination and verification.
 
-There is no separate durable child-session service in this version. If the parent Pi process crashes, its in-memory child contexts stop with it; completed results remain in the parent's session file. Existing Pi processes kept alive across a desktop update retain the old bridge until replaced. Start a new conversation to use the new extension without stopping ongoing work.
+There is no separate durable child-session service in this version. If the parent Pi process crashes, its in-memory child contexts stop with it. Final batch results already written to the parent's session file can be reopened; an in-flight batch is not guaranteed to recover even if one of its subtasks had finished. Existing Pi processes kept alive across a desktop update retain the old bridge until replaced. Start a new conversation to use the new extension without stopping ongoing work.
 
 ## CI coverage
 

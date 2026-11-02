@@ -157,6 +157,25 @@ try {
     check(`[${session.id}] subagents inherit current provider credentials`, childRequests.length >= 4 && childRequests.every(r => r.provider === 'mock-beta' && r.model === 'beta-1' && r.authorization === `Bearer ${keys.beta}`));
     check(`[${session.id}] delegation guidance reaches the parent prompt`, mock.requests.slice(before).some(r => !r.subagent && r.system.includes('independent context windows')));
   }
+
+  // Abort an actual delegated shell tool, not only a mock model request.
+  const started = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => { local.off('event', listener); reject(new Error('delegated command did not start')); }, 15000);
+    const listener = event => {
+      if (event.type === 'tool_execution_start' && event.parentToolCallId && event.args?.command?.includes('cancelled-subagent')) {
+        clearTimeout(timer); local.off('event', listener); resolve();
+      }
+    };
+    local.on('event', listener);
+  });
+  const cancelled = local.nextSettled(15000);
+  await local.prompt('[[subagents-slow]]');
+  await started;
+  await local.abort();
+  await cancelled;
+  await new Promise(resolve => setTimeout(resolve, 3500));
+  check('[local] Stop cancels delegated shell work before its side effect', [1, 2].every(i => !existsSync(join(dirs.localProject, `cancelled-subagent-${i}.txt`))));
+  check('[local] parent is idle after delegated cancellation', !(await local.state()).isStreaming);
 } catch (error) {
   check('unexpected error', false, error.stack);
   for (const session of sessions) if (session.stderr) console.log(`--- ${session.id} stderr ---\n${session.stderr.slice(-3000)}`);
