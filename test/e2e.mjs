@@ -48,6 +48,18 @@ writeFileSync(join(profile, 'settings.json'), JSON.stringify({ environments: { '
 let { app, page } = await launch({ userData: profile, env });
 const S = name => shot(page, opts.shots, name);
 const composer = () => page.locator('.composer textarea');
+const inspector = () => page.locator('.subagent-inspector');
+const mainTranscript = () => page.locator('.session-main .transcript');
+const clearDialog = () => page.locator('.modal').filter({ hasText: 'Clear subagent records?' });
+const activeRecord = async () => page.evaluate(async () => {
+  const id = window.__pideskState().activeId;
+  return (await window.pidesk.invoke('listSessions')).find(session => session.id === id);
+});
+// Compare stored conversation data, not the delegation card's intentionally filtered rows.
+const conversationSnapshot = () => page.evaluate(() => {
+  const state = window.__pideskState(), transcript = state.transcripts[state.activeId];
+  return JSON.stringify({ messages: transcript.messages, tools: transcript.tools });
+});
 async function send(text) { await composer().fill(text); await composer().press('Enter'); }
 const waitText = (selector, text, timeout = 60000) => page.locator(selector, { hasText: text }).last().waitFor({ timeout });
 // Wait for one more match than there is now (earlier messages may contain the same text).
@@ -186,6 +198,7 @@ try {
   check('empty Subagents section can collapse', await page.locator('.subagent-list-head').getAttribute('aria-expanded') === 'false');
   await page.locator('.subagent-list-head').press('Enter');
   check('Subagents expands from keyboard like Usage', await page.locator('.subagent-list-head').getAttribute('aria-expanded') === 'true');
+  check('empty Subagents has no finished records to clear', await page.getByRole('button', { name: 'Clear finished subagents', exact: true }).isDisabled());
   await S('04-plain-subagent-header');
   await send('recover this reply [[drop-once]]');
   await page.locator('.working', { hasText: 'Reconnecting to model' }).waitFor({ timeout: 15000 });
@@ -233,7 +246,7 @@ try {
   check('a command with a description shows the description, not the raw command', await page.locator('.tool-group-head', { hasText: 'Say hello' }).count() >= 1);
   check('the model names a new conversation (and the provisional title is replaced)', await page.locator('.session-row', { hasText: 'hello from the desktop (named)' }).count() === 1, (await page.locator('.session-row').allInnerTexts()).join(' | '));
   check('a reply\'s work folds into one line; the answer stays visible', await page.locator('.tool-group.work', { hasText: 'Ran 1 command' }).count() >= 1 && await page.locator('.markdown', { hasText: 'Tool result: hi-from-pi' }).count() >= 1);
-  check('long tool rows never scroll the conversation sideways', await page.evaluate(() => { const t = document.querySelector('.transcript'); return t.scrollWidth <= t.clientWidth + 1; }));
+  check('long tool rows never scroll the conversation sideways', await page.evaluate(() => { const t = document.querySelector('.session-main .transcript'); return t.scrollWidth <= t.clientWidth + 1; }));
   // numbered lists continue on Shift+Enter, and an empty item ends the list
   await composer().fill('1. first');
   await composer().press('Shift+Enter');
@@ -435,8 +448,10 @@ try {
   await S('08-remote-session');
 
   await page.locator('.subagent-list-head').click();
-  await waitNew('.markdown', 'Subagents: 2/2 completed', () => send('[[subagents]]'), 60000);
-  const delegation = () => page.locator('.subagent-summary').filter({ hasText: 'Inspect cwd' });
+  await waitNew('.session-main .markdown', 'Subagents: 2/2 completed', () => send('[[subagents]]'), 60000);
+  await page.locator('.send-button.stop').waitFor({ state: 'detached' });
+  const delegationCallId = await mainTranscript().locator('.subagent-summary').filter({ hasText: 'Inspect cwd' }).getAttribute('data-call-id');
+  const delegation = () => mainTranscript().locator(`.subagent-summary[data-call-id="${delegationCallId}"]`);
   check('subagent tasks are visible without expanding a command group', await delegation().locator('.subagent-task-row.completed').count() === 2);
   check('collapsed Subagents stays closed as work runs and completes', await page.locator('.subagent-list-head').getAttribute('aria-expanded') === 'false' && await page.locator('.subagent-list .subagent-task-row').count() === 0);
   await S('08a1-subagents-collapsed');
@@ -444,38 +459,87 @@ try {
   check('reopening Subagents restores completed tasks without rerunning work', await page.locator('.subagent-list .subagent-task-row.completed').count() === 2);
   await S('08a2-subagents-expanded');
   await delegation().locator('.subagent-task-row', { hasText: 'Inspect cwd' }).click();
-  await page.locator('.subagent-inspector').waitFor();
-  await page.locator('.subagent-trace-tool summary', { hasText: 'bash' }).click();
-  await page.locator('.subagent-trace-output', { hasText: 'api-server' }).waitFor();
-  check('clicking a subagent shows its actual command and output', (await page.locator('.subagent-trace-input').innerText()).includes('pwd'));
-  await page.waitForTimeout(100);
-  check('Latest activity stays hidden when all execution details are already visible', await page.locator('.subagent-latest').count() === 0);
+  await inspector().locator('.transcript').waitFor();
+  check('subagent assignment and public answer use conversation bubbles and markdown',
+    await inspector().locator('.user-bubble').innerText() === '[[bash:pwd]]' &&
+    (await inspector().locator('.markdown').innerText()).includes('api-server'));
+  check('subagent work starts folded like the main conversation',
+    await inspector().locator('.tool-group.work .tool-group-head').getAttribute('aria-expanded') === 'false' &&
+    await inspector().locator('.tool-command, .tool-output').count() === 0);
+  check('the inspector is read only and leaves the main composer alone',
+    await inspector().getByRole('button', { name: 'Edit message', exact: true }).count() === 0 &&
+    await inspector().locator('.composer, textarea').count() === 0 && await composer().count() === 1);
+  await S('08b1-subagent-conversation-folded');
+  await inspector().locator('.tool-group.work .tool-group-head').click();
+  await inspector().locator('.tool-call-head').click();
+  await inspector().locator('.tool-output', { hasText: 'api-server' }).waitFor();
+  check('clicking a subagent shows its actual command and output', (await inspector().locator('.tool-command').innerText()).includes('pwd'));
+  check('Latest stays hidden when all execution details fit', await inspector().getByRole('button', { name: 'Jump to latest', exact: true }).count() === 0);
   await S('08b-subagent-execution');
   await delegation().locator('.subagent-task-row', { hasText: 'Write delegated file' }).click();
-  await page.locator('.subagent-trace-tool summary', { hasText: 'write' }).click();
-  await page.locator('.subagent-trace-body .link-button', { hasText: 'Open file' }).click();
+  await inspector().locator('.tool-group.work .tool-group-head').click();
+  await inspector().locator('.tool-call-head').click();
+  await inspector().locator('.step-open', { hasText: 'Open subagent-result.txt' }).click();
   await page.locator('.file-pane .fp-source', { hasText: 'created by subagent' }).waitFor();
   check('delegated files open from the execution trace without an Outputs card', existsSync(join(remoteProject, 'subagent-result.txt')));
   await page.click('.fp-actions .tool-button[aria-label="Close files"]');
   check('closing file preview returns to the same subagent', (await page.locator('.subagent-inspector-head').innerText()).includes('Write delegated file'));
   await page.getByRole('button', { name: 'Back to subagents' }).click();
   check('subagents do not create sidebar conversations or extra windows', (await app.windows()).length === 1 && await page.locator('.session-row').count() === 2);
+
+  // Cancellation is a no-op; single-task clearing preserves the second task's original index.
+  const beforeSingleClear = await conversationSnapshot();
+  const beforeSingleUsage = await page.locator('.usage-table').innerText();
+  await page.getByRole('button', { name: 'Clear finished subagents', exact: true }).click();
+  await clearDialog().waitFor();
+  check('clear confirmation explains what is preserved', (await clearDialog().innerText()).includes('Running tasks, main conversation, usage and files are kept'));
+  await S('08c1-subagent-clear-confirmation');
+  await clearDialog().getByRole('button', { name: 'Cancel', exact: true }).click();
+  check('cancelling clear leaves all records and conversation intact', await page.locator('.subagent-list .subagent-task-row.completed').count() === 2 &&
+    !(await activeRecord()).clearedSubagentIds?.length && await conversationSnapshot() === beforeSingleClear);
+  await delegation().locator('.subagent-task-row', { hasText: 'Inspect cwd' }).click();
+  await inspector().getByRole('button', { name: 'Clear this subagent record', exact: true }).click();
+  await clearDialog().getByRole('button', { name: 'Clear records', exact: true }).click();
+  await inspector().waitFor({ state: 'detached' });
+  check('single clear removes only the selected finished task in both views',
+    await delegation().locator('.subagent-task-row').count() === 1 &&
+    await page.locator('.subagent-list .subagent-task-row').count() === 1 &&
+    await delegation().locator('.subagent-task-row', { hasText: 'Inspect cwd' }).count() === 0 &&
+    (await activeRecord()).clearedSubagentIds?.length === 1);
+  check('clearing keeps parent messages, original tool results, usage and files',
+    await conversationSnapshot() === beforeSingleClear && await page.locator('.usage-table').innerText() === beforeSingleUsage &&
+    readFileSync(join(remoteProject, 'subagent-result.txt'), 'utf8') === 'created by subagent');
+  await page.locator('.subagent-list .subagent-task-row', { hasText: 'Write delegated file' }).click();
+  check('remaining task still opens its own assignment at original index 1',
+    (await inspector().locator('.user-bubble').innerText()).includes('[[write:subagent-result.txt|created by subagent]]') &&
+    await page.evaluate(() => { const s = window.__pideskState(); return s.subagentSelection[s.activeId]?.taskIndex === 1; }));
+  await S('08c2-subagent-single-cleared');
+  await page.getByRole('button', { name: 'Back to subagents' }).click();
   await page.click('.main-tools .tool-button[aria-label="Files"]');
-  await waitNew('.markdown', 'Subagents: 2/2 completed', async () => {
+  await waitNew('.session-main .markdown', 'Subagents: 2/2 completed', async () => {
     await send('[[subagents-background]]');
     await page.waitForFunction(() => {
       const state = window.__pideskState();
       return Object.values(state.transcripts[state.activeId]?.tools ?? {}).some(t => t.status === 'running' && t.args?.command?.includes('background-subagent'));
     }, undefined, { timeout: 15000 });
     check('new subagent activity does not replace the open file pane', await page.locator('.file-pane').isVisible());
-    await page.locator('.subagent-summary').last().locator('.subagent-task-row', { hasText: 'Delayed task 1' }).click();
-    await page.locator('.subagent-trace-tool.running').waitFor({ timeout: 15000 });
-    check('running subagent commands can be inspected before completion', await page.locator('.subagent-inspector-meta', { hasText: 'Running' }).count() === 1);
+    await mainTranscript().locator('.subagent-summary').last().locator('.subagent-task-row', { hasText: 'Delayed task 1' }).click();
+    await inspector().locator('.tool-group.work .tool-group-head').click();
+    await inspector().locator('.tool-call.running').waitFor({ timeout: 15000 });
+    await inspector().locator('.tool-call-head').click();
+    check('running subagent commands are inspectable but cannot be cleared',
+      await inspector().locator('.subagent-inspector-meta', { hasText: 'Running' }).count() === 1 &&
+      (await inspector().locator('.tool-command').innerText()).includes('background-subagent-1.txt') &&
+      await inspector().getByRole('button', { name: 'Clear this subagent record', exact: true }).isDisabled());
     check('dropped SSH during delegated work', dropSsh());
   }, 60000);
   check('subagents finish on the host through a dropped desktop connection', [1, 2].every(i => existsSync(join(remoteProject, `background-subagent-${i}.txt`))));
   await page.locator('.subagent-inspector-meta', { hasText: 'Completed' }).waitFor();
-  check('the selected execution view updates after reconnecting', await page.locator('.subagent-trace-tool.completed').count() === 1);
+  check('the selected execution view updates after reconnecting without folding the open command',
+    await inspector().locator('.tool-call.done').count() === 1 &&
+    await inspector().locator('.tool-call-head').getAttribute('aria-expanded') === 'true' &&
+    (await inspector().locator('.tool-command').innerText()).includes('background-subagent-1.txt'));
+  await S('08d-subagent-reconnected');
   await page.getByRole('button', { name: 'Back to subagents' }).click();
 
   // concurrent sessions: start a remote run, switch to local, run there, both complete
@@ -576,11 +640,90 @@ try {
   check('after a restart, a conversation shows its history without waiting for Pi to start', remoteOpenMs < (process.env.CI ? 3000 : 1500), `${remoteOpenMs} ms (SSH)`);
   await page.locator('.session-row').first().waitFor();
   check('sessions restored after restart', await page.locator('.session-row').count() === 2);
-  await page.locator('.subagent-summary').filter({ hasText: 'Inspect cwd' }).locator('.subagent-task-row', { hasText: 'Inspect cwd' }).click();
-  await page.locator('.subagent-trace-tool summary', { hasText: 'bash' }).click();
-  await page.locator('.subagent-trace-output', { hasText: 'api-server' }).waitFor();
-  check('subagent command/output history remains inspectable after an app restart', true);
+  await page.waitForFunction(() => { const s = window.__pideskState(), session = s.sessions.find(row => row.id === s.activeId); return session?.status === 'connected' && !session.streaming; }, undefined, { timeout: 90000 });
+  check('single-task clearing survives an app restart in the sidebar and delegation card',
+    await mainTranscript().locator('.subagent-task-row', { hasText: 'Inspect cwd' }).count() === 0 &&
+    await page.locator('.subagent-list .subagent-task-row').count() === 3 &&
+    (await activeRecord()).clearedSubagentIds?.length === 1);
+  await mainTranscript().locator('.subagent-task-row', { hasText: 'Write delegated file' }).click();
+  await inspector().locator('.tool-group.work .tool-group-head').click();
+  await inspector().locator('.tool-call-head').click();
+  await inspector().locator('.tool-output').waitFor();
+  check('remaining subagent command/output history remains inspectable after an app restart',
+    (await inspector().locator('.tool-command').innerText()).includes('subagent-result.txt') &&
+    /wrote/i.test(await inspector().locator('.tool-output').innerText()));
+  await inspector().locator('.step-open').click();
+  await page.locator('.file-pane .fp-source', { hasText: 'created by subagent' }).waitFor();
+  await page.click('.fp-actions .tool-button[aria-label="Close files"]');
   await page.getByRole('button', { name: 'Back to subagents' }).click();
+
+  // A renderer-only legacy record exercises fallback rendering without inventing tool history.
+  // Reload below discards the fixture; no synthetic messages are written to the Pi JSONL.
+  const legacyRecord = await activeRecord();
+  await app.evaluate(({ BrowserWindow }, id) => {
+    const call = { type: 'toolCall', id: 'e2e-legacy-subagent', name: 'subagent', arguments: { tasks: [{ name: 'Legacy result', task: 'Read the older saved result' }] } };
+    const details = { kind: 'pidesk-subagents', results: [{ name: 'Legacy result', status: 'completed', output: Array.from({ length: 60 }, (_, i) => `Legacy answer paragraph ${i}`).join('\n\n') }] };
+    const events = [
+      { type: 'message_end', message: { role: 'assistant', timestamp: Date.now(), content: [call] } },
+      { type: 'tool_execution_end', toolCallId: call.id, result: { content: [], details }, isError: false },
+    ];
+    for (const event of events) BrowserWindow.getAllWindows()[0].webContents.send('pidesk:event', { channel: 'event', payload: { id, event } });
+  }, legacyRecord.id);
+  await mainTranscript().locator('.subagent-task-row', { hasText: 'Legacy result' }).click();
+  check('legacy results use conversation text with an honest missing-trace notice',
+    await inspector().locator('.user-bubble').innerText() === 'Read the older saved result' &&
+    await inspector().locator('.block-notice', { hasText: 'This older task saved only its result' }).count() === 1 &&
+    (await inspector().locator('.markdown').innerText()).includes('Legacy answer paragraph 59') &&
+    await inspector().locator('.tool-group, .tool-call').count() === 0);
+  await inspector().locator('.transcript').evaluate(el => { el.scrollTop = 0; el.dispatchEvent(new Event('scroll', { bubbles: true })); });
+  await inspector().getByRole('button', { name: 'Jump to latest', exact: true }).waitFor();
+  await S('10a-subagent-legacy-conversation');
+  const mainScrollBeforeJump = await mainTranscript().evaluate(el => el.scrollTop);
+  await inspector().getByRole('button', { name: 'Jump to latest', exact: true }).click();
+  check('inspector Latest follows its own transcript, not the main conversation',
+    await inspector().locator('.transcript').evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight < 2) &&
+    Math.abs(await mainTranscript().evaluate(el => el.scrollTop) - mainScrollBeforeJump) < 2);
+  await page.reload();
+  await page.locator('.session-row', { hasText: 'hello from the server' }).click();
+  await waitText('.session-main .markdown', 'Tool result: after-quit', 90000);
+  await page.locator('.send-button.stop').waitFor({ state: 'detached' });
+  await page.locator('.subagent-list .subagent-task-row', { hasText: 'Write delegated file' }).waitFor();
+  check('legacy fixture was display-only', await mainTranscript().locator('.subagent-task-row', { hasText: 'Legacy result' }).count() === 0);
+  await page.waitForFunction(() => { const s = window.__pideskState(), session = s.sessions.find(row => row.id === s.activeId); return session?.status === 'connected' && !session.streaming; }, undefined, { timeout: 90000 });
+
+  const beforeClearAll = await conversationSnapshot();
+  const beforeAllUsage = await page.locator('.usage-table').innerText();
+  const storedBeforeClear = await activeRecord();
+  const originalJsonl = readFileSync(storedBeforeClear.piSessionFile, 'utf8');
+  await page.getByRole('button', { name: 'Clear finished subagents', exact: true }).click();
+  await clearDialog().getByRole('button', { name: 'Clear records', exact: true }).click();
+  await page.locator('.subagent-list .subagent-task-row').first().waitFor({ state: 'detached' });
+  check('clear finished removes all task rows but retains delegation summaries',
+    await mainTranscript().locator('.subagent-task-row').count() === 0 &&
+    await mainTranscript().locator('.subagent-summary-head:disabled', { hasText: 'Task history cleared' }).count() === 2 &&
+    await page.getByRole('button', { name: 'Clear finished subagents', exact: true }).isDisabled());
+  check('clear finished preserves conversation, usage, original JSONL and generated files',
+    await conversationSnapshot() === beforeClearAll && await page.locator('.usage-table').innerText() === beforeAllUsage &&
+    readFileSync(storedBeforeClear.piSessionFile, 'utf8') === originalJsonl &&
+    readFileSync(join(remoteProject, 'subagent-result.txt'), 'utf8') === 'created by subagent' &&
+    [1, 2].every(i => readFileSync(join(remoteProject, `background-subagent-${i}.txt`), 'utf8').trim() === 'done'));
+  check('clear finished persists all four original task identities over IPC', (await activeRecord()).clearedSubagentIds?.length === 4);
+  await S('10b-subagent-all-cleared');
+  await page.reload();
+  await page.locator('.session-row', { hasText: 'hello from the server' }).click();
+  await waitText('.session-main .markdown', 'Tool result: after-quit', 90000);
+  await page.locator('.subagent-list-head').waitFor();
+  check('finished-all clearing survives reload without hiding main replies',
+    await page.locator('.subagent-list .subagent-task-row').count() === 0 &&
+    await mainTranscript().locator('.subagent-task-row').count() === 0 &&
+    await mainTranscript().locator('.markdown', { hasText: 'Subagents: 2/2 completed' }).count() === 2 &&
+    (await activeRecord()).clearedSubagentIds?.length === 4);
+  await page.click('.main-tools .tool-button[aria-label="Files"]');
+  await page.locator('.fp-tree-row', { hasText: 'subagent-result.txt' }).click();
+  await page.locator('.file-pane .fp-source', { hasText: 'created by subagent' }).waitFor();
+  check('clearing history does not remove generated files from the file browser', true);
+  await S('10c-subagent-cleared-files-preserved');
+  await page.click('.fp-actions .tool-button[aria-label="Close files"]');
   await page.locator('.session-row', { hasText: 'hello from the desktop' }).click();
   await waitText('.markdown', '[mock-lab/alpha-1] echo: hello from the desktop', 90000);
   await waitText('.markdown', 'Tool result: local-after-quit', 60000);

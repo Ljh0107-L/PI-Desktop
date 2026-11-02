@@ -278,6 +278,9 @@ export function displayBlocks(t) {
       else { flush(); blocks.push({ kind: 'break', key: `x${mi}` }); }
       return;
     }
+    if (message.role === 'custom' && message.customType === 'pidesk-subagent-notice') {
+      flush(); blocks.push({ kind: 'notice', key: message.id ?? `notice:${mi}`, text: String(message.content ?? '') }); return;
+    }
     if (message.role === 'bashExecution') { flush(); blocks.push({ kind: 'bash', key: `b${mi}`, message }); return; }
     if (message.role === 'compactionSummary') { flush(); blocks.push({ kind: 'compaction', key: `c${mi}`, summary: message.summary, tokensBefore: message.tokensBefore }); return; }
     if (message.role !== 'assistant') return;
@@ -403,7 +406,7 @@ export function changesOf(messages, tools = {}) {
   for (const m of messages) {
     if (m.role !== 'assistant') continue;
     for (const c of m.content ?? []) {
-      if (c?.type !== 'toolCall' || !['edit', 'write'].includes(c.name)) continue;
+      if (c?.type !== 'toolCall' || c.__trace || !['edit', 'write'].includes(c.name)) continue;
       if (tools[c.id]?.status !== 'done') continue;
       const a = c.arguments ?? {};
       const path = a.path ?? a.file_path;

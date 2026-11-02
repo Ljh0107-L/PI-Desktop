@@ -229,6 +229,7 @@ const api = {
   setModel: (id, provider, modelId) => manager.setModel(id, provider, modelId),
   setThinking: (id, level) => manager.setThinking(id, level),
   messages: id => manager.messages(id),
+  clearSubagentHistory: (id, ids) => manager.clearSubagentHistory(id, ids),
   stats: id => manager.stats(id),
   rename: (id, title) => manager.rename(id, title),
   archive: id => manager.archive(id),

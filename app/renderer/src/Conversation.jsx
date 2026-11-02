@@ -5,7 +5,6 @@ import { changesOf, displayBlocks, formatTokens, isAbortText, toolSummary } from
 import { api, editMessage, notify, openChanges } from './store.js';
 import { changeStats, hunkLines } from './diffs.js';
 import { Composer } from './Composer.jsx';
-import { SubagentSummary } from './Subagents.jsx';
 
 // Disclosure state belongs to the transcript, not a transient grouped row. A streamed thought can
 // become a work group, and groups can split when text arrives. Preserve the user's choices by step ID.
@@ -92,11 +91,14 @@ const outputText = text => text.length > 8000 ? text.slice(0, 8000) + '\n…' : 
 
 function ToolCall({ call, tool }) {
   const [open, setOpen] = useDisclosure(`tool:${call.id}`);
+  const { onOpenFile } = useContext(DisclosureContext);
+  const trace = call.__trace;
   const { verb, subject, detail, mono, title } = describeCall(call);
   const status = tool?.status ?? 'pending';
+  const failed = ['error', 'cancelled', 'timed_out'].includes(status);
   const output = textOf(tool?.result);
-  const filePath = ['read', 'edit', 'write'].includes(call.name) && status !== 'error' ? (call.arguments?.path ?? call.arguments?.file_path) : null;
-  const hunks = call.name === 'edit' ? editHunks(call.arguments) : call.name === 'write' ? [{ oldText: null, newText: String(call.arguments?.content ?? '') }] : [];
+  const filePath = trace?.path ?? (['read', 'edit', 'write'].includes(call.name) && !failed ? (call.arguments?.path ?? call.arguments?.file_path) : null);
+  const hunks = trace ? [] : call.name === 'edit' ? editHunks(call.arguments) : call.name === 'write' ? [{ oldText: null, newText: String(call.arguments?.content ?? '') }] : [];
   const stats = hunks.length && status !== 'error' ? changeStats({ hunks }) : null;
   return (
     <div className={`step tool-call ${status} ${open ? 'open' : ''}`} data-tool-id={call.id}>
@@ -108,12 +110,17 @@ function ToolCall({ call, tool }) {
           {detail && <span className="step-dir">{detail}</span>}
         </FadeText>
         {stats && <span className="step-stats">{stats.added > 0 && <span className="plus">+{stats.added}</span>}{stats.removed > 0 && <span className="minus">−{stats.removed}</span>}</span>}
-        {status === 'error' && <span className="step-failed">Failed</span>}
+        {trace?.durationMs != null && <span className="step-duration">{trace.durationMs < 1000 ? '<1s' : seconds(trace.durationMs)}</span>}
+        {failed && <span className="step-failed">{status === 'cancelled' ? 'Cancelled' : status === 'timed_out' ? 'Timed out' : 'Failed'}</span>}
         <Caret open={open} />
       </div>
       {open && (
         <div className="step-detail tool-detail">
-          {call.name === 'bash'
+          {trace ? <>
+            {trace.input && <pre className="tool-command">{call.name === 'bash' ? '$ ' : ''}{trace.input}</pre>}
+            {output && <pre className={`tool-output boxed ${failed ? 'error' : ''}`}>{outputText(output)}</pre>}
+            {!output && status === 'running' && <div className="tool-running">Running…</div>}
+          </> : call.name === 'bash'
             ? <div className={`tool-console ${status === 'error' ? 'error' : ''}`}>
                 <pre className="tool-command"><span className="prompt">$</span> {call.arguments?.command}</pre>
                 {output && <pre className="tool-output">{outputText(output)}</pre>}
@@ -124,7 +131,7 @@ function ToolCall({ call, tool }) {
                 {output && call.name !== 'write' && (call.name !== 'edit' || status === 'error') && <pre className={`tool-output boxed ${status === 'error' ? 'error' : ''}`}>{outputText(output)}</pre>}
                 {!output && status === 'running' && <div className="tool-running">Running…</div>}
               </>}
-          {filePath && <button className="step-open" onClick={() => window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: filePath }))}>Open {baseOf(filePath)}</button>}
+          {filePath && <button className="step-open" onClick={() => onOpenFile ? onOpenFile(filePath) : window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: filePath }))}>Open {baseOf(filePath)}</button>}
         </div>
       )}
     </div>
@@ -380,12 +387,13 @@ function WorkingRow({ session, transcript }) {
       <span className="working-dot" />
       {elapsed >= 1000 && <span className="working-meta">{seconds(elapsed)}</span>}
       {tokens > 0 && <span className="working-meta">{formatTokens(tokens)} tokens</span>}
-      <span className="shimmer">{state}</span>
+      <span className="shimmer">{session?.activityLabel ?? state}</span>
     </div>
   );
 }
 
-export function Transcript({ session, transcript, questions }) {
+const NO_QUESTIONS = [];
+export function Transcript({ session, transcript, questions = NO_QUESTIONS, readOnly = false, onOpenFile, renderSubagents }) {
   const scroller = useRef(null);
   const stick = useRef(true);
   const scrollIntent = useRef(false);
@@ -422,7 +430,7 @@ export function Transcript({ session, transcript, questions }) {
     updateLatest();
   }, [blocks, questions]);
   useEffect(() => { setExpanded({}); followLatest(); }, [session?.id]);
-  const disclosure = useMemo(() => ({ expanded, setExpanded, pauseFollowing }), [expanded, pauseFollowing]);
+  const disclosure = useMemo(() => ({ expanded, setExpanded, pauseFollowing, onOpenFile }), [expanded, pauseFollowing, onOpenFile]);
   const working = session?.streaming || session?.compacting || transcript.compacting || session?.status === 'connecting';
   // Only while there is nothing to show yet: history now comes from the session file while Pi starts, and
   // a new conversation already shows your message.
@@ -446,15 +454,15 @@ export function Transcript({ session, transcript, questions }) {
           : <div className="block-error"><Icon name="alert" size={15} /> {transcript.error}</div>)}
         {blocks.map(block => {
           switch (block.kind) {
-            case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!!session && session.id !== 'pending' && session.status === 'connected' && !session.streaming && !block.text.startsWith('/')} />;
+            case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!readOnly && !!session && session.id !== 'pending' && session.status === 'connected' && !session.streaming && !block.text.startsWith('/')} />;
             case 'goal': return <GoalMarker key={block.key} objective={block.objective} />;
             case 'text': return <Markdown key={block.key} text={block.text} streaming={block.streaming} />;
-            case 'usage': return <TurnFooter key={block.key} text={block.text} changes={block.changes} sessionId={session?.id} last={block === lastUsage} />;
+            case 'usage': return <TurnFooter key={block.key} text={block.text} changes={readOnly ? [] : block.changes} sessionId={session?.id} last={block === lastUsage} />;
             case 'compaction': return <CompactionMarker key={block.key} {...block} blockKey={block.key} />;
             case 'thinking': return <Thinking key={block.key} {...block} blockKey={block.key} />;
             case 'work': return <WorkGroup key={block.key} items={block.items} tools={transcript.tools} live={!!transcript.live} />;
             case 'tools': return <ToolGroup key={block.key} calls={block.calls} tools={transcript.tools} live={!!transcript.live} />;
-            case 'subagents': return <SubagentSummary key={block.key} sessionId={session?.id} call={block.call} tool={transcript.tools[block.call.id]} />;
+            case 'subagents': return renderSubagents?.(block);
             case 'ask': return transcript.tools[block.call.id]?.status === 'done' ? <AskBlock key={block.key} call={block.call} tool={transcript.tools[block.call.id]} /> : null;
             case 'bash': return <pre key={block.key} className="tool-output">$ {block.message.command}{'\n'}{block.message.output}</pre>;
             case 'error': return <div key={block.key} className="block-error"><Icon name="alert" size={15} /> {block.text}</div>;

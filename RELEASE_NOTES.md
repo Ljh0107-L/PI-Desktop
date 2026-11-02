@@ -2,7 +2,17 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## 0.1.23 — Let subagents finish useful work
+## 0.1.24 — Subagent conversations and clearable task history
+
+- **The same conversation interface.** Subagent details now reuse the main conversation renderer: the assignment is a message bubble, public replies are ordinary Markdown, and tools fold into compact work groups with the same disclosure and scrolling behavior. Removed the separate stack of large per-tool cards. This is a read-only execution view, not a new chat/model session.
+- **Recorded arguments remain honest.** Expand tools to see the recorded command/arguments, output and file link. Truncated JSON is retained as recorded, not repaired into invented arguments or file diffs. Older result-only tasks and omitted trace records remain explicitly labelled.
+- **Clear finished records.** The list's Clear button removes finished tasks from this session's task history; the detail header clears one finished task. Both ask for confirmation. Running/queued tasks cannot be cleared through the UI and remain visible even if stale clearing metadata mentions them.
+- **Persistent, non-destructive cleanup.** Cleared rows and inspector entries stay cleared after reload/restart, and old delegation cards retain a neutral cleared-history summary. Main conversation/tool records, token usage and generated files are unchanged. This clears presentation history, not the underlying session JSONL. A failed settings save does not optimistically hide records.
+- **Regression coverage.** CI covers trace projection, legacy data, malformed/truncated input, stable task identity after clearing, persistence/save failures, the shared conversation UI, confirmation cancellation and file/history preservation.
+
+All tests and app launches run in GitHub CI, not on the user's workstation. Existing recorded subagents use the new interface after updating; missing execution history is not fabricated.
+
+## Included from 0.1.23 — Let subagents finish useful work
 
 - **No fixed model-turn cap.** Removed the 12-turn cutoff that could mark a healthy multi-step review or implementation as failed before it returned its report. The displayed turn count is informational only.
 - **Cancellation and deadlines remain.** Tasks still stop on user cancellation, session shutdown, the selected batch deadline or a genuine terminal provider failure. Turn boundaries yield to cancellation timers, and new model requests are blocked once cancelled, even if a provider returns a late tool call. The concurrency limit and bounded transient retry policy are unchanged; completed tools are never replayed just to retry the model.

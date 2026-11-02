@@ -954,32 +954,21 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 .subagent-task-text { display: grid; gap: 4px; flex: 1; min-width: 0; }
 .subagent-task-name { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .subagent-task-caption, .subagent-batch-count { color: var(--muted); font-size: 11px; }
-.subagent-task-row.completed > svg, .subagent-trace-tool.completed > summary > svg { color: #56d364; }
-.subagent-task-row.failed > svg, .subagent-task-row.timed_out > svg, .subagent-trace-tool.failed > summary > svg { color: #ff7b72; }
+.subagent-task-row.completed > svg { color: #56d364; }
+.subagent-task-row.failed > svg, .subagent-task-row.timed_out > svg { color: #ff7b72; }
 .subagent-list-header { display: flex; align-items: center; }
 .subagent-list-head { flex: 1; min-width: 0; }
 .subagent-list-header > .link-button { flex-shrink: 0; margin-right: 8px; font-size: 11px; }
 .subagent-batch-count { padding: 8px; }
-.subagent-empty, .subagent-trace-notice { padding: 10px; color: var(--muted); font-size: 12px; line-height: 1.6; }
-.right-panel.subagent-inspector { position: relative; max-width: min(680px, 50vw); min-height: 0; overflow: visible; padding: 12px; border-left: 1px solid var(--hairline); }
-.subagent-inspector-head { display: flex; align-items: center; gap: 8px; min-height: 32px; }
-.subagent-inspector-head b { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.subagent-inspector-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 12px; }
-.subagent-inspector-model { font-size: 11px; color: var(--faint); overflow-wrap: anywhere; }
-.subagent-timeline { flex: 1; min-height: 0; overflow: auto; padding: 0 2px 38px; overflow-wrap: anywhere; }
-.subagent-assignment { font-size: 12px; color: var(--muted); margin: 8px 0 16px; }
-.subagent-assignment summary { cursor: pointer; }
-.subagent-assignment pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-.subagent-trace-tool { margin: 10px 0; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }
-.subagent-trace-tool > summary { display: flex; align-items: center; gap: 8px; padding: 10px; cursor: pointer; font-size: 12px; }
-.subagent-trace-label { display: grid; flex: 1; min-width: 0; gap: 4px; }
-.subagent-trace-label > span { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.subagent-trace-time { color: var(--faint); font-size: 11px; }
-.subagent-trace-body { border-top: 1px solid var(--hairline); padding: 10px; font-size: 12px; }
-.subagent-trace-input, .subagent-trace-output { margin: 0 0 10px; max-height: 360px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: 11px/1.6 var(--font-mono, monospace); }
-.subagent-trace-input { color: var(--text-2); }
-.subagent-trace-output { padding-top: 8px; border-top: 1px solid var(--hairline); }
-.subagent-trace-message, .subagent-final-output { padding: 4px 8px; font-size: 13px; }
-.subagent-trace-message .markdown, .subagent-final-output .markdown { font-size: 13px; }
-.subagent-timeline .block-error { font-size: 12px; padding: 8px; }
-.subagent-latest { position: absolute; bottom: 14px; right: 20px; display: flex; align-items: center; gap: 6px; padding: 7px 10px; border: 1px solid var(--border); border-radius: 14px; background: var(--bg-raised); color: var(--text-2); font-size: 12px; }
+.subagent-clear { flex-shrink: 0; font-size: 12px; }
+.subagent-clear:disabled { opacity: .35; cursor: default; }
+.subagent-summary-head:disabled { cursor: default; }
+.right-panel.subagent-inspector { position: relative; max-width: min(680px, 50vw); min-height: 0; overflow: visible; padding: 12px 10px 0; border-left: 1px solid var(--hairline); gap: 4px; }
+.subagent-inspector-head { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 4px; }
+.subagent-inspector-head b { flex: 1; min-width: 0; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.subagent-inspector-meta { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; padding: 0 8px 8px; color: var(--muted); font-size: 11px; }
+.subagent-conversation { display: flex; flex: 1; min-height: 0; min-width: 0; overflow: hidden; }
+.subagent-conversation .transcript { padding: 12px 8px 40px; min-width: 0; min-height: 0; overflow-wrap: anywhere; }
+.subagent-conversation .transcript-inner { max-width: none; }
+.subagent-conversation .tool-command, .subagent-conversation .tool-output { max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+.step-duration { flex-shrink: 0; color: var(--faint); font-size: 11px; }

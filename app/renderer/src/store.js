@@ -1,6 +1,7 @@
 // Client-side state for the renderer: one immutable snapshot, updated from IPC events.
 import { useRef, useSyncExternalStore } from 'react';
 import { applyEvent, emptyTranscript, fromHistory, rewindTo } from './transcript.js';
+import { isSubagentFinished, subagentBatches, subagentHistoryId, visibleSubagentBatches } from './subagent-state.js';
 
 // Generation timing per reply (Pi's history keeps token counts but not timing), so tok/s survives reloads.
 const TIMING_KEY = 'pidesk.timings.v1';
@@ -184,6 +185,30 @@ export function openSubagent(id, callId, taskIndex = null) {
 }
 export function closeSubagent(id) {
   set(s => ({ subagentSelection: { ...s.subagentSelection, [id]: null } }));
+}
+
+export function clearSubagentRecords(id, onlyIds) {
+  const current = state.sessions.find(session => session.id === id);
+  const all = visibleSubagentBatches(subagentBatches(transcriptOf(id)), current?.clearedSubagentIds);
+  const requested = onlyIds ? new Set(onlyIds) : null;
+  const ids = all.flatMap(batch => batch.tasks).filter(task => isSubagentFinished(task) && (!requested || requested.has(subagentHistoryId(task)))).map(subagentHistoryId);
+  if (!ids.length) return;
+  askConfirm({ title: 'Clear subagent records?', action: 'Clear records',
+    message: `Remove ${ids.length} finished ${ids.length === 1 ? 'task' : 'tasks'} from this session’s task history. Running tasks, main conversation, usage and files are kept. Original tool records remain in the conversation.`,
+    run: async () => {
+      try {
+        // No optimistic removal: a failed durable save must not pretend history was cleared.
+        let clearedSubagentIds;
+        for (let offset = 0; offset < ids.length; offset += 10000) {
+          ({ clearedSubagentIds } = await api('clearSubagentHistory', id, ids.slice(offset, offset + 10000)));
+          set(s => ({ sessions: s.sessions.map(session => session.id === id ? { ...session, clearedSubagentIds: [...new Set([...(session.clearedSubagentIds ?? []), ...clearedSubagentIds])] } : session) }));
+        }
+        const remaining = visibleSubagentBatches(subagentBatches(transcriptOf(id)), state.sessions.find(session => session.id === id)?.clearedSubagentIds);
+        const selection = state.subagentSelection[id];
+        if (selection && !remaining.some(batch => batch.callId === selection.callId && (selection.taskIndex == null || batch.tasks.some(task => task.index === selection.taskIndex)))) closeSubagent(id);
+      } catch (error) { notify(`Could not clear task history: ${error.message}`, 'error'); }
+    },
+  });
 }
 export const toggleRightPanel = () => set(s => ({ rightPanel: !s.rightPanel }));
 export const openSettings = (open, tab, { addConnection = false } = {}) => set(s => ({ settingsOpen: open, settingsTab: tab ?? s.settingsTab, addConnectionOpen: addConnection, paletteOpen: false }));

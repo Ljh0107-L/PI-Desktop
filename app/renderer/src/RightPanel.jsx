@@ -3,7 +3,7 @@ import { Icon } from './Icons.jsx';
 import { useResizable } from './ui.jsx';
 import { formatTokens, speedDisplay, usageOf } from './transcript.js';
 import { useStore } from './store.js';
-import { subagentBatches } from './subagent-state.js';
+import { subagentBatches, visibleSubagentBatches } from './subagent-state.js';
 import { SubagentDetail, SubagentList } from './Subagents.jsx';
 
 function Card({ title, children, open: initial = true, aside }) {
@@ -65,10 +65,10 @@ export function RightPanel({ session }) {
   const transcript = useStore(s => s.transcripts[session.id]);
   const stats = useStore(s => s.stats[session.id]);
   const selection = useStore(s => s.subagentSelection[session.id]);
-  const batches = useMemo(() => subagentBatches(transcript), [transcript]);
+  const batches = useMemo(() => visibleSubagentBatches(subagentBatches(transcript), session.clearedSubagentIds), [transcript, session.clearedSubagentIds]);
   const batch = batches.find(b => b.callId === selection?.callId);
-  const task = Number.isInteger(selection?.taskIndex) ? batch?.tasks[selection.taskIndex] : null;
-  const [detailWidth, detailHandle] = useResizable('subagent-inspector', 420, 300, 680, 'left');
+  const task = Number.isInteger(selection?.taskIndex) ? batch?.tasks.find(task => task.index === selection.taskIndex) : null;
+  const [detailWidth, detailHandle] = useResizable('subagent-inspector', 480, 300, 680, 'left');
   const percent = stats?.contextUsage?.percent ?? null;
   if (task) return <aside className="right-panel subagent-inspector" style={{ width: detailWidth }}>
     {detailHandle}<SubagentDetail key={`${session.id}:${task.key}`} sessionId={session.id} task={task} />

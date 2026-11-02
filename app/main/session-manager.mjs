@@ -283,6 +283,38 @@ export class SessionManager extends EventEmitter {
   }
   #save(record, patch) { Object.assign(record, patch, { updatedAt: Date.now() }); if (record.spare) return; this.store.saveSessions(); this.emit('sessions'); }
 
+  // Presentation-only tombstones: never start Pi, inspect JSONL, or change a running task.
+  // Bound each IPC request, but retain all earlier IDs (no history can silently reappear).
+  clearSubagentHistory(id, historyIds) {
+    if (typeof id !== 'string' || !id.trim() || id.length > 1024) throw new Error('Invalid session identifier');
+    if (!Array.isArray(historyIds) || historyIds.length > 10000) throw new Error('Subagent history identifiers must be an array of at most 10000 entries');
+    for (const historyId of historyIds) {
+      if (typeof historyId !== 'string' || !historyId.trim() || historyId.length > 1024) throw new Error('Subagent history identifiers must be nonempty strings of at most 1024 characters');
+    }
+    const record = this.record(id);
+    const previous = record.clearedSubagentIds;
+    if (previous !== undefined && (!Array.isArray(previous) || previous.some(value => typeof value !== 'string' || !value.trim()))) {
+      throw new Error('Invalid saved subagent history metadata');
+    }
+    const merged = new Set(previous ?? []);
+    const previousSize = merged.size;
+    for (const historyId of historyIds) merged.add(historyId);
+    const clearedSubagentIds = [...merged];
+    if (merged.size === previousSize) return { clearedSubagentIds };
+    const hadMetadata = Object.hasOwn(record, 'clearedSubagentIds');
+    record.clearedSubagentIds = clearedSubagentIds;
+    try {
+      // Store.saveSessions writes synchronously via a temporary file + atomic rename.
+      this.store.saveSessions();
+    } catch (error) {
+      if (hadMetadata) record.clearedSubagentIds = previous;
+      else delete record.clearedSubagentIds;
+      throw error;
+    }
+    this.emit('sessions');
+    return { clearedSubagentIds: [...clearedSubagentIds] };
+  }
+
   // ---------------------------------------------------------------- pre-warming
   // While the user is on the new-session screen, start a Pi in advance where the next conversation will
   // run; the first message then adopts it instead of waiting for SSH + Pi start-up. With No folder the

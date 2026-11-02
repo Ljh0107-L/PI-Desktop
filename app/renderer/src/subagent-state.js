@@ -1,5 +1,14 @@
 // Shared view model for the inline delegation card and the right-hand inspector.
 export const isSubagentActive = task => ['pending', 'queued', 'running', 'retrying'].includes(task.status);
+export const isSubagentFinished = task => ['completed', 'failed', 'cancelled', 'timed_out'].includes(task.status);
+export const subagentHistoryId = task => task.id ? `child:${task.id}` : `task:${task.key}`;
+export const visibleSubagentTasks = (tasks, clearedIds = []) => {
+  const cleared = new Set(clearedIds);
+  // Never hide active or unknown state, even if stale/corrupt presentation metadata mentions it.
+  return tasks.filter(task => !isSubagentFinished(task) || !cleared.has(subagentHistoryId(task)));
+};
+export const visibleSubagentBatches = (batches, clearedIds = []) => batches.map(batch => ({ ...batch, tasks: visibleSubagentTasks(batch.tasks, clearedIds) }))
+  .filter(batch => batch.tasks.length > 0);
 export const subagentStatus = status => ({ pending: 'Waiting for details', queued: 'Queued', running: 'Running', retrying: 'Retrying', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled', timed_out: 'Timed out' })[status] ?? status;
 
 export function subagentBatch(call, tool) {
