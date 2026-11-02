@@ -81,6 +81,14 @@ function generation(m) {
 export function usageOf(messages) {
   const u = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0, reasoningReported: false, cost: 0, genMs: 0, genOut: 0, speedEstimated: false, hiddenWork: false, start: null, end: null, calls: 0 };
   for (const m of messages) {
+    if (m.role === 'toolResult' && m.toolName === 'subagent' && m.usage) {
+      // Parallel child calls add usage, not main-model generation time/TPS.
+      u.input += m.usage.input ?? 0; u.cacheRead += m.usage.cacheRead ?? 0; u.cacheWrite += m.usage.cacheWrite ?? 0;
+      u.output += m.usage.output ?? 0; u.cost += m.usage.cost?.total ?? 0;
+      if (m.usage.reasoning != null) { u.reasoningReported = true; u.reasoning += m.usage.reasoning; }
+      u.calls += (m.details?.results ?? []).reduce((n, r) => n + (r.turns ?? 0), 0);
+      continue;
+    }
     if (m.role !== 'assistant' || !m.usage) continue;
     u.calls += 1;
     u.input += m.usage.input ?? 0; u.cacheRead += m.usage.cacheRead ?? 0; u.cacheWrite += m.usage.cacheWrite ?? 0;
@@ -311,6 +319,12 @@ export function outputs(t) {
   const seen = new Map();
   const all = t.live ? [...t.messages, t.live] : t.messages;
   for (const message of all) {
+    if (message.role === 'toolResult' && message.toolName === 'subagent') {
+      for (const r of message.details?.results ?? []) for (const f of r.files ?? []) {
+        if (typeof f.path === 'string') { seen.delete(f.path); seen.set(f.path, { path: f.path, tool: f.tool }); }
+      }
+      continue;
+    }
     if (message.role !== 'assistant') continue;
     for (const block of message.content ?? []) {
       if (block?.type !== 'toolCall' || !['write', 'edit'].includes(block.name)) continue;
@@ -339,7 +353,8 @@ export function toolSummary(calls) {
   if (counts.read) parts.push(`${parts.length ? 'read' : 'Read'} ${readPaths.length === 1 ? readPaths[0].split('/').pop() : plural(counts.read, 'file', 'files')}`);
   const searched = (counts.grep ?? 0) + (counts.find ?? 0) + (counts.ls ?? 0);
   if (searched) parts.push(`${parts.length ? 'searched' : 'Searched'} ${plural(searched, 'time', 'times')}`);
-  const other = calls.length - (counts.bash ?? 0) - edited - (counts.read ?? 0) - searched;
+  if (counts.subagent) parts.push(`Delegated ${plural(calls.filter(c => c.name === 'subagent').reduce((n, c) => n + (c.arguments?.tasks?.length ?? 0), 0), 'subtask', 'subtasks')}`);
+  const other = calls.length - (counts.bash ?? 0) - edited - (counts.read ?? 0) - searched - (counts.subagent ?? 0);
   if (other) parts.push(`${parts.length ? 'used' : 'Used'} ${plural(other, 'tool', 'tools')}`);
   return parts.join(', ');
 }

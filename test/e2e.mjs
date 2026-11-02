@@ -419,6 +419,16 @@ try {
   check('remote command ran in the remote folder', (await page.locator('.tool-output').last().innerText()).includes('api-server'));
   await S('08-remote-session');
 
+  await waitNew('.markdown', 'Subagents: 2/2 completed', () => send('[[subagents]]'), 60000);
+  await page.locator('.tool-group-head', { hasText: 'Subagents Inspect cwd' }).click();
+  await page.locator('.tool-call-head', { hasText: 'Subagents' }).click();
+  await page.locator('.subagent-result.completed').nth(1).waitFor({ timeout: 15000 });
+  check('remote subagents display per-task results inside the parent conversation', await page.locator('.subagent-result.completed').count() === 2);
+  await page.locator('.panel-row.file', { hasText: 'subagent-result.txt' }).waitFor();
+  check('delegated file writes appear in Outputs', existsSync(join(remoteProject, 'subagent-result.txt')));
+  check('subagents do not create sidebar conversations or extra windows', (await app.windows()).length === 1 && await page.locator('.session-row').count() === 2);
+  await S('08b-subagents');
+
   // concurrent sessions: start a remote run, switch to local, run there, both complete
   await send('remote run ' + 'x'.repeat(300));
   await page.locator('.session-row').nth(1).click();

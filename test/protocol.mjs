@@ -144,6 +144,19 @@ try {
   // History is available for the desktop to render after reconnecting.
   const history = await remote.messages();
   check('[remote] history readable via get_messages', history.filter(m => m.role === 'user').length === 3, `${history.length} messages`);
+
+  // Subagents execute through the owning session, with its model/key/cwd and no extra Pi process.
+  for (const session of sessions) {
+    const before = mock.requests.length;
+    const delegated = await run(session, '[[subagents]]');
+    const result = delegated.tools.find(t => t.toolName === 'subagent')?.result;
+    check(`[${session.id}] subagent returned two successful tasks`, result?.details?.results?.length === 2 && result.details.results.every(r => r.status === 'completed'), JSON.stringify(result?.details?.results?.map(r => ({ status: r.status, error: r.error }))));
+    const cwd = session === local ? dirs.localProject : dirs.remoteProject;
+    check(`[${session.id}] delegated file is on the session machine and cwd`, existsSync(join(cwd, 'subagent-result.txt')) && readFileSync(join(cwd, 'subagent-result.txt'), 'utf8') === 'created by subagent');
+    const childRequests = mock.requests.slice(before).filter(r => r.subagent);
+    check(`[${session.id}] subagents inherit current provider credentials`, childRequests.length >= 4 && childRequests.every(r => r.provider === 'mock-beta' && r.model === 'beta-1' && r.authorization === `Bearer ${keys.beta}`));
+    check(`[${session.id}] delegation guidance reaches the parent prompt`, mock.requests.slice(before).some(r => !r.subagent && r.system.includes('independent context windows')));
+  }
 } catch (error) {
   check('unexpected error', false, error.stack);
   for (const session of sessions) if (session.stderr) console.log(`--- ${session.id} stderr ---\n${session.stderr.slice(-3000)}`);

@@ -215,7 +215,7 @@ printf 'pi=%s\n' "$(${shellQuote(node)} -p "require('${root}/pi/node_modules/@ea
 [ -x ${shellQuote(node.replace(/\/node$/, '/npm'))} ] && echo 'npm=1'
 REG=$(${shellQuote(node.replace(/\/node$/, '/npm'))} config get registry 2>/dev/null); [ -n "$REG" ] || REG=https://registry.npmjs.org/
 command -v curl >/dev/null && curl -fsS -m 6 -o /dev/null "$REG" 2>/dev/null && echo 'registry=1'
-for f in pidesk-bridge.js pidesk-relay.mjs; do printf '%s=%s\n' "$f" "$( (sha256sum ${q}/ext/$f 2>/dev/null || shasum -a 256 ${q}/ext/$f 2>/dev/null) | cut -d' ' -f1)"; done
+for f in pidesk-subagent.mjs pidesk-bridge.js pidesk-relay.mjs; do printf '%s=%s\n' "$f" "$( (sha256sum ${q}/ext/$f 2>/dev/null || shasum -a 256 ${q}/ext/$f 2>/dev/null) | cut -d' ' -f1)"; done
 true`));
 
   if (state.pi?.[0] !== piVersion) {
@@ -236,7 +236,7 @@ true`));
     }
   }
 
-  for (const [name, path] of [['pidesk-bridge.js', bridgePath], ['pidesk-relay.mjs', relayPath]]) {
+  for (const [name, path] of [['pidesk-subagent.mjs', join(dirname(bridgePath), 'pidesk-subagent.mjs')], ['pidesk-bridge.js', bridgePath], ['pidesk-relay.mjs', relayPath]]) {
     const content = readFileSync(path);
     if (state[name]?.[0] === createHash('sha256').update(content).digest('hex')) continue;
     onProgress(`Uploading ${name}…`);

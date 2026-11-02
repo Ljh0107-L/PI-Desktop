@@ -942,3 +942,14 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 /* jump back to the newest content: floats at the bottom of the conversation, outside its scroll */
 .transcript-follow { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); z-index: 3; display: flex; align-items: center; gap: 6px; height: 30px; padding: 0 12px; border-radius: 15px; background: var(--bg-raised); border: 0.5px solid var(--border-strong); box-shadow: var(--shadow-card); color: var(--text-2); font-size: 13px; }
 .transcript-follow:hover { background: var(--surface); color: var(--text); }
+
+/* Subagent progress lives inside its parent tool, never in another window. */
+.subagent-results { padding: 10px 12px; display: grid; gap: 8px; }
+.subagent-result { border: 1px solid var(--hairline); border-radius: 8px; overflow: hidden; }
+.subagent-result summary { padding: 10px; cursor: pointer; font-size: 13px; }
+.subagent-name { font-weight: 550; margin-right: 12px; }
+.subagent-status, .subagent-usage { color: var(--muted); margin-right: 10px; }
+.subagent-result.completed .subagent-status { color: #56d364; }
+.subagent-result.failed .subagent-status, .subagent-result.timed_out .subagent-status { color: #ff7b72; }
+.subagent-body { padding: 0 12px 12px; overflow-wrap: anywhere; }
+.subagent-body > .muted { font-size: 12px; margin-bottom: 8px; }

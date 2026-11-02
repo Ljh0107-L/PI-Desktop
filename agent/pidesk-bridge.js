@@ -22,6 +22,7 @@ import { existsSync } from 'node:fs';
 import { basename, dirname, join } from 'node:path';
 import { Type } from 'typebox';
 import { createBashToolDefinition } from '@earendil-works/pi-coding-agent';
+import { createSubagentTool, SUBAGENT_PROMPT } from './pidesk-subagent.mjs';
 
 function literalKey(key) {
   // Pi treats "$NAME" and "!command" specially; "$$" and a leading "$!" are the documented escapes.
@@ -110,6 +111,10 @@ export default function pideskBridge(pi) {
   };
   register(boot.providers);
 
+  const subagents = createSubagentTool();
+  pi.registerTool(subagents.tool);
+  pi.on('session_shutdown', () => subagents.shutdown());
+
   // Settings changed on the desktop (new key, model list…): re-register providers in this running Pi.
   // The payload is base64 JSON so keys never appear as readable text; extension commands are not
   // recorded in the session history.
@@ -146,6 +151,7 @@ export default function pideskBridge(pi) {
     const options = event.systemPromptOptions;
     const note = options && projectlessNote(options.cwd);
     if (note) (options.sections ??= {}).projectless = note;
+    if (options) (options.sections ??= {}).subagents = SUBAGENT_PROMPT;
   });
 
   // ---------------------------------------------------------------- titles

@@ -2,7 +2,17 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## 0.1.19 — One No folder sidebar group per machine
+## 0.1.20 — Subagents and delegation guidance
+
+- **Delegate focused subtasks.** The new `subagent` tool accepts 1–6 named tasks, with at most 3 active subagents per parent session, including overlapping calls. Each uses an independent context, the parent's selected model/reasoning level and its available coding tools.
+- **No extra app windows or Pi subprocesses.** Agents run inside the owning Pi process. Tool calls go through the parent tool pipeline, on the parent's machine and working directory; subagents cannot call the delegation, goal or question tools.
+- **Progress and results in the conversation.** Expand the Subagents tool to inspect each task's state, output, turns and token usage. Delegated writes appear in Outputs, and child-model usage is included without inflating the main model's TPS.
+- **Cancellation and bounded work.** Stop and session shutdown cancel active/queued work. A batch defaults to a five-minute timeout (configurable up to fifteen minutes), each task has a twelve-model-turn limit and at most two retries for transient model failures. Failure/truncation remains visible instead of being reported as success.
+- **Prompt support is built in.** The main system prompt explains when to delegate, what context and user constraints to pass, how to avoid overlapping file edits, and how to verify/integrate results. Child prompts preserve parent instructions and include user-context excerpts, while excluding the parent assistant/tool transcript.
+
+Subagents share files and are not isolated worktrees or an OS sandbox. Use focused tasks with disjoint ownership; passing a task to another agent never grants additional permission to test locally, launch GUI apps or publish. Existing Pi processes kept alive across app updates retain their loaded extensions: start a new conversation to use the new tool without interrupting ongoing work.
+
+## Included from 0.1.19 — One No folder sidebar group per machine
 
 - **No folder conversations stay together.** All projectless conversations on the same computer or SSH environment now appear under one No folder group, even when their working directories differ. Previously each generated directory produced another identically named group.
 - **No conversation or file migration.** Each chat keeps its own history, workspace and outputs. Existing projectless chats and forks are grouped immediately; ordinary projects remain grouped by directory, including real folders named “No folder”.

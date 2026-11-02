@@ -29,7 +29,8 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
     const auth = req.headers.authorization ?? '';
     const system = (payload.messages ?? []).filter(m => m.role === 'system' || m.role === 'developer')
       .map(m => typeof m.content === 'string' ? m.content : (m.content ?? []).map(c => c.text ?? '').join('')).join('\n');
-    requests.push({ provider, model: payload.model, authorization: auth, messageCount: payload.messages?.length ?? 0, system, at: Date.now() });
+    const subagent = system.includes('You are a Pi Desktop subagent, not the coordinating assistant.');
+    requests.push({ provider, model: payload.model, authorization: auth, messageCount: payload.messages?.length ?? 0, system, subagent, at: Date.now() });
 
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     const id = 'chatcmpl-' + requests.length;
@@ -57,7 +58,8 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
     }
     const last = messages[messages.length - 1] ?? {};
     const lastUser = [...messages].reverse().find(message => message.role === 'user');
-    const userText = textOf(lastUser?.content);
+    const fullUserText = textOf(lastUser?.content);
+    const userText = subagent ? fullUserText.split(/\n\nYour task \([^\n]*\):\n/).at(-1) : fullUserText;
     if (userText.includes('[[drop-once]]') && !dropped.has(userText)) {
       dropped.add(userText);
       send({ role: 'assistant', content: 'Partial before disconnect' });
@@ -71,6 +73,13 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
     const hiddenThink = userText.includes('[[hidden-think]]') && last.role !== 'tool';
     if (hiddenThink) { send({ role: 'assistant', content: '' }); sentChars = 0; await new Promise(r => setTimeout(r, 1500)); }
     const askMatch = /\[\[ask:([^|\]]+)(?:\|([^\]]*))?\]\]/.exec(userText);
+    if (!subagent && userText.includes('[[subagents]]') && last.role !== 'tool') {
+      send({ role: 'assistant', content: '' });
+      const tasks = [{ name: 'Inspect cwd', task: '[[bash:pwd]]' }, { name: 'Write delegated file', task: '[[write:subagent-result.txt|created by subagent]]' }];
+      send({ tool_calls: [{ index: 0, id: 'call_sub' + requests.length, type: 'function', function: { name: 'subagent', arguments: JSON.stringify({ tasks, context: 'Only inspect cwd and write the assigned file. Do not run tests or open GUI applications.' }) } }] });
+      finish('tool_calls');
+      return;
+    }
     if (askMatch && last.role !== 'tool') {
       const options = askMatch[2] ? askMatch[2].split(',').map(s => s.trim()).filter(Boolean) : undefined;
       const args = JSON.stringify({ question: askMatch[1].trim(), ...(options ? { options } : {}) });

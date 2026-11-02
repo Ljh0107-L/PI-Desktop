@@ -13,9 +13,17 @@ const keyOf = m => m.responseId ? `r:${m.responseId}` : `t:${m.timestamp}|${m.pr
 // Compact record kept per reply.
 const entryOf = m => ({
   k: keyOf(m), t: Number(m.timestamp) || Date.now(), p: m.provider ?? '', m: m.model ?? '',
-  n: tokensOf(m.usage), i: m.usage.input ?? 0, o: m.usage.output ?? 0, cr: m.usage.cacheRead ?? 0, cw: m.usage.cacheWrite ?? 0, c: m.usage.cost?.total ?? 0,
+  n: tokensOf(m.usage), i: m.usage.input ?? 0, o: m.usage.output ?? 0, cr: m.usage.cacheRead ?? 0, cw: m.usage.cacheWrite ?? 0, c: m.usage.cost?.total ?? 0, calls: m.__calls ?? 1,
 });
 const isReply = m => m?.role === 'assistant' && m.usage && tokensOf(m.usage) > 0;
+const usageMessages = message => {
+  if (isReply(message)) return [message];
+  if (message?.role !== 'toolResult' || message.toolName !== 'subagent' || message.details?.kind !== 'pidesk-subagents') return [];
+  return (message.details.results ?? []).filter(r => r.id && r.usage && tokensOf(r.usage) > 0).map(r => ({
+    role: 'assistant', responseId: `pidesk-subagent:${r.id}`, timestamp: r.startedAt,
+    provider: r.provider, model: r.model, usage: r.usage, __calls: r.turns,
+  }));
+};
 const dayOf = t => { const d = new Date(t); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
 
 export class UsageLedger {
@@ -42,13 +50,14 @@ export class UsageLedger {
 
   // A reply finished streaming (any session, any machine).
   record(message) {
-    if (!isReply(message)) return;
-    this.#ledger();
-    const entry = entryOf(message);
-    if (this.seen.has(entry.k)) return; // replayed after a reconnect
-    this.seen.add(entry.k);
-    this.entries.push(entry);
-    try { mkdirSync(dirname(this.path), { recursive: true }); appendFileSync(this.path, JSON.stringify(entry) + '\n'); } catch { /* best effort */ }
+    for (const reply of usageMessages(message)) {
+      this.#ledger();
+      const entry = entryOf(reply);
+      if (this.seen.has(entry.k)) continue; // replayed after a reconnect
+      this.seen.add(entry.k);
+      this.entries.push(entry);
+      try { mkdirSync(dirname(this.path), { recursive: true }); appendFileSync(this.path, JSON.stringify(entry) + '\n'); } catch { /* best effort */ }
+    }
   }
 
   async #sessionFiles(dir = this.sessionsDir, out = []) {
@@ -74,8 +83,8 @@ export class UsageLedger {
         if (cached && cached.mtimeMs === mtimeMs && cached.size === size) continue;
         const entries = [];
         for (const line of (await readFile(path, 'utf8')).split('\n')) {
-          if (!line.includes('"usage"') || !line.includes('"assistant"')) continue;
-          try { const record = JSON.parse(line); if (record.type === 'message' && isReply(record.message)) entries.push(entryOf(record.message)); } catch { /* torn line */ }
+          if (!line.includes('"usage"')) continue;
+          try { const record = JSON.parse(line); if (record.type === 'message') entries.push(...usageMessages(record.message).map(entryOf)); } catch { /* torn line */ }
         }
         this.files.set(path, { mtimeMs, size, entries });
       } catch { /* unreadable file */ }
@@ -90,13 +99,13 @@ export class UsageLedger {
     const totals = { tokens: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, calls: 0 };
     let first = null;
     for (const e of all.values()) {
-      totals.tokens += e.n; totals.input += e.i; totals.output += e.o; totals.cacheRead += e.cr; totals.cacheWrite += e.cw; totals.cost += e.c; totals.calls += 1;
+      totals.tokens += e.n; totals.input += e.i; totals.output += e.o; totals.cacheRead += e.cr; totals.cacheWrite += e.cw; totals.cost += e.c; totals.calls += e.calls ?? 1;
       first = first == null ? e.t : Math.min(first, e.t);
       const day = dayOf(e.t);
       days.set(day, (days.get(day) ?? 0) + e.n);
       const id = `${e.p}\n${e.m}`;
       const model = models.get(id) ?? { provider: e.p, model: e.m, tokens: 0, output: 0, cost: 0, calls: 0 };
-      model.tokens += e.n; model.output += e.o; model.cost += e.c; model.calls += 1;
+      model.tokens += e.n; model.output += e.o; model.cost += e.c; model.calls += e.calls ?? 1;
       models.set(id, model);
     }
     return {

@@ -58,6 +58,7 @@ function describeCall(call) {
   const a = call.arguments ?? {};
   const path = a.path ?? a.file_path ?? '';
   switch (call.name) {
+    case 'subagent': return { verb: 'Subagents', subject: (a.tasks ?? []).map(t => t.name).join(' · '), title: 'Delegated tasks on this session’s machine' };
     case 'bash': return a.description?.trim() ? { subject: a.description.trim(), title: a.command } : { subject: shortCommand(a.command), title: a.command, raw: true };
     case 'read': return { verb: 'Read', subject: baseOf(path), title: path };
     case 'write': return { verb: 'Wrote', subject: baseOf(path), title: path };
@@ -88,6 +89,20 @@ function EditDiff({ hunks }) {
 const Caret = ({ open }) => <Icon name={open ? 'caretDown' : 'caretRight'} size={14} className="step-caret" />;
 const outputText = text => text.length > 8000 ? text.slice(0, 8000) + '\n…' : text;
 
+function SubagentResults({ result }) {
+  const results = result?.details?.kind === 'pidesk-subagents' ? result.details.results : [];
+  if (!results.length) return <pre className="tool-output boxed">{outputText(textOf(result)) || 'Starting subagents…'}</pre>;
+  return <div className="subagent-results">{results.map(r => <details key={r.id} className={`subagent-result ${r.status}`}>
+    <summary><span className="subagent-name">{r.name}</span><span className="subagent-status">{r.status.replace('_', ' ')}</span>
+      <span className="subagent-usage">{r.turns} turns · {formatTokens(r.usage?.totalTokens ?? 0)} tokens</span></summary>
+    <div className="subagent-body">
+      <div className="muted">{r.provider}/{r.model}{r.currentTool ? ` · ${r.currentTool}` : ''}</div>
+      {r.error && <div className="block-error">{r.error}</div>}
+      {r.output && <Markdown text={r.output} />}
+    </div>
+  </details>)}</div>;
+}
+
 function ToolCall({ call, tool }) {
   const [open, setOpen] = useDisclosure(`tool:${call.id}`);
   const { verb, subject, detail, mono, title } = describeCall(call);
@@ -111,7 +126,7 @@ function ToolCall({ call, tool }) {
       </div>
       {open && (
         <div className="step-detail tool-detail">
-          {call.name === 'bash'
+          {call.name === 'subagent' ? <SubagentResults result={tool?.result} /> : call.name === 'bash'
             ? <div className={`tool-console ${status === 'error' ? 'error' : ''}`}>
                 <pre className="tool-command"><span className="prompt">$</span> {call.arguments?.command}</pre>
                 {output && <pre className="tool-output">{outputText(output)}</pre>}
