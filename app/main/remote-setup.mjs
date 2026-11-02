@@ -310,12 +310,10 @@ for (const { name, content } of JSON.parse(fs.readFileSync(0, 'utf8'))) {
   const unreachable = [];
   if (providerHosts.length) {
     onProgress('Checking model access…');
-    // All endpoints at once; DNS failure, refused or a 4 s timeout means "no".
-    // curl's own -m doesn't bound DNS lookups on some systems (15 s seen), so: a DNS check with getent
-    // first, and a hard `timeout` around curl when available.
+    // All endpoints at once. Bound the whole curl process when timeout is available;
+    // a separate getent lookup would sit outside that deadline and repeat DNS work.
     const checks = providerHosts.map(hp => {
-      const host = hp.replace(/:\d+$/, '');
-      return `( if command -v getent >/dev/null && ! getent hosts ${shellQuote(host)} >/dev/null; then echo "no ${hp}"; elif $T curl -sS -m 4 -o /dev/null https://${hp.replace(/:443$/, '')}/ 2>/dev/null; then echo "ok ${hp}"; else rc=$?; case $rc in 6|7|28|35|124) echo "no ${hp}";; *) echo "ok ${hp}";; esac; fi ) &`;
+      return `( if $T curl -sS -m 4 -o /dev/null ${shellQuote(`https://${hp.replace(/:443$/, '')}/`)} 2>/dev/null; then echo ${shellQuote(`ok ${hp}`)}; else rc=$?; case $rc in 6|7|28|35|124) echo ${shellQuote(`no ${hp}`)};; *) echo ${shellQuote(`ok ${hp}`)};; esac; fi ) &`;
     }).join(' ');
     const out = await run(env, `command -v curl >/dev/null || { echo nocurl; exit 0; }; T=; command -v timeout >/dev/null && T="timeout 5"; ${checks} wait`).catch(() => '');
     for (const line of out.trim().split('\n')) if (line.startsWith('no ')) unreachable.push(line.slice(3));

@@ -55,6 +55,7 @@ export async function checkReading({ app, page, id }) {
     step('API call ends');
     await send([{ type: 'message_end', message: assistant }]);
     assert.equal(await page.locator('.usage-speed-value b').innerText(), '50.0', 'TPS updates after this API call, while the agent is still running');
+    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Request avg', 'receipt-only timing is not generation speed');
     assert.equal(await row.evaluate(el => el === window.__readingRow), true, 'final reasoning must not remount the tool row');
     assert.equal(await row.locator('.tool-call-head').getAttribute('aria-expanded'), 'true');
     assert.equal(await row.locator('.tool-output').evaluate(el => el.scrollTop), 72);
@@ -79,10 +80,12 @@ export async function checkReading({ app, page, id }) {
     assert.equal(await row.locator('.tool-call-head').getAttribute('aria-expanded'), 'true');
     assert.equal(await row.locator('.tool-output').evaluate(el => el.scrollTop), 72);
     assert.ok(Math.abs(await page.locator('.transcript').evaluate(el => el.scrollTop) - before) < 2, 'streaming must not drag the transcript to the bottom');
-    await send([{ type: 'message_end', message: { ...next, content: [{ type: 'thinking', thinking: 'Checking another detail.' }, { type: 'text', text: answer }] } }]);
+    const sourceTiming = { source: 'agent', complete: true, start: stamp, first: stamp + 500, last: stamp + 1500, end: stamp + 2000,
+      chars: answer.length + 'Checking another detail.'.length, thinkingChars: 'Checking another detail.'.length, deltas: 3 };
+    await send([{ type: 'message_end', message: { ...next, __timing: sourceTiming, content: [{ type: 'thinking', thinking: 'Checking another detail.' }, { type: 'text', text: answer }] } }]);
     assert.equal(await pill.evaluate(el => el === window.__changesPill), true, 'changes pill must not disappear/reappear at API call boundaries');
-    const nextSpeed = Number(await page.locator('.usage-speed-value b').innerText());
-    assert.ok(nextSpeed > 100, 'TPS uses first→last for the next streamed call');
+    assert.equal(await page.locator('.usage-speed-value b').innerText(), '~200', 'source-observed first→last speed is explicitly approximate');
+    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Stream avg');
     step('jump to latest');
     await page.getByRole('button', { name: 'Jump to latest' }).click();
     assert.ok(await page.locator('.transcript').evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight < 2));

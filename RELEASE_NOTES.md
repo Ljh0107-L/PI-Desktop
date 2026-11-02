@@ -2,7 +2,18 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## 0.1.21 — Inspect subagent execution
+## 0.1.22 — Faster setup and trustworthy speed metrics
+
+- **Less repeated connection work.** Revalidate cached SSH installation paths instead of rediscovering every Node installation and disk after an app restart. Matching installations skip npm/registry probes; changed bridge files upload in one operation. Remote setup overlaps catalog discovery and concurrent starts share one preparation. Provider changes remain serialized, and reconnects retain an existing model-egress tunnel.
+- **Connection phases are visible.** Distinguish remote preparation, starting Pi and restoring session configuration rather than labelling all of them Connecting. Unchanged provider/model/thinking configuration avoids redundant RPCs; changed credentials cannot silently fall back to old keys.
+- **Speed has an explicit denominator.** Capture generation counters inside Pi before SSH buffering and persist them with the final message. Usage distinguishes approximate **Stream avg** from full **Request avg**; replay, missing timing, hidden/summarized reasoning and one-chunk responses no longer masquerade as generation-only TPS. The trend compares the same model and timing basis. Estimates do not overwrite provider-reported totals.
+- **Cursor bridge provenance.** The separately deployed bridge preserves reported zero cache/output counts, stops fabricating cached prefixes, and labels missing-usage estimates. Desktop records that metadata before SDK normalization, marks estimates and displays unknown cache measurements as `—`.
+- **Cursor bridge reliability.** EOF/resets/deadlines before completion surface as errors rather than successful answers. Long reasoning is not ended by a 30-second socket read timeout. Send-window stalls are bounded, tool translation preserves required fields and binary safety, and independent requests do not share first-prompt-derived hidden state. The bridge source and offline Python tests now live under `integrations/cursor-quota-bridge`; desktop installation alone does not deploy it.
+- **Plain Subagents heading.** Match Context/Usage typography, remove the fork icon and the empty-state helper text. Task inspection remains available.
+
+Source timing/provenance recording requires a Pi process with the new extension: start a new conversation after updating. Older kept-alive processes and history use explicitly labelled request averages when source timing is unavailable; no running session is force-restarted. Private upstream protocol semantics and true server decode-only TPS cannot be independently verified by the desktop. Tests, UI checks and packaging run in GitHub CI, not on the user's workstation.
+
+## Included from 0.1.21 — Inspect subagent execution
 
 - **Click into a task's execution.** Subagents now have a standalone summary card in the main conversation and a task list on the right. Select a task to see its live tool calls, commands/arguments, text output, error states, durations and public messages, with its assignment and final result.
 - **A cleaner right panel.** Removed Environment and Outputs. Context and Usage remain alongside the Subagents list. Files are still accessible through the header's Files button and Open file links in execution steps; no workspace files are removed.
