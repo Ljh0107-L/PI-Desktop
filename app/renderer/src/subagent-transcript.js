@@ -61,10 +61,11 @@ export function subagentTranscript(task = {}) {
     if (step.type === 'notice') { notice(part, text(step.text), step.at); return; }
     if (step.type === 'message') {
       const body = text(step.text), error = text(step.error);
-      const neutral = step.status === 'cancelled' || isAbortText(error) ||
+      const recoveredLimit = task.status === 'completed' && task.lengthRecoveries > 0 && step.stopReason === 'length';
+      const neutral = recoveredLimit || step.status === 'cancelled' || isAbortText(error) ||
         (task.status === 'cancelled' && error.trim() === text(task.error).trim());
       if (body || (error && !neutral)) assistant(part, body ? [{ type: 'text', text: body }] : [], step.at, neutral ? '' : error, active && step.status === 'running');
-      if (error && neutral) notice(`${part}:error`, error, step.at);
+      if (error && neutral) notice(`${part}:error`, recoveredLimit ? `Recovered from an earlier output limit: ${error}` : error, step.at);
       remember(body); remember(error);
       return;
     }

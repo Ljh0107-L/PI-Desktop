@@ -42,6 +42,15 @@ test('legacy tasks use their stable call/index identity and separate batches do 
   assert.deepEqual(visibleSubagentTasks([legacy, other], [subagentHistoryId(legacy)]), [other]);
 });
 
+test('successful length recovery demotes only its explicitly recorded earlier limit to a notice', () => {
+  const steps = [{ id: 'length', type: 'message', status: 'failed', stopReason: 'length', error: 'Output token limit reached.' }];
+  const recovered = displayBlocks(subagentTranscript({ key: 'recover:0', status: 'completed', task: 'Continue', lengthRecoveries: 1, steps, output: 'Done' }));
+  assert.equal(recovered.filter(block => block.kind === 'error').length, 0);
+  assert.ok(recovered.some(block => block.kind === 'notice' && block.text.includes('Recovered from an earlier output limit')));
+  const failed = displayBlocks(subagentTranscript({ key: 'failed:0', status: 'failed', task: 'Continue', lengthRecoveries: 1, steps, error: 'Output token limit reached again.' }));
+  assert.ok(failed.some(block => block.kind === 'error'));
+});
+
 test('skipped truncated tool calls are neither running nor described as executed edits', () => {
   const t = subagentTranscript({ key: 'length:0', task: 'Write safely', status: 'failed', failureKind: 'output_limit', steps: [
     { id: 'write', type: 'tool', name: 'write', status: 'skipped', output: 'Tool call was not executed: output token limit.' },

@@ -269,7 +269,7 @@ export function createSubagentTool({ concurrency = 3, defaultTimeoutMs = 300000,
                   result.skippedToolCalls += result.lastResponse.skippedToolCalls;
                   const lengthError = result.stopReason === 'length' ? outputLimitMessage(result.lastResponse, result.lengthRecoveries > 0) : undefined;
                   if (result.output || event.message.errorMessage || lengthError) recordSubagentStep(result, {
-                    id: messageId, type: 'message', status: ['error', 'aborted', 'length'].includes(result.stopReason) ? 'failed' : 'completed',
+                    id: messageId, type: 'message', stopReason: result.stopReason, status: ['error', 'aborted', 'length'].includes(result.stopReason) ? 'failed' : 'completed',
                     text: result.output, error: lengthError || (event.message.errorMessage ? clip(event.message.errorMessage, 2000) : undefined), endedAt: Date.now(),
                   });
                 }

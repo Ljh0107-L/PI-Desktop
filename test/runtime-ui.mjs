@@ -64,6 +64,8 @@ try {
   await page.locator('.subagent-inspector .tool-group-head').click();
   await page.locator('.subagent-inspector .tool-call.skipped').waitFor();
   assert.equal(await page.locator('.subagent-inspector .tool-call.running').count(), 0);
+  assert.equal(await page.locator('.subagent-inspector .block-error').count(), 0, 'recovered output limits must not remain final red failures');
+  assert.ok(await page.locator('.subagent-inspector .block-notice', { hasText: 'Recovered from an earlier output limit' }).count());
   assert.equal(await page.locator('.subagent-inspector .step-open').count(), 0);
   await shot(page, '/tmp/pidesk-e2e/shots', '14-subagent-skipped-tool');
   assert.equal((await app.windows()).length, 1);
