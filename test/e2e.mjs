@@ -553,13 +553,18 @@ try {
   await waitText('.markdown', 'echo: remote run');
   check('two sessions ran concurrently and switching kept both', true);
 
-  // stop a long-running reply with the stop button
-  await send('long ' + 'y'.repeat(3000));
+  // Stop a demonstrably in-flight response; a timed 3K echo can already finish before the click.
+  await send('[[hold-for-stop]]');
+  await page.locator('.session-main .markdown', { hasText: 'Waiting for stop fixture' }).waitFor({ timeout: 30000 });
   await page.locator('.send-button.stop').waitFor({ timeout: 30000 });
-  await page.waitForTimeout(800);
   await page.click('.send-button.stop');
+  await page.waitForFunction(() => {
+    const s = window.__pideskState(), session = s.sessions.find(row => row.id === s.activeId);
+    return !session?.streaming && s.transcripts[s.activeId]?.messages.some(m => m.role === 'assistant' && ['aborted', 'error'].includes(m.stopReason)
+      && m.content?.some(b => b.type === 'text' && b.text.includes('Waiting for stop fixture')));
+  }, undefined, { timeout: 30000 });
   await page.locator('.block-notice', { hasText: 'Interrupted' }).last().waitFor({ timeout: 30000 });
-  check('stop button aborts the running reply', !(await page.locator('.markdown', { hasText: 'y'.repeat(2900) }).count()));
+  check('stop button aborts the running reply', !(await page.locator('.session-main .markdown', { hasText: 'Unexpected completion after stop' }).count()));
   await S('09-sidebar-two-machines');
   await page.keyboard.press('Meta+k');
   await page.locator('.palette').waitFor();

@@ -72,6 +72,15 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
     // [[hidden-think]]: reason silently for a while (billed as reasoning tokens) before answering.
     const hiddenThink = userText.includes('[[hidden-think]]') && last.role !== 'tool';
     if (hiddenThink) { send({ role: 'assistant', content: '' }); sentChars = 0; await new Promise(r => setTimeout(r, 1500)); }
+    if (userText.includes('[[hold-for-stop]]')) {
+      send({ role: 'assistant', content: 'Waiting for stop fixture' });
+      await new Promise(resolve => {
+        // A real in-flight stream, not an echo that may finish while Playwright is scheduling.
+        const timer = setTimeout(() => { send({ content: ' Unexpected completion after stop' }); finish('stop'); resolve(); }, 30000);
+        res.once('close', () => { clearTimeout(timer); resolve(); });
+      });
+      return;
+    }
     const askMatch = /\[\[ask:([^|\]]+)(?:\|([^\]]*))?\]\]/.exec(userText);
     // Functional-test fixtures: real SSE finish_reason/usage goes through the actual SDK.
     const childLength = subagent && messages.some(m => m.role === 'user' && /\[\[child-length(?:-repeat|-tools)?\]\]/.test(textOf(m.content)));
