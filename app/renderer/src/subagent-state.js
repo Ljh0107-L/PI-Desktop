@@ -30,6 +30,12 @@ export function subagentBatches(transcript) {
   return [...calls.values()].map(call => subagentBatch(call, finished.get(call.id) ?? transcript.tools?.[call.id]));
 }
 
+export function subagentElapsed(task, now = Date.now()) {
+  const start = task.runStartedAt ?? task.startedAt;
+  const end = task.finishedAt ?? (isSubagentActive(task) ? now : null);
+  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
+}
+
 export function subagentSummary(tasks) {
   if (!tasks.length) return 'Preparing tasks…';
   const counts = new Map();

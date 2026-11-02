@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { applyEvent, displayBlocks, emptyTranscript, fromHistory } from '../app/renderer/src/transcript.js';
-import { subagentBatch, subagentBatches, subagentSummary } from '../app/renderer/src/subagent-state.js';
+import { subagentBatch, subagentBatches, subagentElapsed, subagentSummary } from '../app/renderer/src/subagent-state.js';
 
 const call = { type: 'toolCall', id: 'batch-1', name: 'subagent', arguments: { tasks: [{ name: 'Inspect', task: 'Read the assigned file.' }, { name: 'Review', task: 'Review only.' }] } };
 const assistant = { role: 'assistant', content: [call] };
@@ -45,6 +45,14 @@ test('legacy results remain inspectable without inventing an execution trace', (
   assert.equal(legacy.tasks[0].steps, undefined);
   assert.deepEqual(subagentBatches(undefined), []);
   assert.equal(subagentBatches(fromHistory([message]))[0].tasks[0].name, 'Inspect');
+});
+
+test('elapsed time freezes at completion and stays unknown for old tasks without an end time', () => {
+  assert.equal(subagentElapsed({ status: 'running', startedAt: 100 }, 1100), 1000);
+  assert.equal(subagentElapsed({ status: 'completed', startedAt: 100, runStartedAt: 300, finishedAt: 900 }, 10000), 600);
+  assert.equal(subagentElapsed({ status: 'completed', startedAt: 100 }, 10000), null);
+  assert.equal(subagentElapsed({ status: 'failed', startedAt: 100 }, 10000), null);
+  assert.equal(subagentElapsed({ status: 'pending' }), null);
 });
 
 test('overlapping batches are independent even when child names match', () => {

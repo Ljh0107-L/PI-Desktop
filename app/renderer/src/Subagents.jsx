@@ -3,7 +3,7 @@ import { Icon } from './Icons.jsx';
 import { Markdown, Spinner } from './ui.jsx';
 import { closeSubagent, openFile, openSubagent } from './store.js';
 import { formatTokens } from './transcript.js';
-import { isSubagentActive, subagentBatch, subagentStatus, subagentSummary } from './subagent-state.js';
+import { isSubagentActive, subagentBatch, subagentElapsed, subagentStatus, subagentSummary } from './subagent-state.js';
 
 const duration = ms => ms < 1000 ? '<1s' : ms < 60000 ? `${Math.floor(ms / 1000)}s` : `${Math.floor(ms / 60000)}m ${Math.floor(ms % 60000 / 1000)}s`;
 function StatusIcon({ status }) {
@@ -79,12 +79,12 @@ export function SubagentDetail({ sessionId, task }) {
   const followLatest = () => { following.current = true; setFollowing(true); if (scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; measureUnseen(); };
   const pause = () => { following.current = false; setFollowing(false); measureUnseen(); };
   useLayoutEffect(() => { if (following.current && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; measureUnseen(); }, [task.steps, task.output, task.status]);
-  const elapsed = Math.max(0, (task.finishedAt ?? Date.now()) - (task.runStartedAt ?? task.startedAt ?? Date.now()));
+  const elapsed = subagentElapsed(task);
   const hasTrace = Array.isArray(task.steps);
   return <>
     <div className="subagent-inspector-head"><button className="tool-button" aria-label="Back to subagents" onClick={() => closeSubagent(sessionId)}><Icon name="arrowLeft" size={17} /></button><b>{task.name}</b></div>
     <div className={`subagent-inspector-meta ${task.status}`}><StatusIcon status={task.status} /><span>{subagentStatus(task.status)}</span>
-      {task.startedAt && <span>{duration(elapsed)}</span>}<span>{task.turns ?? 0} turns</span><span>{formatTokens(task.usage?.totalTokens ?? 0)} tokens</span></div>
+      <span>{elapsed == null ? 'Time unavailable' : duration(elapsed)}</span><span>{task.turns ?? 0} turns</span><span>{formatTokens(task.usage?.totalTokens ?? 0)} tokens</span></div>
     <div className="subagent-inspector-model">{[task.provider, task.model].filter(Boolean).join('/')}</div>
     <div ref={scroller} className="subagent-timeline" onWheel={e => { if (e.deltaY < 0) pause(); }} onScroll={e => {
       if (e.target !== scroller.current) return;
