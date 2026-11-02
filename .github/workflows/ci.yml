@@ -2,10 +2,12 @@ name: CI
 
 on:
   push:
+    branches: ['**'] # release tags run these suites through workflow_call below
     paths-ignore: ['**.md', 'docs/**', 'build/make-icon.py', 'build/icon-source.png']
   pull_request:
     paths-ignore: ['**.md', 'docs/**', 'build/make-icon.py', 'build/icon-source.png']
   workflow_dispatch:
+  workflow_call:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -51,6 +53,8 @@ jobs:
       - uses: actions/setup-node@v4
         with: { node-version: 24, cache: npm }
       - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Backend lifecycle and real stream recovery regressions
+        run: npm run test:backend
       - name: Start test SSH server
         run: |
           sh test/sshd.sh > /tmp/pidesk-sshd.log 2>&1 &

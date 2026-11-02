@@ -13,7 +13,7 @@
 // Secrets: the attach handshake carries the session's boot record (provider keys). The daemon passes
 // it to Pi in the PIDESK_BOOT environment variable at spawn and does not keep it.
 import { spawn } from 'node:child_process';
-import { chmodSync, mkdirSync, openSync, unlinkSync } from 'node:fs';
+import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -40,7 +40,7 @@ function lineReader(stream, onLine) {
     }
   });
 }
-const send = (socket, value) => { if (!socket.destroyed) socket.write(JSON.stringify(value) + '\n'); };
+const send = (socket, value) => { if (!socket.destroyed && !socket.writableEnded) socket.write(JSON.stringify(value) + '\n'); };
 
 // ------------------------------------------------------------------ daemon
 function runDaemon() {
@@ -71,7 +71,8 @@ function runDaemon() {
       for (const client of session.clients) if (!client.destroyed) client.write(numbered + '\n');
     });
     child.stderr.on('data', d => { session.stderr = (session.stderr + d).slice(-8000); });
-    child.on('exit', (code, signal) => {
+    session.closed = new Promise(resolve => child.once('close', resolve));
+    child.on('close', (code, signal) => {
       session.exit = { code, signal, at: Date.now(), stderr: session.stderr.slice(-2000) };
       session.pendingUi.clear();
       for (const client of session.clients) { send(client, { relay: 'exit', code, signal, stderr: session.exit.stderr }); client.end(); }
@@ -83,14 +84,32 @@ function runDaemon() {
     return session;
   }
 
+  function stopSession(session) {
+    if (session.stopping) return session.stopping;
+    session.stopping = (async () => {
+      session.child.stdin.end();
+      const term = setTimeout(() => session.child.kill('SIGTERM'), 500);
+      const kill = setTimeout(() => {
+        session.child.kill('SIGKILL');
+        session.child.stdout.destroy(); session.child.stderr.destroy();
+      }, 2000);
+      try { await session.closed; }
+      finally { clearTimeout(term); clearTimeout(kill); }
+    })();
+    return session.stopping;
+  }
+
   function attach(socket, message) {
     let session = sessions.get(message.sessionId);
     let created = false;
     if (!session || session.exit) {
       if (!message.spawn) { send(socket, { relay: 'error', error: 'Session is not running' }); socket.end(); return; }
-      session = spawnSession(message.sessionId, message.spawn, message.boot);
+      const spec = message.spawn;
+      if (!Array.isArray(spec.argv) || !spec.argv.length || spec.argv.some(a => typeof a !== 'string') || typeof spec.cwd !== 'string') throw new Error('Invalid spawn specification');
+      session = spawnSession(message.sessionId, spec, message.boot);
       created = true;
     }
+    if (session.stopping && !session.exit) { send(socket, { relay: 'error', error: 'Session is stopping; retry after stop completes' }); socket.end(); return; }
     delete message.boot;
     const firstSeq = session.seq - session.log.length + 1;
     send(socket, { relay: 'attached', created, lastSeq: session.seq, pid: session.child.pid, startedAt: session.startedAt });
@@ -114,16 +133,26 @@ function runDaemon() {
         first = false;
         let message;
         try { message = JSON.parse(line); } catch { socket.end(); return; }
+        if (!message || typeof message !== 'object' || Array.isArray(message)) { socket.end(); return; }
         if (message.op === 'list') {
           send(socket, { relay: 'list', sessions: [...sessions.values()].map(s => ({ id: s.id, pid: s.child.pid, cwd: s.cwd, alive: !s.exit, exit: s.exit, startedAt: s.startedAt, lastSeq: s.seq, clients: s.clients.size, pendingUi: s.pendingUi.size })) });
           socket.end(); return;
         }
         if (message.op === 'stop') {
           const s = sessions.get(message.sessionId);
-          if (s && !s.exit) { s.child.stdin.end(); setTimeout(() => { if (!s.exit) s.child.kill('SIGTERM'); }, 500).unref(); }
-          send(socket, { relay: 'stopped', found: !!s }); socket.end(); return;
+          // Acknowledgement means Pi has actually exited, not just received EOF. Callers
+          // can now restart or delete its session file without racing the old writer.
+          const stopped = s && !s.exit ? stopSession(s) : Promise.resolve();
+          stopped.then(() => { send(socket, { relay: 'stopped', found: !!s }); socket.end(); });
+          return;
         }
-        if (message.op === 'attach') { session = attach(socket, message); return; }
+        if (message.op === 'attach') {
+          try {
+            if (typeof message.sessionId !== 'string' || !message.sessionId) throw new Error('Invalid session id');
+            session = attach(socket, message);
+          } catch (error) { send(socket, { relay: 'error', error: error.message }); socket.end(); }
+          return;
+        }
         socket.end(); return;
       }
       if (!session || session.exit) return;
@@ -137,7 +166,7 @@ function runDaemon() {
 
   const listen = () => server.listen(SOCKET, () => { chmodSync(SOCKET, 0o600); touch(); });
   server.on('error', error => {
-    if (error.code !== 'EADDRINUSE') throw error;
+    if (!['EADDRINUSE', 'EEXIST'].includes(error.code)) throw error;
     // Another daemon may own the socket; if nobody answers it is stale.
     const probe = net.connect(SOCKET);
     probe.on('connect', () => { probe.destroy(); process.exit(0); });
@@ -160,14 +189,48 @@ async function connectOrStart() {
   try { return await connect(); } catch { /* start below */ }
   mkdirSync(RUN_DIR, { recursive: true, mode: 0o700 });
   chmodSync(RUN_DIR, 0o700);
-  const log = openSync(join(RUN_DIR, 'relay.log'), 'a', 0o600);
-  const daemon = spawn(process.execPath, [fileURLToPath(import.meta.url), 'daemon'], { detached: true, stdio: ['ignore', log, log], cwd: homedir() });
-  daemon.unref();
-  for (let i = 0; i < 50; i++) {
-    await new Promise(r => setTimeout(r, 100));
-    try { return await connect(); } catch { /* not ready yet */ }
+  const lock = join(RUN_DIR, 'startup.lock');
+  // Multiple pre-warms/reconnects can arrive together. Only one launcher may probe,
+  // replace a stale socket and start a daemon; never unlink another starter's socket.
+  for (let attempt = 0; attempt < 100; attempt++) {
+    try { return await connect(); } catch { /* start or wait for its owner below */ }
+    let fd;
+    try { fd = openSync(lock, 'wx', 0o600); }
+    catch (error) {
+      if (error.code !== 'EEXIST') throw error;
+      try {
+        const pid = Number(readFileSync(lock, 'utf8'));
+        if (pid > 0) {
+          try { process.kill(pid, 0); }
+          catch (e) { if (e.code === 'ESRCH') unlinkSync(lock); }
+        }
+      } catch { /* the owner just released it */ }
+      await new Promise(r => setTimeout(r, 100));
+      continue;
+    }
+    try {
+      writeFileSync(fd, String(process.pid));
+      closeSync(fd); fd = undefined;
+      try { return await connect(); } catch { /* still no daemon */ }
+      const log = openSync(join(RUN_DIR, 'relay.log'), 'a', 0o600);
+      let launchError;
+      try {
+        const daemon = spawn(process.execPath, [fileURLToPath(import.meta.url), 'daemon'], { detached: true, stdio: ['ignore', log, log], cwd: homedir() });
+        daemon.on('error', error => { launchError = error; });
+        daemon.unref();
+      } finally { closeSync(log); }
+      for (let i = 0; i < 50; i++) {
+        await new Promise(r => setTimeout(r, 100));
+        if (launchError) throw launchError;
+        try { return await connect(); } catch { /* not ready yet */ }
+      }
+      throw new Error(`relay daemon did not start; see ${join(RUN_DIR, 'relay.log')}`);
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+      try { unlinkSync(lock); } catch { /* already removed */ }
+    }
   }
-  throw new Error('relay daemon did not start; see ~/.pidesk/run/relay.log');
+  throw new Error(`relay startup timed out; see ${join(RUN_DIR, 'relay.log')}`);
 }
 
 async function request(message) {
@@ -204,8 +267,11 @@ async function runAttach() {
   process.stdin.resume();
   process.stdin.pipe(socket);
   socket.pipe(process.stdout);
-  socket.on('close', () => process.exit(0));
-  socket.on('error', () => process.exit(1));
+  // Do not process.exit() on socket close: stdout may still contain relay:exit or
+  // replay records. Let pipe flush before the process exits naturally.
+  socket.on('close', () => { process.stdin.unpipe(socket); process.stdin.pause(); });
+  socket.on('error', error => { process.stderr.write(`pidesk-relay: ${error.message}\n`); process.exitCode = 1; });
+  process.stdout.on('error', () => { socket.destroy(); process.stdin.destroy(); });
   process.stdin.on('end', () => socket.end());
 }
 

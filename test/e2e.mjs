@@ -21,12 +21,13 @@ const work = '/tmp/pidesk-e2e';
 rmSync(join(work, 'profile'), { recursive: true, force: true });
 const localProject = join(work, 'projects/demo-app');
 const remoteProject = join(work, 'remote/api-server');
+const remoteInstall = join(work, 'remote-install');
 for (const dir of [localProject, remoteProject]) mkdirSync(dir, { recursive: true });
 writeFileSync(join(localProject, 'README.md'), '# demo-app\n');
 for (const f of ['denied.txt', 'notes/plan.md', 'local-after-quit.txt']) rmSync(join(localProject, f), { force: true });
 for (const f of ['survived.txt', 'after-quit.txt']) rmSync(join(remoteProject, f), { force: true });
 // Simulate the network dropping: kill this machine's ssh client for the remote session's relay connection.
-const dropSsh = () => { try { execFileSync('pkill', ['-f', 'pidesk-test.*/.pidesk/ext/pidesk-relay.mjs.*attach']); return true; } catch { return false; } };
+const dropSsh = () => { try { execFileSync('pkill', ['-f', `pidesk-test.*${remoteInstall}/ext/pidesk-relay.mjs.*attach`]); return true; } catch { return false; } };
 
 const results = [];
 const check = (name, ok, detail = '') => { results.push(ok); console.log(`${ok ? 'PASS' : 'FAIL'}  ${name}${detail ? '  — ' + detail : ''}`); };
@@ -42,6 +43,8 @@ rmSync(profile, { recursive: true, force: true });
 // Let compaction summarize even this short test conversation (Pi keeps the last 20K tokens by default).
 mkdirSync(join(profile, 'agent'), { recursive: true });
 writeFileSync(join(profile, 'agent', 'settings.json'), JSON.stringify({ compaction: { keepRecentTokens: 50 } }));
+// Never install into (or stop a relay from) a developer's ~/.pidesk.
+writeFileSync(join(profile, 'settings.json'), JSON.stringify({ environments: { 'ssh:pidesk-test': { root: remoteInstall, added: false } } }));
 let { app, page } = await launch({ userData: profile, env });
 const S = name => shot(page, opts.shots, name);
 const composer = () => page.locator('.composer textarea');
@@ -115,6 +118,13 @@ try {
   await S('03c-connections');
   await page.click('.nav-item.back');
 
+  // ---- background pre-warm cancellation must not leak a red connection-closed toast
+  for (let i = 0; i < 4; i++) {
+    await page.evaluate(cwd => window.pidesk.invoke('prewarm', { environmentId: 'local', cwd }), i % 2 ? null : localProject);
+  }
+  await page.waitForTimeout(800);
+  check('switching pre-warmed folders is silent', !(await page.evaluate(() => window.__pideskNoticeLog ?? [])).some(n => /connection closed|Session start cancelled/.test(n)));
+
   // ---- no folder: a session in the default workspace, like Codex and Claude
   check('new sessions default to "No folder"', (await page.locator('.folder-trigger').innerText()).includes('No folder'));
   await waitNew('.markdown', 'Tool result', () => send('[[bash:pwd]]'));
@@ -138,6 +148,13 @@ try {
   await send('hello from the desktop');
   await waitText('.markdown', '[mock-lab/alpha-1] echo: hello from the desktop');
   check('local session streamed a reply', true);
+  await send('recover this reply [[drop-once]]');
+  await page.locator('.working', { hasText: 'Reconnecting to model' }).waitFor({ timeout: 15000 });
+  check('a broken model stream shows a bounded retry, not a final red error', await page.locator('.block-error', { hasText: 'terminated' }).count() === 0);
+  await page.locator('.block-notice', { hasText: 'Recovered automatically' }).waitFor({ timeout: 15000 });
+  await page.locator('.send-button.stop').waitFor({ state: 'detached', timeout: 15000 });
+  check('a recovered model stream no longer leaves a red terminated error', await page.locator('.block-error').count() === 0);
+  await S('04a-stream-recovered');
   await page.locator('.usage-table').waitFor({ timeout: 15000 });
   const usageText = await page.locator('.usage').innerText();
   check('right panel Usage card shows tok/s and input / cached / output', /tok\/s/.test(usageText) && /Input/.test(usageText) && /Cached/.test(usageText) && /Output/.test(usageText), usageText.replace(/\s+/g, ' '));
@@ -347,7 +364,7 @@ try {
   await page.click('.menu-item:has-text("pidesk-test")');
   await page.locator('.bar-status').waitFor({ state: 'detached', timeout: 300000 }).catch(() => {});
   const prep = await page.evaluate(() => window.pidesk.invoke('prepareEnvironment', 'ssh:pidesk-test'));
-  check('SSH host prepared (Pi installed under ~/.pidesk)', prep.ok, prep.ok ? `${prep.facts.hostname}, Node ${prep.facts.nodeVersion}, Pi ${prep.facts.piVersion}` : prep.error);
+  check('SSH host prepared in an isolated test install', prep.ok, prep.ok ? `${prep.facts.hostname}, Node ${prep.facts.nodeVersion}, Pi ${prep.facts.piVersion}` : prep.error);
   await page.click('.folder-trigger');
   await page.click('.menu-item:has-text("Browse pidesk-test")');
   await page.locator('.browse-item').first().waitFor({ timeout: 30000 });
@@ -490,6 +507,7 @@ const secretsFile = readFileSync(join(profile, 'secrets.json'), 'utf8');
 check('settings never store the key in settings.json', !readFileSync(join(profile, 'settings.json'), 'utf8').includes('sk-e2e-secret') && !secretsFile.includes('sk-e2e-secret') && !readFileSync(join(profile, 'settings.json'), 'utf8').includes('sk-e2e-rotated') && !secretsFile.includes('sk-e2e-rotated'));
 await app.close();
 try { execFileSync('pkill', ['-f', `${join(root, 'agent/pidesk-relay.mjs')} daemon`]); } catch { /* not running */ }
+try { execFileSync('pkill', ['-f', `${remoteInstall}/ext/pidesk-relay.mjs daemon`]); } catch { /* not running */ }
 await mock.close();
 const failed = results.filter(r => !r).length;
 console.log(`\n${results.length - failed}/${results.length} checks passed. Screenshots: ${opts.shots}`);

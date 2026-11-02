@@ -26,8 +26,9 @@ const security = args => execFileSync('/usr/bin/security', args, { encoding: 'ut
 
 export class Store {
   #master = null;
-  constructor(dir, safeStorage, { insecureTestStorage = false } = {}) {
+  constructor(dir, safeStorage, { insecureTestStorage = false, keychainCommand = security } = {}) {
     this.dir = dir;
+    this.keychainCommand = keychainCommand;
     this.safeStorage = safeStorage;
     this.insecure = insecureTestStorage;
     mkdirSync(dir, { recursive: true });
@@ -53,11 +54,19 @@ export class Store {
   // The Keychain-held key (macOS), created on first use.
   #masterKey() {
     if (this.#master) return this.#master;
-    let hex = '';
-    try { hex = security(['find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', 'master', '-w']); } catch { /* not created yet */ }
+    let hex = '', missing = false;
+    try { hex = this.keychainCommand(['find-generic-password', '-s', KEYCHAIN_SERVICE, '-a', 'master', '-w']); }
+    catch (error) {
+      // security's item-not-found status is 44. Denied/locked/unavailable is NOT
+      // permission to replace the master key and strand every encrypted API key.
+      if (error.status !== 44 || Object.values(this.secrets).some(entry => entry?.kc)) throw new Error('Cannot read the existing Pi Desktop key from Keychain. Unlock Keychain and try again; saved keys were not changed.');
+      missing = true;
+    }
     if (!/^[0-9a-f]{64}$/.test(hex)) {
+      if (!missing) throw new Error('Invalid Pi Desktop Keychain key; saved keys were not changed.');
       hex = randomBytes(32).toString('hex');
-      security(['add-generic-password', '-U', '-s', KEYCHAIN_SERVICE, '-a', 'master', '-l', 'Pi Desktop API keys', '-T', '/usr/bin/security', '-w', hex]);
+      // No -U: a racing first launch must fail rather than overwrite another master's key.
+      this.keychainCommand(['add-generic-password', '-s', KEYCHAIN_SERVICE, '-a', 'master', '-l', 'Pi Desktop API keys', '-T', '/usr/bin/security', '-w', hex]);
     }
     this.#master = Buffer.from(hex, 'hex');
     return this.#master;
@@ -95,12 +104,15 @@ export class Store {
   }
   // Keys saved by older versions (safeStorage): read them all at once (one last Keychain prompt) and re-save.
   #migrate() {
+    // Commit the migration only if every entry can be decrypted and re-encrypted.
+    // Denying a Keychain prompt must not silently delete the stored ciphertext.
+    const migrated = { ...this.secrets };
     for (const [id, entry] of Object.entries(this.secrets)) {
       if (!entry.enc) continue;
-      try { this.secrets[id] = this.#seal(this.safeStorage.decryptString(Buffer.from(entry.enc, 'base64'))); }
-      catch { delete this.secrets[id]; } // unreadable (access denied): the key has to be entered again
+      migrated[id] = this.#seal(this.safeStorage.decryptString(Buffer.from(entry.enc, 'base64')));
     }
-    this.#write('secrets.json', this.secrets);
+    this.#write('secrets.json', migrated);
+    this.secrets = migrated;
   }
   hasKey(providerId) { return !!this.secrets[providerId]; }
 

@@ -36,6 +36,8 @@ export function fromHistory(messages, timings = {}) {
 const ABORT_TEXT = /^(?:error:\s*)?(?:this |the )?(?:operation|request)(?: was)? (?:aborted|cancelled|canceled)\b|^(?:aborted|cancelled|canceled|aborterror)\b/i;
 export const isAbortText = text => ABORT_TEXT.test(String(text ?? '').trim());
 export const isAbortMessage = m => m?.stopReason === 'aborted' || isAbortText(m?.errorMessage);
+const isStreamInterruption = text => /\bterminated\b|stream (?:ended|disconnected|was interrupted)|socket hang up|other side closed/i.test(String(text ?? ''));
+const failureText = text => isStreamInterruption(text) ? `Model connection interrupted (${text}). Please retry if it does not recover.` : text;
 
 const textOfMessage = m => typeof m.content === 'string'
   ? m.content
@@ -115,6 +117,15 @@ function updateBlock(live, index, update) {
 
 export function applyEvent(t, event) {
   switch (event.type) {
+    case 'auto_retry_start': {
+      const index = t.messages.findLastIndex(m => m.role === 'assistant' && m.stopReason === 'error');
+      return { ...t, retry: { attempt: event.attempt, maxAttempts: event.maxAttempts, delayMs: event.delayMs },
+        messages: t.messages.map((m, i) => i === index ? { ...m, __retryOmitted: true } : m) };
+    }
+    case 'auto_retry_end':
+      return { ...t, retry: null };
+    case 'agent_settled':
+      return { ...t, retry: null };
     case 'message_start':
       if (event.message?.role === 'assistant') return { ...t, live: { ...event.message, content: [], stopReason: 'pending', __t0: Date.now(), __chars: 0 } };
       return t;
@@ -253,7 +264,21 @@ export function displayBlocks(t) {
       blocks.splice(firstBlock, 0, { kind: 'thinking', key: `h${mi}`, hidden: true, tokens: reasoning, durationMs: tm?.first && tm.start ? tm.first - tm.start : null });
     }
     const aborted = isAbortMessage(message);
-    if (message.errorMessage && !aborted) { flush(); blocks.push({ kind: 'error', key: `e${mi}`, text: message.errorMessage }); }
+    if (message.errorMessage && !aborted) {
+      flush();
+      // Only Pi-confirmed recovery attempts are demoted. Do not infer recovery merely
+      // because the user sent another message; a final failed attempt remains an error.
+      let recovered = false;
+      if (message.__retryOmitted) {
+        for (let j = mi + 1; j < all.length && all[j].role !== 'user'; j++) {
+          const next = all[j];
+          if (next.role === 'assistant' && ['stop', 'toolUse', 'length'].includes(next.stopReason)) { recovered = true; break; }
+        }
+      }
+      const text = recovered ? `Recovered automatically after: ${message.errorMessage}`
+        : message.__retryOmitted ? `${t.retry ? 'Retrying model request' : 'Model request was retried'} after: ${message.errorMessage}` : failureText(message.errorMessage);
+      blocks.push({ kind: message.__retryOmitted ? 'notice' : 'error', key: `e${mi}`, text });
+    }
     if (aborted) { flush(); blocks.push({ kind: 'notice', key: `a${mi}`, text: 'Interrupted' }); }
   });
   flush();

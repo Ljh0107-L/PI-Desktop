@@ -14,6 +14,7 @@ const textOf = content => typeof content === 'string' ? content
 
 export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
   const requests = [];
+  const dropped = new Set();
   const server = http.createServer(async (req, res) => {
     const match = /^\/([\w-]+)\/v1\/chat\/completions$/.exec(req.url ?? '');
     if (req.method === 'GET' && /\/v1\/models$/.test(req.url ?? '')) {
@@ -57,6 +58,13 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
     const last = messages[messages.length - 1] ?? {};
     const lastUser = [...messages].reverse().find(message => message.role === 'user');
     const userText = textOf(lastUser?.content);
+    if (userText.includes('[[drop-once]]') && !dropped.has(userText)) {
+      dropped.add(userText);
+      send({ role: 'assistant', content: 'Partial before disconnect' });
+      await sleep(100);
+      res.destroy();
+      return;
+    }
     const writeMatch = /\[\[write:([^|\]]+)\|([\s\S]*?)\]\]/.exec(userText);
     const toolMatch = writeMatch ? null : /\[\[bash:([\s\S]+?)\]\]/.exec(userText);
     // [[hidden-think]]: reason silently for a while (billed as reasoning tokens) before answering.

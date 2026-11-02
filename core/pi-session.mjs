@@ -10,6 +10,8 @@ export class PiSession extends EventEmitter {
   #nextId = 0;
   #stderr = '';
   #exit = null;
+  #closed = null;
+  #stopping = null;
 
   // `relay`: { sinceSeq, spawn } when the transport reaches a pidesk relay instead of a bare Pi process.
   // Then the first stdin line is the relay's attach handshake, every Pi line carries a sequence number
@@ -38,19 +40,29 @@ export class PiSession extends EventEmitter {
     const { command, args, spawnOptions } = this.transport;
     const child = spawn(command, args, { ...spawnOptions, stdio: ['pipe', 'pipe', 'pipe'] });
     this.#child = child;
-    child.stderr.on('data', data => { const text = data.toString(); this.#stderr += text; this.emit('stderr', text); });
+    this.#closed = new Promise(resolve => child.once('close', resolve));
+    child.stderr.on('data', data => { const text = data.toString(); this.#stderr = (this.#stderr + text).slice(-8000); this.emit('stderr', text); });
     child.on('error', error => this.#fail(new Error(`${this.id}: failed to start ${command}: ${error.message}`)));
-    child.on('exit', (code, signal) => {
+    // 'exit' can precede the last stdout records. Only classify the exit once the relay's
+    // final status and diagnostics have drained, otherwise a real Pi exit looks like a drop.
+    child.on('close', (code, signal) => {
       const what = this.relay ? (this.piExit ? 'Pi exited' : 'connection closed') : 'Pi exited';
-      this.#fail(new Error(`${this.id}: ${what} (code=${code} signal=${signal})\n${this.#stderr.slice(-2000)}`));
-      this.emit('exit', { code, signal, piExited: !this.relay || !!this.piExit });
+      const status = this.piExit ?? { code, signal };
+      const detail = this.piExit?.stderr || this.#stderr.slice(-2000);
+      this.#fail(new Error(`${this.id}: ${what} (code=${status.code} signal=${status.signal})${detail ? '\n' + detail : ''}`));
+      this.emit('exit', { ...status, piExited: !this.relay || !!this.piExit });
     });
     child.stdin.on('error', error => this.#fail(new Error(`${this.id}: stdin error: ${error.message}`)));
     attachJsonlReader(child.stdout, line => this.#handleLine(line));
     // The first stdin line is consumed by the bootstrap (or the relay), never by Pi.
     child.stdin.write(bootLine);
-    this.initialState = await this.request('get_state', {}, { timeout: readyTimeout }); // also proves Pi is ready
-    return this;
+    try {
+      this.initialState = await this.request('get_state', {}, { timeout: readyTimeout }); // also proves Pi is ready
+      return this;
+    } catch (error) {
+      await this.stop(); // a failed/timed-out attach must not leak its transport
+      throw error;
+    } finally { this.boot = null; }
   }
 
   request(type, payload = {}, { timeout = 30000 } = {}) {
@@ -93,14 +105,21 @@ export class PiSession extends EventEmitter {
     });
   }
 
-  async stop(timeout = 3000) {
+  stop(timeout = 3000) {
+    if (this.#stopping) return this.#stopping;
     const child = this.#child;
-    if (!child || child.exitCode !== null || child.signalCode !== null) return;
-    const exited = new Promise(resolve => child.once('exit', resolve));
-    child.stdin.end(); // orderly shutdown per the RPC protocol
-    const timer = setTimeout(() => child.kill('SIGTERM'), timeout);
-    await exited;
-    clearTimeout(timer);
+    if (!child) return Promise.resolve();
+    this.#stopping = (async () => {
+      child.stdin.end(); // orderly shutdown (detach for a relay transport)
+      const term = setTimeout(() => child.kill('SIGTERM'), timeout);
+      const kill = setTimeout(() => {
+        child.kill('SIGKILL');
+        child.stdout.destroy(); child.stderr.destroy();
+      }, timeout + 1000);
+      try { await this.#closed; }
+      finally { clearTimeout(term); clearTimeout(kill); }
+    })();
+    return this.#stopping;
   }
 
   #handleLine(line) {

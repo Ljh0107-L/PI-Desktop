@@ -48,14 +48,18 @@ function sessionHeader(cwd) {
 const remoteBase = path => path.split('/').filter(Boolean).pop() ?? path;
 // The visible history: the branch ending at `leafId`, with compactions as markers (shared by the live
 // get_entries path and the session-file path).
-function branchMessages(entries, leafId) {
+export function branchMessages(entries, leafId) {
   const byId = new Map(entries.map(e => [e.id, e]));
   const path = [];
   for (let e = byId.get(leafId); e; e = byId.get(e.parentId)) path.push(e);
   path.reverse();
+  // Pi keeps failed attempts in raw history, then context_edit(null) omits them for
+  // recovery. Preserve that fact for the UI instead of reviving a recovered red error.
+  const omitted = new Map();
+  for (const e of path) if (e.type === 'context_edit') omitted.set(e.targetId, e.replacement === null);
   const out = [];
   for (const e of path) {
-    if (e.type === 'message' && e.message) out.push(e.message);
+    if (e.type === 'message' && e.message) out.push(e.message.stopReason === 'error' && omitted.get(e.id) ? { ...e.message, __retryOmitted: true } : e.message);
     else if (e.type === 'compaction') out.push({ role: 'compactionSummary', summary: e.summary, tokensBefore: e.tokensBefore, timestamp: Date.parse(e.timestamp) || 0 });
   }
   return out;
@@ -212,7 +216,10 @@ export class SessionManager extends EventEmitter {
 
   async #egressFor(hosts) {
     if (!hosts.length) return null;
-    if (!this.egress) this.egress = await startEgressProxy({ allow: [] });
+    if (!this.egress) {
+      this.egressStarting ??= startEgressProxy({ allow: [] }).finally(() => { this.egressStarting = null; });
+      this.egress = await this.egressStarting;
+    }
     this.egress.allow(hosts);
     return this.egress;
   }
@@ -260,7 +267,10 @@ export class SessionManager extends EventEmitter {
     const spare = { id: record.id, record };
     this.spares.set(key, spare);
     this.#armSpare(key, spare);
-    this.ensureStarted(record.id, record).catch(() => this.#dropSpare(key));
+    this.ensureStarted(record.id, record).catch(() => {
+      // A cancelled start may finish after another spare has taken the same key.
+      if (this.spares.get(key) === spare) this.#dropSpare(key);
+    });
     return true;
   }
   #armSpare(key, spare) {
@@ -272,14 +282,14 @@ export class SessionManager extends EventEmitter {
     const spare = this.spares.get(key);
     if (!spare) return;
     this.spares.delete(key);
-    this.#stopSpare(spare);
+    this.#stopSpare(spare).catch(() => {});
   }
-  #stopSpare(spare) {
+  async #stopSpare(spare) {
     clearTimeout(spare.timer);
-    const runtime = this.runtimes.get(spare.id);
-    this.close(spare.id).catch(() => {});
+    // Wait for any in-flight attach to finish before stopping the relay's Pi.
+    await this.close(spare.id);
     const env = this.environments().find(e => e.id === spare.record.environmentId);
-    if (env && runtime) this.stopRelay(env, spare.id).catch(() => {});
+    if (env) await this.stopRelay(env, spare.id).catch(() => {});
   }
 
   // ---------------------------------------------------------------- No folder
@@ -350,7 +360,7 @@ export class SessionManager extends EventEmitter {
       this.spares.delete(spareKey);
       clearTimeout(spare.timer);
       try { return await this.#adopt(spare.record, fields, { model, thinkingLevel }); }
-      catch { this.#stopSpare(spare); } // the warm Pi failed or could not move: start a fresh one below
+      catch { await this.#stopSpare(spare); } // the warm Pi failed or could not move: start a fresh one below
     }
     const record = { id: randomUUID(), ...fields, model, thinkingLevel: thinkingLevel ?? 'medium', createdAt: Date.now(), updatedAt: Date.now() };
     this.#add(record);
@@ -387,6 +397,16 @@ export class SessionManager extends EventEmitter {
     return this.#view(record);
   }
 
+  #current(record, runtime) { return !runtime.closing && this.runtimes.get(record.id) === runtime; }
+  #assertCurrent(record, runtime) {
+    if (!this.#current(record, runtime)) throw Object.assign(new Error('Session start cancelled'), { code: 'SESSION_CANCELLED' });
+  }
+  #status(record, runtime, patch) {
+    // Pre-warming is an implementation detail, not a visible conversation. In particular,
+    // changing folders deliberately stops its connection and must not show an error toast.
+    if (!record.spare && this.#current(record, runtime)) this.emit('status', { id: record.id, ...patch });
+  }
+
   // Connect (or reconnect) a session. SSH sessions live in the host's relay, so a dropped connection is
   // retried with backoff and resumes from the last event seen; Pi keeps working in the meantime.
   ensureStarted(id, recordOverride) {
@@ -401,15 +421,17 @@ export class SessionManager extends EventEmitter {
     clearTimeout(runtime.retryTimer);
     runtime.closing = false;
     runtime.status = runtime.autoReconnect ? 'reconnecting' : 'connecting';
-    this.emit('status', { id, status: runtime.status });
+    this.#status(record, runtime, { status: runtime.status });
     runtime.starting = this.#start(record, runtime).then(session => {
+      this.#assertCurrent(record, runtime);
       runtime.status = 'connected'; runtime.starting = null; runtime.retry = 0; runtime.lastUsed = Date.now();
-      this.emit('status', { id, status: 'connected', streaming: runtime.streaming });
+      this.#status(record, runtime, { status: 'connected', streaming: runtime.streaming });
       return session;
-    }, error => {
+    }).catch(error => {
       runtime.starting = null;
-      if (runtime.autoReconnect && !runtime.closing) this.#scheduleReconnect(record, runtime, error.message);
-      else { runtime.status = 'error'; runtime.error = error.message; this.emit('status', { id, status: 'error', message: error.message }); }
+      if (!this.#current(record, runtime)) throw error;
+      if (runtime.autoReconnect && !record.spare) this.#scheduleReconnect(record, runtime, error.message);
+      else { runtime.status = 'error'; runtime.error = error.message; this.#status(record, runtime, { status: 'error', message: error.message }); }
       throw error;
     });
     return runtime.starting;
@@ -420,7 +442,7 @@ export class SessionManager extends EventEmitter {
     const delay = Math.min(30000, 1000 * 2 ** runtime.retry);
     runtime.retry += 1;
     runtime.status = 'reconnecting';
-    this.emit('status', { id: record.id, status: 'reconnecting', message: reason, retryIn: delay });
+    this.#status(record, runtime, { status: 'reconnecting', message: reason, retryIn: delay });
     clearTimeout(runtime.retryTimer);
     runtime.retryTimer = setTimeout(() => this.ensureStarted(record.id).catch(() => {}), delay);
   }
@@ -438,6 +460,7 @@ export class SessionManager extends EventEmitter {
     } else {
       const facts = await this.prepare(env.id);
       const egressProxy = await this.#egressFor(facts.unreachable ?? []);
+      this.#assertCurrent(record, runtime);
       // The remote port is fixed per session: the relay's Pi keeps HTTPS_PROXY across reconnects.
       if (egressProxy && !record.egressPort) this.#save(record, { egressPort: 30000 + Math.floor(Math.random() * 30000) });
       const egress = egressProxy && { localPort: egressProxy.port, remotePort: record.egressPort };
@@ -449,22 +472,35 @@ export class SessionManager extends EventEmitter {
     }
     runtime.session = session;
     runtime.questions.clear();
-    session.on('event', event => { runtime.lastSeq = session.lastSeq; this.#onEvent(record, runtime, event); });
-    session.on('ui', request => this.#onUi(record, runtime, request));
-    session.on('gap', () => this.emit('resync', { id: record.id }));
+    const current = () => this.#current(record, runtime) && runtime.session === session;
+    session.on('event', event => { if (current()) { runtime.lastSeq = session.lastSeq; this.#onEvent(record, runtime, event); } });
+    session.on('ui', request => { if (current()) this.#onUi(record, runtime, request); });
+    session.on('gap', () => { if (current() && !record.spare) this.emit('resync', { id: record.id }); });
     session.on('exit', ({ piExited }) => {
       if (this.runtimes.get(record.id) !== runtime || runtime.session !== session || runtime.closing) return;
       runtime.lastSeq = session.lastSeq;
       runtime.streaming = false;
       if (runtime.questions.size) { runtime.questions.clear(); this.emit('questions-cleared', { id: record.id }); }
-      const message = session.stderr.trim().split('\n').slice(-2).join(' ');
-      if (!piExited && runtime.status === 'connected') { this.#scheduleReconnect(record, runtime, message || 'Connection lost'); return; }
+      const message = (session.piExit?.stderr || session.stderr).trim().split('\n').slice(-2).join(' ');
+      if (!piExited && runtime.status === 'connected' && !record.spare) { this.#scheduleReconnect(record, runtime, message || 'Connection lost'); return; }
       if (runtime.starting) return; // the start promise reports this failure
       runtime.status = 'disconnected';
       if (piExited) runtime.lastSeq = null; // a new Pi process numbers its events from scratch
-      this.emit('status', { id: record.id, status: 'disconnected', message: piExited ? 'Pi stopped' + (message ? `: ${message}` : '') : message });
+      this.#status(record, runtime, { status: 'disconnected', message: piExited ? 'Pi stopped' + (message ? `: ${message}` : '') : message });
     });
-    await session.start({ readyTimeout: 90000 });
+    try {
+      await session.start({ readyTimeout: 90000 });
+      this.#assertCurrent(record, runtime);
+      return await this.#configureSession(record, runtime, session);
+    } catch (error) {
+      await session.stop().catch(() => {});
+      if (runtime.session === session) runtime.session = null;
+      if (session.attachInfo?.created) await this.stopRelay(env, record.id).catch(() => {});
+      throw error;
+    }
+  }
+
+  async #configureSession(record, runtime, session) {
     runtime.lastSeq = session.lastSeq;
     const created = !!session.attachInfo?.created;
     runtime.autoReconnect = true;
@@ -479,10 +515,11 @@ export class SessionManager extends EventEmitter {
       // Pipelined: both requests travel together, one network round trip instead of two.
       await Promise.all([
         record.model && (state.model?.provider !== record.model.provider || state.model?.id !== record.model.id)
-          ? session.setModel(record.model.provider, record.model.id).catch(error => this.emit('notice', { id: record.id, level: 'warning', message: error.message })) : null,
+          ? session.setModel(record.model.provider, record.model.id).catch(error => { if (!record.spare && this.#current(record, runtime)) this.emit('notice', { id: record.id, level: 'warning', message: error.message }); }) : null,
         record.thinkingLevel ? session.request('set_thinking_level', { level: record.thinkingLevel }).catch(() => {}) : null,
       ]);
     }
+    this.#assertCurrent(record, runtime);
     this.#save(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId });
     return session;
   }
@@ -514,6 +551,7 @@ export class SessionManager extends EventEmitter {
 
   // Extension dialogs are questions for the person at the desktop (e.g. from the ask_user tool).
   #onUi(record, runtime, request) {
+    if (record.spare && request.method === 'notify') return;
     if (['select', 'input', 'confirm', 'editor'].includes(request.method)) {
       if (runtime.questions.has(request.id)) return; // re-delivered by the relay after a reconnect
       const question = { requestId: request.id, method: request.method, title: request.title, message: request.message, options: request.options, placeholder: request.placeholder, prefill: request.prefill };
@@ -587,12 +625,10 @@ export class SessionManager extends EventEmitter {
   async #interruptForPrompt(id, session, runtime) {
     session.abortBash().catch(() => {});
     session.clearQueue().catch(() => {});
-    const settled = session.nextSettled(6000).catch(() => {});
-    await session.abort().catch(() => {});
-    const finished = await Promise.race([
-      settled.then(() => true),
-      new Promise(resolve => setTimeout(() => resolve(false), 4000)),
-    ]);
+    const settled = session.nextSettled(4000).then(() => true, () => false);
+    // abort's response waits for idle; do not await it ahead of the deadline.
+    session.abort().catch(() => {});
+    const finished = await settled;
     if (finished) return { session, runtime: this.runtimes.get(id) ?? runtime };
     // A tool that ignores the abort signal must not make the new message wait for it.
     const record = this.record(id);
@@ -850,26 +886,34 @@ export class SessionManager extends EventEmitter {
     if (spare && this.runtimes.get(spare.id)?.status === 'connected') {
       this.spares.delete(key);
       clearTimeout(spare.timer);
-      // The spare's runtime and relay session are keyed by its id and hold its record object: keep both.
-      record = Object.assign(spare.record, fields, { piSessionFile: source.piSessionFile });
-      delete record.spare;
+      // Keep the runtime's record object, but do not publish a fork pointing at the source file.
+      record = Object.assign(spare.record, fields, { piSessionFile: source.piSessionFile, spare: true });
       session = this.runtimes.get(record.id).session;
-      const switched = await session.request('switch_session', { sessionPath: source.piSessionFile }, { timeout: 60000 });
-      if (switched?.cancelled) throw new Error('Forking was cancelled.');
     } else {
-      record = { id: randomUUID(), ...fields, piSessionFile: source.piSessionFile };
+      record = { id: randomUUID(), ...fields, piSessionFile: source.piSessionFile, spare: true };
     }
-    this.store.sessions.unshift(record);
-    this.store.saveSessions();
-    this.emit('sessions');
-    session ??= await this.ensureStarted(record.id); // a fresh Pi on the source file
-    await session.request('clone', {}, { timeout: 60000 }); // …that switches to a copy of it
-    const state = await session.state();
-    session.request('set_session_name', { name: record.title }).catch(() => {});
-    if (source.model && (state.model?.provider !== source.model.provider || state.model?.id !== source.model.id)) await session.setModel(source.model.provider, source.model.id).catch(() => {});
-    if (source.thinkingLevel && state.thinkingLevel !== source.thinkingLevel) await session.request('set_thinking_level', { level: source.thinkingLevel }).catch(() => {});
-    this.#save(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId });
-    return this.#view(record);
+    try {
+      if (session) {
+        const switched = await session.request('switch_session', { sessionPath: source.piSessionFile }, { timeout: 60000 });
+        if (switched?.cancelled) throw new Error('Forking was cancelled.');
+      } else session = await this.ensureStarted(record.id, record);
+      const cloned = await session.request('clone', {}, { timeout: 60000 });
+      if (cloned?.cancelled) throw new Error('Forking was cancelled.');
+      const state = await session.state();
+      if (!state.sessionFile || state.sessionFile === source.piSessionFile) throw new Error('Fork did not create a separate session file.');
+      session.request('set_session_name', { name: record.title }).catch(() => {});
+      if (source.model && (state.model?.provider !== source.model.provider || state.model?.id !== source.model.id)) await session.setModel(source.model.provider, source.model.id).catch(() => {});
+      if (source.thinkingLevel && state.thinkingLevel !== source.thinkingLevel) await session.request('set_thinking_level', { level: source.thinkingLevel }).catch(() => {});
+      Object.assign(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId });
+      delete record.spare;
+      this.#add(record);
+      return this.#view(record);
+    } catch (error) {
+      // Never use delete(): until clone succeeds piSessionFile still names the source.
+      await this.close(record.id);
+      await this.stopRelay(env, record.id).catch(() => {});
+      throw error;
+    }
   }
 
   // Edit an earlier user message: branch the conversation just before it and send the new text there.
@@ -906,7 +950,7 @@ export class SessionManager extends EventEmitter {
 
   goal(id) { return this.runtimes.get(id)?.goal ?? null; }
 
-  // Disconnect from a session. Local Pi processes stop; SSH sessions only detach and keep running remotely.
+  // Disconnect from a session. Both local and SSH relays keep Pi running unless explicitly stopped.
   async close(id) {
     const runtime = this.runtimes.get(id);
     if (!runtime) return;
@@ -914,11 +958,16 @@ export class SessionManager extends EventEmitter {
     clearTimeout(runtime.retryTimer);
     this.runtimes.delete(id);
     await runtime.session?.stop().catch(() => {});
+    // prepare() may still be in flight. #assertCurrent prevents a late spawn, and waiting
+    // here lets callers safely stop/delete the relay session after all attaches are done.
+    await runtime.starting?.catch(() => {});
   }
 
   async shutdown() {
     clearInterval(this.sweeper);
-    for (const key of [...this.spares.keys()]) this.#dropSpare(key);
+    const spares = [...this.spares.values()];
+    this.spares.clear();
+    await Promise.all(spares.map(spare => this.#stopSpare(spare)));
     await Promise.all([...this.runtimes.keys()].map(id => this.close(id)));
     await this.egress?.close();
   }

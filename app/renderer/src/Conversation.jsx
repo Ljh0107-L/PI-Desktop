@@ -366,6 +366,7 @@ function WorkingRow({ session, transcript }) {
   const pending = messages.at(-1)?.__optimistic;
   const state = pending ? 'Interrupting…'
     : session?.compacting || transcript.compacting ? 'Compacting conversation'
+    : transcript.retry ? `Reconnecting to model · retry ${transcript.retry.attempt}/${transcript.retry.maxAttempts}`
     : !live || !live.content?.length || lastBlock?.type === 'thinking' ? 'Thinking'
     : lastBlock?.type === 'toolCall' ? 'Working' : 'Writing';
   const elapsed = startedAt ? Math.max(0, Date.now() - startedAt) : 0;
