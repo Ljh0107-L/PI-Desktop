@@ -2,7 +2,15 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## 0.1.22 — Faster setup and trustworthy speed metrics
+## 0.1.23 — Let subagents finish useful work
+
+- **No fixed model-turn cap.** Removed the 12-turn cutoff that could mark a healthy multi-step review or implementation as failed before it returned its report. The displayed turn count is informational only.
+- **Cancellation and deadlines remain.** Tasks still stop on user cancellation, session shutdown, the selected batch deadline or a genuine terminal provider failure. The concurrency limit and bounded transient retry policy are unchanged; completed tools are never replayed just to retry the model.
+- **Regression coverage.** Offline CI covers a 26-turn successful task, a transient failure after 15 tool calls, cancellation after 12 turns, and deadline cancellation of an endless tool loop.
+
+Start a new conversation after updating to load the new subagent implementation. Already failed tasks are not automatically rerun, and live sessions are not force-restarted.
+
+## Included from 0.1.22 — Faster setup and trustworthy speed metrics
 
 - **Less repeated connection work.** Revalidate cached SSH installation paths instead of rediscovering every Node installation and disk after an app restart. Matching installations skip npm/registry probes; changed bridge files upload in one operation. Remote setup overlaps catalog discovery and concurrent starts share one preparation. Provider changes remain serialized, and reconnects retain an existing model-egress tunnel.
 - **Connection phases are visible.** Distinguish remote preparation, starting Pi and restoring session configuration rather than labelling all of them Connecting. Unchanged provider/model/thinking configuration avoids redundant RPCs; changed credentials cannot silently fall back to old keys.
@@ -28,7 +36,7 @@ New trace recording requires a Pi process running the updated extension. Start a
 - **Delegate focused subtasks.** The new `subagent` tool accepts 1–6 named tasks, with at most 3 active subagents per parent session, including overlapping calls. Each uses an independent context, the parent's selected model/reasoning level and its available coding tools.
 - **No extra app windows or Pi subprocesses.** Agents run inside the owning Pi process. Tool calls go through the parent tool pipeline, on the parent's machine and working directory; subagents cannot call the delegation, goal or question tools.
 - **Progress and results in the conversation.** Expand the Subagents tool to inspect each task's state, output, turns and token usage. Delegated writes appear in Outputs, and child-model usage is included without inflating the main model's TPS.
-- **Cancellation and bounded work.** Stop and session shutdown cancel active/queued work. A batch defaults to a five-minute timeout (configurable up to fifteen minutes), each task has a twelve-model-turn limit and at most two retries for transient model failures. Failure/truncation remains visible instead of being reported as success.
+- **Cancellation and bounded work.** Stop and session shutdown cancel active/queued work. A batch defaults to a five-minute timeout (configurable up to fifteen minutes), with at most two retries for transient model failures. The original twelve-model-turn cap was removed in 0.1.23. Failure/truncation remains visible instead of being reported as success.
 - **Prompt support is built in.** The main system prompt explains when to delegate, what context and user constraints to pass, how to avoid overlapping file edits, and how to verify/integrate results. Child prompts preserve parent instructions and include user-context excerpts, while excluding the parent assistant/tool transcript.
 
 Subagents share files and are not isolated worktrees or an OS sandbox. Use focused tasks with disjoint ownership; passing a task to another agent never grants additional permission to test locally, launch GUI apps or publish. Existing Pi processes kept alive across app updates retain their loaded extensions: start a new conversation to use the new tool without interrupting ongoing work.

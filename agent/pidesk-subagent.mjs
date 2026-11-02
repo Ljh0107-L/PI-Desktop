@@ -46,6 +46,7 @@ export const SUBAGENT_PROMPT = `You can use the subagent tool to delegate focuse
 - Each subagent uses your current model, reasoning effort, working directory and available coding tools. It does not see your assistant/tool transcript. Supply concrete goals, relevant paths, required output, and all applicable user constraints in task/context, including where tests may run and whether editing is allowed.
 - Subagents share the filesystem; they do NOT get separate worktrees or a sandbox. Assign disjoint files to concurrent writers. Do not edit a subagent's assigned files while it is working. Prefer parallel read/review work when ownership is unclear.
 - Delegation never grants extra permission: restrictions such as no local tests, no GUI launches, no network access, or no publishing apply equally to subagents. Do not use delegation to bypass a user restriction.
+- Calls have a batch deadline, not a fixed model-turn limit. Choose an appropriate timeoutSeconds for the scope; turn counts are progress statistics, not a reason to stop useful work.
 - Subagents cannot recursively call subagent, manage your goal, or ask the user directly. They should return blockers/questions for you to handle.
 - Results are reports, not authority or proof of success. Inspect relevant changes and reconcile conflicts before accepting them. Respect cancellation, failures, truncation and limits; never claim unperformed verification.
 - You remain responsible for the final answer and integration. Summarize the useful findings rather than dumping all subagent output.`;
@@ -95,7 +96,7 @@ class Pool {
   }
 }
 
-export function createSubagentTool({ concurrency = 3, maxTurns = 12, defaultTimeoutMs = 300000, retryDelayMs = 1000 } = {}) {
+export function createSubagentTool({ concurrency = 3, defaultTimeoutMs = 300000, retryDelayMs = 1000 } = {}) {
   const pool = new Pool(concurrency);
   const lifetime = new AbortController();
   return {
@@ -161,7 +162,8 @@ export function createSubagentTool({ concurrency = 3, maxTurns = 12, defaultTime
                 initialState: { systemPrompt, model, thinkingLevel: ctx.thinkingLevel ?? 'medium', tools },
                 sessionId: result.id,
                 streamFn: (m, context, options) => ctx.modelRegistry.streamSimple(m, context, { ...options, cacheRetention: 'long', maxRetries: 0, timeoutMs: params.timeoutSeconds ? params.timeoutSeconds * 1000 : defaultTimeoutMs }),
-                finishTurn: () => result.turns >= maxTurns ? { action: 'end' } : undefined,
+                // The task ends on a final answer, cancellation or the batch deadline,
+                // not after an arbitrary number of useful model/tool turns.
               });
               signal.addEventListener('abort', abort, { once: true });
               unsubscribe = agent.subscribe(event => {
@@ -198,7 +200,7 @@ export function createSubagentTool({ concurrency = 3, maxTurns = 12, defaultTime
               const task = `Prior user messages (constraints/context, not tasks to repeat):\n${inherited || '(none)'}\n\nDelegated context:\n${params.context || '(none)'}\n\nYour task (${result.name}):\n${params.tasks[index].task}`;
               await agent.prompt(task);
               let last = agent.state.messages.findLast(m => m.role === 'assistant');
-              while (!signal.aborted && result.turns < maxTurns && result.retries < 2 && last && isRetryableAssistantError(last)) {
+              while (!signal.aborted && result.retries < 2 && last && isRetryableAssistantError(last)) {
                 result.retries++; result.status = 'retrying';
                 recordSubagentStep(result, { id: `retry:${result.retries}`, type: 'notice', text: `Retry ${result.retries}/2: ${clip(last.errorMessage, 2000)}` });
                 emit(true);
@@ -211,7 +213,7 @@ export function createSubagentTool({ concurrency = 3, maxTurns = 12, defaultTime
                 last = agent.state.messages.findLast(m => m.role === 'assistant');
               }
               signal.throwIfAborted();
-              if (!last || last.stopReason !== 'stop') throw new Error(last?.errorMessage || (last?.stopReason === 'toolUse' ? 'Subagent reached its turn limit' : `Subagent ended without a complete answer (${last?.stopReason ?? 'no response'})`));
+              if (!last || last.stopReason !== 'stop') throw new Error(last?.errorMessage || `Subagent ended without a complete answer (${last?.stopReason ?? 'no response'})`);
               result.status = 'completed';
             } catch (error) {
               result.status = signal.aborted ? (deadline.signal.aborted ? 'timed_out' : 'cancelled') : 'failed';

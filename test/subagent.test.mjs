@@ -157,12 +157,47 @@ test('authentication failures and output limits remain failures, not successful 
   }
 });
 
-test('turn limit stops an endless tool loop', async () => {
-  const c = context(async () => toolReply());
-  const result = await run(createSubagentTool({ maxTurns: 3 }), c);
-  assert.equal(c.requests.length, 3);
+test('useful work continues beyond twelve turns until the final report', async () => {
+  const c = context(async (_request, n) => n <= 25 ? toolReply() : reply('Finished all 25 steps'));
+  const result = await run(createSubagentTool(), c);
+  assert.equal(c.requests.length, 26);
+  assert.equal(c.toolCalls.length, 25);
+  assert.equal(result.isError, false);
+  const child = result.details.results[0];
+  assert.equal(child.status, 'completed');
+  assert.equal(child.turns, 26, 'turn count remains a statistic');
+  assert.equal(child.output, 'Finished all 25 steps');
+  assert.equal(child.usage.totalTokens, 26 * usage.totalTokens);
+  assert.equal(child.steps.filter(s => s.type === 'tool' && s.status === 'completed').length, 25);
+});
+
+test('a late transient failure still retries without replaying completed tools', async () => {
+  const c = context(async (_request, n) => n <= 15 ? toolReply() : n === 16
+    ? reply('', { stopReason: 'error', errorMessage: 'terminated' }) : reply('Recovered after long task'));
+  const result = await run(createSubagentTool({ retryDelayMs: 1 }), c);
+  assert.equal(result.isError, false);
+  assert.equal(c.requests.length, 17);
+  assert.equal(c.toolCalls.length, 15);
+  assert.equal(result.details.results[0].retries, 1);
+});
+
+test('removing the turn cap does not make an endless loop ignore the batch deadline', async () => {
+  const c = context(async request => { await sleep(1, undefined, { signal: request.options.signal }); return toolReply(); });
+  const result = await run(createSubagentTool({ defaultTimeoutMs: 30 }), c);
+  assert.ok(c.requests.length > 0);
   assert.equal(result.isError, true);
-  assert.match(result.details.results[0].error, /turn limit/);
+  assert.equal(result.details.results[0].status, 'timed_out');
+  assert.match(result.details.results[0].error, /timed out/);
+});
+
+test('user stop still cancels a task after more than twelve turns', async () => {
+  const parent = new AbortController();
+  const c = context(async (_request, n) => { if (n === 20) parent.abort(new Error('User stopped long task')); return toolReply(); });
+  const result = await run(createSubagentTool(), c, tasks(1), parent.signal);
+  assert.equal(c.requests.length, 20);
+  assert.equal(result.isError, true);
+  assert.equal(result.details.results[0].status, 'cancelled');
+  assert.match(result.details.results[0].error, /User stopped long task/);
 });
 
 for (const reason of ['parent', 'shutdown', 'timeout']) test(`${reason} cancels active and queued subagents`, async () => {

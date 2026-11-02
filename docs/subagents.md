@@ -26,7 +26,7 @@ For implementation, assign disjoint files and explicit constraints:
 - Each task gets the current model and thinking level, parent system instructions, bounded excerpts of user messages, explicit task/context, and its own new conversation. Parent assistant/tool history is not copied. Include all relevant constraints explicitly: very long user history is excerpted.
 - Coding tools are forwarded through the parent `ctx.executeTool()` pipeline, retaining validation, tool hooks and existing tool permissions. Only available `read`, `write`, `edit`, `bash`, `grep`, `find`, and `ls` tools can be exposed. This does not activate tools disabled in the parent.
 - Subagents cannot call `subagent`, `ask_user`, or goal tools. A blocker/question goes back to the parent.
-- Default batch deadline is 300 seconds, including queued tasks; callers can choose 1–900 seconds. Each task is limited to 12 model turns and two transient model retries. Completed tools are not replayed to retry a failed model response.
+- Default batch deadline is 300 seconds, including queued tasks; callers can choose 1–900 seconds. Since 0.1.23 there is **no fixed model-turn limit**: useful tool/model work continues until a final answer, user stop, session shutdown or the batch deadline. Turns are displayed only as progress statistics. Each task still has at most two transient model retries; completed tools are not replayed to retry a failed model response.
 - Final output per child is bounded to about 8 KB and marked when truncated. Task failures, cancellation, timeouts and non-complete model responses remain explicit.
 
 ## Desktop behavior
@@ -53,4 +53,4 @@ There is no separate durable child-session service in this version. If the paren
 
 ## CI coverage
 
-`test/subagent.test.mjs` exercises isolated contexts, inherited constraints, concurrent batches, parent tool forwarding, retry without duplicate tool execution, limits, cancellation, usage and output persistence. Protocol tests delegate with real Pi locally and through SSH; Electron E2E covers uploaded SSH extension dependencies, result cards, Outputs and the absence of extra windows/conversations. These suites run in GitHub CI; no local test application is needed.
+`test/subagent.test.mjs` exercises isolated contexts, inherited constraints, concurrent batches, parent tool forwarding, successful work beyond 12 turns, late retry without duplicate tool execution, deadline/user cancellation, usage and output persistence. Protocol tests delegate with real Pi locally and through SSH; Electron E2E covers uploaded SSH extension dependencies, result cards, Outputs and the absence of extra windows/conversations. These suites run in GitHub CI; no local test application is needed.
