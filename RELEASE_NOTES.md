@@ -2,7 +2,13 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## 0.1.18 — Updates without GitHub API quota
+## 0.1.19 — One No folder sidebar group per machine
+
+- **No folder conversations stay together.** All projectless conversations on the same computer or SSH environment now appear under one No folder group, even when their working directories differ. Previously each generated directory produced another identically named group.
+- **No conversation or file migration.** Each chat keeps its own history, workspace and outputs. Existing projectless chats and forks are grouped immediately; ordinary projects remain grouped by directory, including real folders named “No folder”.
+- **Stable grouping and regression coverage.** Collapsing the group hides all its chats together; its identity stays stable when the newest chat changes. Added unit and Electron UI tests covering multiple chats, reload, archive, separate environments and independent histories/directories.
+
+## Included from 0.1.18 — Updates without GitHub API quota
 
 - **No more shared-IP API quota for updates.** Checks now fetch the public `releases/latest/download/latest-mac.yml` asset directly. No GitHub token, REST API call or quota-dependent fallback is used.
 - **Version-pinned, verified downloads.** The ZIP URL is pinned to the version in that manifest, preventing a new release appearing mid-download from mixing versions. SHA-512 verification is retained, with strict manifest, filename and size validation.

@@ -136,9 +136,35 @@ try {
   const nfPath = /(\/\S*\/Pi\/\d{4}-\d{2}-\d{2}\/bash-pwd)\b/.exec(nfReply)?.[1];
   check('a No-folder session gets its own directory named from its first prompt', !!nfPath && existsSync(join(nfPath, 'work')) && existsSync(join(nfPath, 'outputs')), nfPath ?? nfReply);
   check('the model is told how to use a No-folder directory (projectless prompt section)', mock.requests.some(r => r.system?.includes('started without a project folder')));
-  await page.locator('.session-row', { hasText: '[[bash:pwd]]' }).click({ button: 'right' });
-  await page.click('.popover .menu-item:has-text("Archive")');
-  await page.locator('.session-row', { hasText: '[[bash:pwd]]' }).waitFor({ state: 'detached' });
+  // Two projectless conversations keep their workspaces but share one sidebar group.
+  const firstNf = (await page.evaluate(() => window.pidesk.invoke('listSessions'))).find(s => s.noFolder);
+  await page.locator('.send-button.stop').waitFor({ state: 'detached', timeout: 15000 });
+  await page.click('.nav-item.new');
+  await send('second projectless conversation');
+  await waitText('.markdown', 'echo: second projectless conversation');
+  await page.locator('.send-button.stop').waitFor({ state: 'detached', timeout: 15000 });
+  const nfSessions = (await page.evaluate(() => window.pidesk.invoke('listSessions'))).filter(s => s.noFolder);
+  const noFolderGroup = () => page.locator('.session-group').filter({ has: page.locator('.group-name', { hasText: /^No folder$/ }) });
+  check('No folder conversations share one sidebar group', await noFolderGroup().count() === 1 && await noFolderGroup().locator('.session-row').count() === 2);
+  check('grouping preserves independent projectless directories and session files', nfSessions.length === 2 && new Set(nfSessions.map(s => s.cwd)).size === 2
+    && new Set(nfSessions.map(s => s.piSessionFile)).size === 2 && nfSessions.find(s => s.id === firstNf.id)?.cwd === firstNf.cwd);
+  await S('03d-one-no-folder-group');
+  await noFolderGroup().locator('.group-head').click();
+  check('one No folder disclosure collapses all its conversations', await noFolderGroup().locator('.session-row').count() === 0);
+  await noFolderGroup().locator('.group-head').click();
+  await page.locator('.session-row', { hasText: '[[bash:pwd]]' }).click();
+  await waitText('.markdown', 'Tool result');
+  check('grouped conversations retain separate histories', !(await page.locator('.markdown', { hasText: 'second projectless conversation' }).count()));
+  await page.reload();
+  await page.locator('.app:not(.loading)').waitFor();
+  await noFolderGroup().locator('.session-row').nth(1).waitFor();
+  check('existing No folder records remain grouped after reloading', await noFolderGroup().count() === 1 && await noFolderGroup().locator('.session-row').count() === 2);
+  for (const title of ['[[bash:pwd]]', 'second projectless conversation']) {
+    await page.locator('.session-row', { hasText: title }).click({ button: 'right' });
+    await page.click('.popover .menu-item:has-text("Archive")');
+    await page.locator('.session-row', { hasText: title }).waitFor({ state: 'detached' });
+  }
+  check('archiving the last No folder conversation removes its empty group', await noFolderGroup().count() === 0);
 
   // ---- local session
   await page.click('.folder-trigger');

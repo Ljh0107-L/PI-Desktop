@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { MenuItem, Popover, Spinner, useResizable } from './ui.jsx';
+import { groupSessions } from './session-groups.js';
 import { api, askConfirm, deleteSession, forkSession, goBack, goForward, newSession, notify, openSession, openSettings, toggleSidebar, useStore, warmSession } from './store.js';
 
 export function SessionMenuItems({ session, close, onRename }) {
@@ -54,7 +55,7 @@ function Group({ group, activeId, view }) {
   const [open, setOpen] = useState(true);
   return (
     <section className="session-group">
-      <button className="group-head" onClick={() => setOpen(o => !o)} title={group.cwd}>
+      <button className="group-head" onClick={() => setOpen(o => !o)} aria-expanded={open} title={group.noFolder ? 'Conversations without a project folder' : group.cwd}>
         <span className="group-name">{group.project}</span>
         <span className="group-sep">·</span>
         <span className="group-env">{group.env}</span>
@@ -73,15 +74,7 @@ export function Sidebar() {
   const view = useStore(s => s.view);
   const canBack = useStore(s => s.history.length > 0);
   const canForward = useStore(s => s.future.length > 0);
-  const groups = useMemo(() => {
-    const map = new Map();
-    for (const s of sessions) {
-      const key = `${s.environmentId}|${s.cwd}`;
-      if (!map.has(key)) map.set(key, { key, cwd: s.cwd, project: s.project, env: s.environmentLabel, remote: s.environmentId !== 'local', items: [] });
-      map.get(key).items.push(s);
-    }
-    return [...map.values()];
-  }, [sessions]);
+  const groups = useMemo(() => groupSessions(sessions), [sessions]);
   const [sidebarWidth, sidebarHandle] = useResizable('sidebar', 284, 220, 480, 'right');
   return (
     <aside className="sidebar" style={{ width: sidebarWidth }}>
