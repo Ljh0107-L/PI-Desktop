@@ -242,20 +242,21 @@ for (const timeout of [undefined, 7, 600, 0, -1]) test(`bash omitted default ver
   assert.equal(declared.additionalProperties, false);
 });
 
-test('explicit invalid timeout null is rejected by the tool, not silently defaulted', async () => {
+test('explicit invalid timeout null is blocked before normalized omission can select a default', async () => {
   const f = fixture(async (_request, n) => n === 1 ? reply('toolUse', [call('bash', { command: 'test', timeout: null })]) : reply());
-  let receivedTimeout;
-  f.ctx.executeTool = async (_name, args) => {
-    receivedTimeout = args.timeout;
-    // Pi may coerce null to 0 while validating numeric arguments. The actual
-    // bash implementation rejects non-positive values before spawning a shell.
-    if (!Number.isFinite(args.timeout) || args.timeout <= 0) throw new Error('Invalid timeout: must be a finite positive number of seconds');
-    assert.fail('An invalid explicit timeout must never execute a command');
-  };
+  let invoked = false;
+  f.ctx.executeTool = async () => { invoked = true; return structuredClone(ok); };
   await run(f);
-  assert.notEqual(receivedTimeout, 120, 'do not replace invalid explicit input with the default');
-  assert.equal(f.executions.length, 0);
+  assert.equal(invoked, false, 'an invalid explicit null must not become an omitted/defaulted argument');
   assert.ok(f.requests[1].transcript.messages.some(m => m.role === 'toolResult' && m.isError && /Invalid timeout/.test(text(m))));
+});
+
+test('replacement bash schemas that explicitly accept null keep their own timeout contract', async () => {
+  const f = fixture(async (_request, n) => n === 1 ? reply('toolUse', [call('bash', { command: 'test', timeout: null })]) : reply());
+  f.ctx.tools[2].parameters = bashSchema(Type.Optional(Type.Union([Type.Number(), Type.Null()], { description: 'Timeout in seconds or null for this replacement' })));
+  await run(f);
+  assert.equal(f.executions.length, 1);
+  assert.equal(f.executions[0].args.timeout, null);
 });
 
 const incompatible = [
