@@ -356,7 +356,10 @@ function AskBlock({ call, tool }) {
 function WorkingRow({ session, transcript }) {
   const [, tick] = useState(0);
   useEffect(() => { const t = setInterval(() => tick(n => n + 1), 1000); return () => clearInterval(t); }, []);
-  if (session?.status === 'connecting') return <div className="working"><span className="working-dot" /><span className="shimmer">Connecting…</span></div>;
+  if (session?.status === 'connecting') {
+    const phase = { preparing: 'Preparing remote environment…', starting: 'Starting Pi…', configuring: 'Restoring session…' }[session.phase] ?? 'Connecting…';
+    return <div className="working"><span className="working-dot" /><span className="shimmer">{phase}</span></div>;
+  }
   const messages = transcript.messages;
   let from = messages.length; while (from > 0 && messages[from - 1].role !== 'user') from--;
   const turn = messages.slice(from);

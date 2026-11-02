@@ -15,6 +15,23 @@ concurrency:
 
 # Two jobs in parallel: the UI suite alone on one runner, the headless suites on another.
 jobs:
+  bridge:
+    name: Cursor bridge offline regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    strategy:
+      matrix:
+        python: ['3.9', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - run: python -m pip install -r integrations/cursor-quota-bridge/requirements.txt
+      - name: Offline protocol and usage fixtures (no model requests)
+        working-directory: integrations/cursor-quota-bridge
+        run: python -m unittest discover -s tests -p 'test_bridge_unit.py' -v
+
   ui:
     name: End-to-end UI
     runs-on: macos-latest

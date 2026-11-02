@@ -177,6 +177,11 @@ try {
   await page.locator('.usage-table').waitFor({ timeout: 15000 });
   const rightTitles = await page.locator('.right-panel .panel-card-head').allInnerTexts();
   check('right panel retains Context/Usage without Environment or Outputs', rightTitles.some(t => t.includes('Context')) && rightTitles.some(t => t.includes('Usage')) && !rightTitles.some(t => /Environment|Outputs/.test(t)));
+  check('Subagents uses a plain section title without icon or empty helper text',
+    await page.locator('.subagent-list-head').innerText() === 'Subagents' &&
+    await page.locator('.subagent-list-head svg').count() === 0 &&
+    await page.getByText('Delegated tasks will appear here.').count() === 0);
+  await S('04-plain-subagent-header');
   await send('recover this reply [[drop-once]]');
   await page.locator('.working', { hasText: 'Reconnecting to model' }).waitFor({ timeout: 15000 });
   check('a broken model stream shows a bounded retry, not a final red error', await page.locator('.block-error', { hasText: 'terminated' }).count() === 0);
@@ -187,6 +192,7 @@ try {
   await page.locator('.usage-table').waitFor({ timeout: 15000 });
   const usageText = await page.locator('.usage').innerText();
   check('right panel Usage card shows tok/s and input / cached / output', /tok\/s/.test(usageText) && /Input/.test(usageText) && /Cached/.test(usageText) && /Output/.test(usageText), usageText.replace(/\s+/g, ' '));
+  check('TPS identifies its denominator', /^(Stream|Request) avg$/.test(await page.locator('.usage-speed-kind').innerText()));
   check('nothing under the composer but model controls', !(await page.locator('.session-meter').count()));
   // a model that reasons privately: no fake speed, a "Thought for" row with its reasoning tokens
   await waitNew('.markdown', 'echo:', () => send('[[hidden-think]] ponder this'));

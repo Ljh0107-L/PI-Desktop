@@ -73,11 +73,12 @@ const SWEEP_MS = 60 * 1000;
 export class SessionManager extends EventEmitter {
   runtimes = new Map();   // session id -> { session, status, streaming, questions: Map, starting, lastSeq }
   prepared = new Map();   // environment id -> Promise<remote facts>
+  preparing = new Map();  // in-flight setup; force/provider changes must not race deployments
   catalogCache = null;
   providersVersion = 0;   // bumped whenever providers/keys change in Settings
   egress = null;
 
-  constructor({ store, environments, local, piVersion, piPackageDir, bridgePath, relayPath, cacheDir }) {
+  constructor({ store, environments, local, piVersion, piPackageDir, bridgePath, relayPath, cacheDir, remoteSetup = prepareRemote }) {
     super();
     this.focused = null; // the session on screen: never stopped by the sweep
     this.sweeper = setInterval(() => this.sweep().catch(() => {}), SWEEP_MS);
@@ -90,6 +91,7 @@ export class SessionManager extends EventEmitter {
     this.relayPath = relayPath;
     this.cacheDir = cacheDir;
     this.piPackageDir = piPackageDir;
+    this.remoteSetup = remoteSetup;
   }
 
   env(id) {
@@ -145,15 +147,27 @@ export class SessionManager extends EventEmitter {
   // still hold what they started with, so send them the current providers.
   providersChanged() {
     this.providersVersion += 1;
+    this.invalidateCatalog();
+    this.prepared.clear();
     for (const key of [...this.spares.keys()]) this.#dropSpare(key);
     for (const runtime of this.runtimes.values()) if (runtime.status === 'connected') this.#syncProviders(runtime).catch(() => {});
   }
   async #syncProviders(runtime) {
-    if (!runtime.session || runtime.providersVersion === this.providersVersion) return;
-    const version = this.providersVersion;
-    const payload = Buffer.from(JSON.stringify(this.bootProviders())).toString('base64');
-    await runtime.session.prompt(`/pidesk-providers ${payload}`);
-    runtime.providersVersion = version;
+    const session = runtime?.session;
+    if (!session) return;
+    while (runtime.session === session && runtime.providersVersion !== this.providersVersion) {
+      // Settings updates and the first prompt can arrive together. Send one update at a time,
+      // then re-check the version so an older acknowledgement cannot mark newer keys as synced.
+      if (runtime.providerSync?.session === session) { await runtime.providerSync.promise; continue; }
+      const version = this.providersVersion;
+      const payload = Buffer.from(JSON.stringify(this.bootProviders())).toString('base64');
+      const sync = { session };
+      sync.promise = session.prompt(`/pidesk-providers ${payload}`).then(() => {
+        if (runtime.session === session) runtime.providersVersion = version;
+      }).finally(() => { if (runtime.providerSync === sync) runtime.providerSync = null; });
+      runtime.providerSync = sync;
+      await sync.promise;
+    }
   }
 
   // Models Pi can use with the configured providers, from a short-lived local Pi process.
@@ -172,8 +186,9 @@ export class SessionManager extends EventEmitter {
           .map(m => ({ provider: m.provider, id: m.id, name: m.name ?? m.id, reasoning: !!m.reasoning, thinkingLevelMap: m.thinkingLevelMap, contextWindow: m.contextWindow, maxTokens: m.maxTokens, baseUrl: m.baseUrl, input: m.input }));
       } finally { await session.stop(); }
     })();
-    this.catalogCache.catch(() => { this.catalogCache = null; });
-    return this.catalogCache;
+    const cached = this.catalogCache;
+    cached.catch(() => { if (this.catalogCache === cached) this.catalogCache = null; });
+    return cached;
   }
 
   // Every model Pi knows for one built-in provider (used by Settings to pick models).
@@ -195,27 +210,47 @@ export class SessionManager extends EventEmitter {
   prepare(envId, { force = false } = {}) {
     const env = this.env(envId);
     if (env.kind === 'local') return Promise.resolve({ ready: true });
+    // All callers, including forced refreshes, share one deployment. Its loop refreshes
+    // reachability after provider edits before *any* waiter can use stale setup facts.
+    const active = this.preparing.get(envId);
+    if (active) return active.promise;
     if (!force && this.prepared.has(envId)) return this.prepared.get(envId);
     const promise = (async () => {
-      const providerHosts = await this.providerHosts();
-      const saved = this.store.settings.environments[envId] ?? {};
-      const facts = await prepareRemote(env, {
-        piVersion: this.piVersion, piPackageDir: this.piPackageDir, bridgePath: this.bridgePath, relayPath: this.relayPath, providerHosts,
-        root: saved.root, cacheDir: this.cacheDir,
-        onProgress: message => this.emit('environment', { id: envId, status: 'preparing', message }),
-      });
-      // Remember where Pi lives on this host so sessions always find the same install.
-      if (saved.root !== facts.root || !saved.added) { this.store.settings.environments[envId] = { ...saved, added: true, root: facts.root }; this.store.saveSettings(); this.emit('environments-changed'); }
-      return facts;
+      while (true) {
+        const version = this.providersVersion;
+        const providerHosts = Promise.resolve(this.providerHosts());
+        // Setup may fail before it awaits catalog discovery. Observe both branches immediately,
+        // but don't release the deployment lock until remote setup itself has settled.
+        providerHosts.catch(() => {});
+        const saved = this.store.settings.environments[envId] ?? {};
+        const facts = await this.remoteSetup(env, {
+          piVersion: this.piVersion, piPackageDir: this.piPackageDir, bridgePath: this.bridgePath, relayPath: this.relayPath, providerHosts,
+          root: saved.root, cacheDir: this.cacheDir,
+          onProgress: message => this.emit('environment', { id: envId, status: 'preparing', message }),
+        });
+        await providerHosts;
+        // Merge the latest settings, not a snapshot from before a potentially long install.
+        const current = this.store.settings.environments[envId] ?? {};
+        if (current.root !== facts.root || !current.added) { this.store.settings.environments[envId] = { ...current, added: true, root: facts.root }; this.store.saveSettings(); this.emit('environments-changed'); }
+        if (version === this.providersVersion) { this.prepared.set(envId, promise); return facts; }
+      }
     })();
     this.prepared.set(envId, promise);
-    promise.then(facts => this.emit('environment', { id: envId, status: 'ready', facts }),
-      error => { this.prepared.delete(envId); this.emit('environment', { id: envId, status: 'error', message: error.message }); });
+    const activeSetup = { promise };
+    this.preparing.set(envId, activeSetup);
+    promise.then(facts => {
+      if (this.preparing.get(envId) === activeSetup) this.preparing.delete(envId);
+      this.emit('environment', { id: envId, status: 'ready', facts });
+    }, error => {
+      if (this.preparing.get(envId) === activeSetup) this.preparing.delete(envId);
+      if (this.prepared.get(envId) === promise) this.prepared.delete(envId);
+      this.emit('environment', { id: envId, status: 'error', message: error.message });
+    }).catch(() => {}); // an event listener must not create an unobserved derived rejection
     return promise;
   }
 
-  async #egressFor(hosts) {
-    if (!hosts.length) return null;
+  async #egressFor(hosts, { required = false } = {}) {
+    if (!hosts.length && !required) return null;
     if (!this.egress) {
       this.egressStarting ??= startEgressProxy({ allow: [] }).finally(() => { this.egressStarting = null; });
       this.egress = await this.egressStarting;
@@ -239,7 +274,7 @@ export class SessionManager extends EventEmitter {
   }
   #view(record) {
     const runtime = this.runtimes.get(record.id);
-    return { ...record, status: runtime?.status ?? 'idle', streaming: !!runtime?.streaming, pendingQuestions: runtime ? [...runtime.questions.values()] : [] };
+    return { ...record, status: runtime?.status ?? 'idle', phase: runtime?.phase ?? null, streaming: !!runtime?.streaming, pendingQuestions: runtime ? [...runtime.questions.values()] : [] };
   }
   record(id) {
     const record = this.store.sessions.find(s => s.id === id);
@@ -402,6 +437,7 @@ export class SessionManager extends EventEmitter {
     if (!this.#current(record, runtime)) throw Object.assign(new Error('Session start cancelled'), { code: 'SESSION_CANCELLED' });
   }
   #status(record, runtime, patch) {
+    if (Object.hasOwn(patch, 'phase')) runtime.phase = patch.phase;
     // Pre-warming is an implementation detail, not a visible conversation. In particular,
     // changing folders deliberately stops its connection and must not show an error toast.
     if (!record.spare && this.#current(record, runtime)) this.emit('status', { id: record.id, ...patch });
@@ -421,17 +457,19 @@ export class SessionManager extends EventEmitter {
     clearTimeout(runtime.retryTimer);
     runtime.closing = false;
     runtime.status = runtime.autoReconnect ? 'reconnecting' : 'connecting';
-    this.#status(record, runtime, { status: runtime.status });
+    this.#status(record, runtime, { status: runtime.status, phase: 'connecting' });
     runtime.starting = this.#start(record, runtime).then(session => {
       this.#assertCurrent(record, runtime);
       runtime.status = 'connected'; runtime.starting = null; runtime.retry = 0; runtime.lastUsed = Date.now();
-      this.#status(record, runtime, { status: 'connected', streaming: runtime.streaming });
+      this.#status(record, runtime, { status: 'connected', phase: null, streaming: runtime.streaming });
+      // A Settings edit can land after configuration's last await but before this callback.
+      this.#syncProviders(runtime).catch(() => {});
       return session;
     }).catch(error => {
       runtime.starting = null;
       if (!this.#current(record, runtime)) throw error;
       if (runtime.autoReconnect && !record.spare) this.#scheduleReconnect(record, runtime, error.message);
-      else { runtime.status = 'error'; runtime.error = error.message; this.#status(record, runtime, { status: 'error', message: error.message }); }
+      else { runtime.status = 'error'; runtime.error = error.message; this.#status(record, runtime, { status: 'error', phase: null, message: error.message }); }
       throw error;
     });
     return runtime.starting;
@@ -442,13 +480,14 @@ export class SessionManager extends EventEmitter {
     const delay = Math.min(30000, 1000 * 2 ** runtime.retry);
     runtime.retry += 1;
     runtime.status = 'reconnecting';
-    this.#status(record, runtime, { status: 'reconnecting', message: reason, retryIn: delay });
+    this.#status(record, runtime, { status: 'reconnecting', phase: 'connecting', message: reason, retryIn: delay });
     clearTimeout(runtime.retryTimer);
     runtime.retryTimer = setTimeout(() => this.ensureStarted(record.id).catch(() => {}), delay);
   }
 
   async #start(record, runtime) {
     const env = this.env(record.environmentId);
+    const bootVersion = this.providersVersion;
     const boot = { providers: this.bootProviders() };
     const piArgs = record.piSessionFile ? ['--session', record.piSessionFile] : [];
     let session;
@@ -458,8 +497,12 @@ export class SessionManager extends EventEmitter {
       const transport = localRelayTransport({ node: this.local.node, relayPath: this.relayPath, runDir: this.local.runDir, extraEnv: this.local.extraEnv });
       session = new PiSession({ id: record.id, boot, transport, relay: { sinceSeq: runtime.lastSeq, spawn } });
     } else {
+      this.#status(record, runtime, { status: runtime.status, phase: 'preparing' });
       const facts = await this.prepare(env.id);
-      const egressProxy = await this.#egressFor(facts.unreachable ?? []);
+      // A running relay Pi retains its proxy environment. Even if a fresh probe now says the
+      // endpoint is reachable, reconnect the old fixed forward rather than strand that Pi.
+      const hosts = record.egressPort ? [...new Set([...(facts.unreachable ?? []), ...await this.providerHosts()])] : facts.unreachable ?? [];
+      const egressProxy = await this.#egressFor(hosts, { required: !!record.egressPort });
       this.#assertCurrent(record, runtime);
       // The remote port is fixed per session: the relay's Pi keeps HTTPS_PROXY across reconnects.
       if (egressProxy && !record.egressPort) this.#save(record, { egressPort: 30000 + Math.floor(Math.random() * 30000) });
@@ -473,6 +516,9 @@ export class SessionManager extends EventEmitter {
     runtime.session = session;
     runtime.questions.clear();
     const current = () => this.#current(record, runtime) && runtime.session === session;
+    session.on('attached', info => {
+      if (current()) this.#status(record, runtime, { status: runtime.status, phase: info.created ? 'starting' : 'connecting' });
+    });
     session.on('event', event => { if (current()) { runtime.lastSeq = session.lastSeq; this.#onEvent(record, runtime, event); } });
     session.on('ui', request => { if (current()) this.#onUi(record, runtime, request); });
     session.on('gap', () => { if (current() && !record.spare) this.emit('resync', { id: record.id }); });
@@ -486,12 +532,14 @@ export class SessionManager extends EventEmitter {
       if (runtime.starting) return; // the start promise reports this failure
       runtime.status = 'disconnected';
       if (piExited) runtime.lastSeq = null; // a new Pi process numbers its events from scratch
-      this.#status(record, runtime, { status: 'disconnected', message: piExited ? 'Pi stopped' + (message ? `: ${message}` : '') : message });
+      this.#status(record, runtime, { status: 'disconnected', phase: null, message: piExited ? 'Pi stopped' + (message ? `: ${message}` : '') : message });
     });
     try {
+      this.#status(record, runtime, { status: runtime.status, phase: 'connecting' });
       await session.start({ readyTimeout: 90000 });
       this.#assertCurrent(record, runtime);
-      return await this.#configureSession(record, runtime, session);
+      this.#status(record, runtime, { status: runtime.status, phase: 'configuring' });
+      return await this.#configureSession(record, runtime, session, bootVersion);
     } catch (error) {
       await session.stop().catch(() => {});
       if (runtime.session === session) runtime.session = null;
@@ -500,24 +548,37 @@ export class SessionManager extends EventEmitter {
     }
   }
 
-  async #configureSession(record, runtime, session) {
+  async #configureSession(record, runtime, session, bootVersion) {
     runtime.lastSeq = session.lastSeq;
     const created = !!session.attachInfo?.created;
     runtime.autoReconnect = true;
     const state = session.initialState ?? await session.state();
     runtime.streaming = !!state.isStreaming;
-    runtime.providersVersion = created ? this.providersVersion : -1;
+    const info = session.attachInfo;
+    const processKey = info?.pid && info?.startedAt ? `${info.pid}:${info.startedAt}` : null;
+    const sameProcess = processKey && runtime.providerProcess === processKey;
+    // Only skip registration when this exact relay process already acknowledged these providers.
+    // App restarts, missing/changed process identity, and changed keys still force a sync.
+    // A previous transport may still have a provider command in flight on this same Pi.
+    // Drain it before sending newer credentials; acknowledgements on an old transport
+    // intentionally do not advance this runtime's version.
+    if (sameProcess && runtime.providerSync) {
+      await runtime.providerSync.promise.catch(() => {});
+      runtime.providersVersion = -1;
+    }
+    if (created) runtime.providersVersion = bootVersion;
+    else if (!sameProcess) runtime.providersVersion = -1;
+    runtime.providerProcess = processKey;
+    await this.#syncProviders(runtime);
     if (!created) {
-      await this.#syncProviders(runtime).catch(() => {});
       session.prompt('/goal').catch(() => {}); // re-publish the goal of a Pi that kept running without us
     }
     if (created) {
-      // Pipelined: both requests travel together, one network round trip instead of two.
-      await Promise.all([
-        record.model && (state.model?.provider !== record.model.provider || state.model?.id !== record.model.id)
-          ? session.setModel(record.model.provider, record.model.id).catch(error => { if (!record.spare && this.#current(record, runtime)) this.emit('notice', { id: record.id, level: 'warning', message: error.message }); }) : null,
-        record.thinkingLevel ? session.request('set_thinking_level', { level: record.thinkingLevel }).catch(() => {}) : null,
-      ]);
+      // RPC commands are asynchronous: thinking must follow a model switch, otherwise
+      // Pi can clamp it against the old model. Matching state needs no mutation at all.
+      const modelChanged = record.model && (state.model?.provider !== record.model.provider || state.model?.id !== record.model.id);
+      if (modelChanged) await session.setModel(record.model.provider, record.model.id).catch(error => { if (!record.spare && this.#current(record, runtime)) this.emit('notice', { id: record.id, level: 'warning', message: error.message }); });
+      if (record.thinkingLevel && (modelChanged || state.thinkingLevel !== record.thinkingLevel)) await session.request('set_thinking_level', { level: record.thinkingLevel }).catch(() => {});
     }
     this.#assertCurrent(record, runtime);
     this.#save(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId });
@@ -586,7 +647,7 @@ export class SessionManager extends EventEmitter {
       ({ session, runtime } = await this.#interruptForPrompt(id, session, runtime));
       interrupted = true;
     }
-    await this.#syncProviders(this.runtimes.get(id)).catch(() => {});
+    await this.#syncProviders(this.runtimes.get(id));
     // The first message names the conversation at once (its first line), and the model then suggests a
     // better title, as Claude does; a title the user set by hand is never replaced.
     let nameIt = null;

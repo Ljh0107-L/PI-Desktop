@@ -88,6 +88,9 @@ try {
   await d.start({ readyTimeout: 30000 });
   const history = await d.messages();
   check('fresh attach reads full history', history.filter(m => m.role === 'user').length === 2, `${history.length} messages`);
+  const replies = history.filter(m => m.role === 'assistant');
+  check('source timing survives disconnects and persists in Pi history', replies.length > 0 && replies.every(m =>
+    m.__timing?.source === 'agent' && m.__timing.complete && m.__timing.end >= m.__timing.start));
   check('fresh attach does not replay old events', d.events.length === 0);
 
   // 5. secrets

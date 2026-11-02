@@ -194,29 +194,74 @@ async function uploadPi(env, root, bundle, onProgress) {
   });
 }
 
-export async function prepareRemote(env, { piVersion, piPackageDir, bridgePath, relayPath, providerHosts = [], root: preferredRoot, cacheDir, onProgress = () => {} }) {
-  onProgress('Connecting…');
-  const host = { ...(await probeHost(env)), label: env.label ?? env.host };
-  const root = chooseRoot(host, preferredRoot);
-  const q = shellQuote(root);
+// Installation hints contain paths/version metadata only, never provider definitions or credentials.
+// They are revalidated over SSH on every preparation; stale/missing hints fall back to discovery.
+function installHintPath(env, cacheDir) {
+  if (!cacheDir) return null;
+  const key = createHash('sha256').update(JSON.stringify([env.host, env.sshArgs ?? []])).digest('hex');
+  return join(cacheDir, `remote-install-${key}.json`);
+}
+function readInstallHint(env, root, cacheDir) {
+  if (!root) return null;
+  try {
+    const hint = JSON.parse(readFileSync(installHintPath(env, cacheDir), 'utf8'));
+    return hint.root === root && typeof hint.root === 'string' && hint.root.startsWith('/') && typeof hint.node === 'string' && hint.node.startsWith('/') && typeof hint.home === 'string' && typeof hint.hostname === 'string' ? hint : null;
+  } catch { return null; }
+}
 
-  // Node: the newest suitable one we can find, else a portable install under the root.
-  const suitable = host.nodes.filter(n => versionAtLeast(n.version, MIN_NODE)).sort((a, b) => (versionAtLeast(a.version, b.version) ? -1 : 1));
-  let node = suitable.find(n => n.path.startsWith(root))?.path ?? suitable[0]?.path;
-  let nodeVersion = suitable.find(n => n.path === node)?.version;
-  if (!node) {
-    node = await installNode(env, host, root, cacheDir, onProgress);
-    nodeVersion = (await runSsh(env, `${shellQuote(node)} -v`)).trim();
-  }
-
-  const state = kv(await runSsh(env, String.raw`
-mkdir -p ${q}/ext ${q}/agent ${q}/run ${q}/tmp 2>/dev/null; chmod 700 ${q}/run 2>/dev/null
-printf 'pi=%s\n' "$(${shellQuote(node)} -p "require('${root}/pi/node_modules/@earendil-works/pi-coding-agent/package.json').version" 2>/dev/null)"
-[ -x ${shellQuote(node.replace(/\/node$/, '/npm'))} ] && echo 'npm=1'
-REG=$(${shellQuote(node.replace(/\/node$/, '/npm'))} config get registry 2>/dev/null); [ -n "$REG" ] || REG=https://registry.npmjs.org/
-command -v curl >/dev/null && curl -fsS -m 6 -o /dev/null "$REG" 2>/dev/null && echo 'registry=1'
+export function remoteInspectionScript(root, node, piVersion) {
+  const q = shellQuote(root), n = shellQuote(node);
+  const packagePath = `${root}/pi/node_modules/@earendil-works/pi-coding-agent/package.json`;
+  return String.raw`
+mkdir -p ${q}/ext ${q}/agent ${q}/run ${q}/tmp 2>/dev/null || exit 1
+chmod 700 ${q}/run 2>/dev/null || exit 1
+# npm's shebang must use the selected Node, not an older Node on the login PATH.
+export PATH=${shellQuote(dirname(node))}:"$PATH"
+printf 'nodeVersion=%s\n' "$(${n} -v 2>/dev/null)"
+PI=$(${n} -p ${shellQuote(`require(${JSON.stringify(packagePath)}).version`)} 2>/dev/null)
+[ -r ${q}/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js ] || PI=
+printf 'pi=%s\n' "$PI"
+# npm config and registry access are install prerequisites, not connection prerequisites.
+if [ "$PI" != ${shellQuote(piVersion)} ]; then
+  [ -x ${shellQuote(node.replace(/\/node$/, '/npm'))} ] && echo 'npm=1'
+  REG=$(${shellQuote(node.replace(/\/node$/, '/npm'))} config get registry 2>/dev/null); [ -n "$REG" ] || REG=https://registry.npmjs.org/
+  command -v curl >/dev/null && curl -fsS -m 6 -o /dev/null "$REG" 2>/dev/null && echo 'registry=1'
+fi
 for f in pidesk-subagent.mjs pidesk-bridge.js pidesk-relay.mjs; do printf '%s=%s\n' "$f" "$( (sha256sum ${q}/ext/$f 2>/dev/null || shasum -a 256 ${q}/ext/$f 2>/dev/null) | cut -d' ' -f1)"; done
-true`));
+true`;
+}
+
+export async function prepareRemote(env, { piVersion, piPackageDir, bridgePath, relayPath, providerHosts = [], root: preferredRoot, cacheDir, onProgress = () => {} }, { run = runSsh, probe = probeHost } = {}) {
+  // The catalog can reject while SSH is still discovering/installing (or after SSH fails).
+  // Observe it now without masking its eventual error at the egress selection boundary.
+  providerHosts = Promise.resolve(providerHosts);
+  providerHosts.catch(() => {});
+  onProgress('Checking remote installation…');
+  let host, state, node, nodeVersion, root;
+  const hint = readInstallHint(env, preferredRoot, cacheDir);
+  if (hint) {
+    // One lightweight check instead of a login shell, every Node version manager, and every disk.
+    state = kv(await run(env, remoteInspectionScript(hint.root, hint.node, piVersion)).catch(() => ''));
+    nodeVersion = state.nodeVersion?.[0];
+    if (/^v\d+\.\d+\.\d+/.test(nodeVersion ?? '') && versionAtLeast(nodeVersion, MIN_NODE)) {
+      ({ root, node } = hint);
+      host = { home: hint.home, hostname: hint.hostname };
+    }
+  }
+  if (!node) {
+    onProgress('Discovering remote environment…');
+    host = { ...(await probe(env)), label: env.label ?? env.host };
+    root = chooseRoot(host, preferredRoot);
+    const suitable = host.nodes.filter(n => versionAtLeast(n.version, MIN_NODE)).sort((a, b) => (versionAtLeast(a.version, b.version) ? -1 : 1));
+    node = suitable.find(n => n.path.startsWith(root + '/'))?.path ?? suitable[0]?.path;
+    if (!node) node = await installNode(env, host, root, cacheDir, onProgress);
+    state = kv(await run(env, remoteInspectionScript(root, node, piVersion)));
+    nodeVersion = state.nodeVersion?.[0];
+  }
+  if (!/^v\d+\.\d+\.\d+/.test(nodeVersion ?? '') || !versionAtLeast(nodeVersion, MIN_NODE)) {
+    throw new Error(`No usable Node.js at ${node} on ${env.label ?? env.host}; remote installation changed during setup.`);
+  }
+  const q = shellQuote(root);
 
   if (state.pi?.[0] !== piVersion) {
     // Like Claude Code: install on the host when it can reach the npm registry, otherwise (or if that
@@ -226,7 +271,7 @@ true`));
     let installed = false;
     if (canNpm) {
       onProgress(`Installing Pi ${piVersion}…`);
-      installed = await runSsh(env, `set -e; export PATH=${bin}:"$PATH" TMPDIR=${q}/tmp npm_config_cache=${q}/npm-cache npm_config_fetch_timeout=20000 npm_config_fetch_retries=1; mkdir -p ${q}/pi; cd ${q}/pi; [ -f package.json ] || printf '{"private":true}\\n' > package.json; npm install --ignore-scripts --no-audit --no-fund --loglevel=error @earendil-works/pi-coding-agent@${piVersion}`, { timeout: 240000 })
+      installed = await run(env, `set -e; export PATH=${bin}:"$PATH" TMPDIR=${q}/tmp npm_config_cache=${q}/npm-cache npm_config_fetch_timeout=20000 npm_config_fetch_retries=1; mkdir -p ${q}/pi; cd ${q}/pi; [ -f package.json ] || printf '{"private":true}\\n' > package.json; npm install --ignore-scripts --no-audit --no-fund --loglevel=error @earendil-works/pi-coding-agent@${piVersion}`, { timeout: 240000 })
         .then(() => true, () => false);
     }
     if (!installed) {
@@ -236,13 +281,31 @@ true`));
     }
   }
 
+  const changed = [];
   for (const [name, path] of [['pidesk-subagent.mjs', join(dirname(bridgePath), 'pidesk-subagent.mjs')], ['pidesk-bridge.js', bridgePath], ['pidesk-relay.mjs', relayPath]]) {
     const content = readFileSync(path);
-    if (state[name]?.[0] === createHash('sha256').update(content).digest('hex')) continue;
-    onProgress(`Uploading ${name}…`);
-    await runSsh(env, `set -e; umask 022; cat > ${q}/ext/${name}.tmp && mv ${q}/ext/${name}.tmp ${q}/ext/${name}`, { input: content });
+    if (state[name]?.[0] !== createHash('sha256').update(content).digest('hex')) changed.push({ name, content: content.toString('base64') });
   }
+  if (changed.length) {
+    onProgress('Updating desktop bridge…');
+    // All changed files travel on stdin in one SSH operation, not three serial round trips.
+    const upload = `const fs = require('node:fs'), path = require('node:path');
+for (const { name, content } of JSON.parse(fs.readFileSync(0, 'utf8'))) {
+  const dest = path.join(process.argv[1], name), tmp = dest + '.' + process.pid + '.tmp';
+  fs.writeFileSync(tmp, Buffer.from(content, 'base64'), { mode: 0o644 }); fs.renameSync(tmp, dest);
+}`;
+    await run(env, `${shellQuote(node)} -e ${shellQuote(upload)} ${q}/ext`, { input: JSON.stringify(changed) });
+  }
+  try {
+    const path = installHintPath(env, cacheDir);
+    if (path) {
+      mkdirSync(cacheDir, { recursive: true });
+      writeFileSync(path, JSON.stringify({ root, node, home: host.home, hostname: host.hostname }), { mode: 0o600 });
+    }
+  } catch { /* a read-only cache must not prevent connecting */ }
 
+  // Catalog discovery runs alongside host setup; only egress selection needs its result.
+  providerHosts = await providerHosts;
   // Which provider endpoints can the host reach on its own? (DNS failure, refused, timeout → no)
   const unreachable = [];
   if (providerHosts.length) {
@@ -254,7 +317,7 @@ true`));
       const host = hp.replace(/:\d+$/, '');
       return `( if command -v getent >/dev/null && ! getent hosts ${shellQuote(host)} >/dev/null; then echo "no ${hp}"; elif $T curl -sS -m 4 -o /dev/null https://${hp.replace(/:443$/, '')}/ 2>/dev/null; then echo "ok ${hp}"; else rc=$?; case $rc in 6|7|28|35|124) echo "no ${hp}";; *) echo "ok ${hp}";; esac; fi ) &`;
     }).join(' ');
-    const out = await runSsh(env, `command -v curl >/dev/null || { echo nocurl; exit 0; }; T=; command -v timeout >/dev/null && T="timeout 5"; ${checks} wait`).catch(() => '');
+    const out = await run(env, `command -v curl >/dev/null || { echo nocurl; exit 0; }; T=; command -v timeout >/dev/null && T="timeout 5"; ${checks} wait`).catch(() => '');
     for (const line of out.trim().split('\n')) if (line.startsWith('no ')) unreachable.push(line.slice(3));
   }
   onProgress('Ready');

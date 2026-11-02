@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { useResizable } from './ui.jsx';
-import { formatTokens, usageOf } from './transcript.js';
+import { formatTokens, speedDisplay, usageOf } from './transcript.js';
 import { useStore } from './store.js';
 import { subagentBatches } from './subagent-state.js';
 import { SubagentDetail, SubagentList } from './Subagents.jsx';
@@ -20,20 +20,20 @@ function Card({ title, children, open: initial = true, aside }) {
   );
 }
 
-const fmtTps = (v, estimated) => v == null ? '—' : `${estimated ? '~' : ''}${v >= 100 ? Math.round(v) : v.toFixed(1)}`;
-
 // Speed and token usage per turn, where a turn is one model call (one assistant message): the last turn's
 // speed with a trend of recent turns, and input / cached / output tokens for the last turn and the session.
 // Figures update as each turn finishes.
 function UsageCard({ transcript }) {
-  const turns = (transcript?.messages ?? []).filter(m => m.role === 'assistant' && m.usage && m.stopReason !== 'error' && m.stopReason !== 'aborted').map(m => usageOf([m]));
-  if (!turns.length) return null;
-  const last = turns.at(-1);
+  const messages = (transcript?.messages ?? []).filter(m => m.role === 'assistant' && m.usage && !['error', 'aborted', 'pending', 'deferred'].includes(m.stopReason));
+  if (!messages.length) return null;
+  const lastMessage = messages.at(-1);
+  const last = usageOf([lastMessage]);
   const total = usageOf(transcript.messages);
-  // Measured speed only (provider token counts ÷ generation time), updated when a reply finishes.
-  const recent = turns.slice(-14).map(t => t.tps).filter(v => v != null);
-  const speed = last.tps; // Don't present an older call's speed as this one's when timing is missing.
-  const speedEstimated = last.speedEstimated;
+  // Compare like with like: no mixing providers/models, request averages, streaming throughput,
+  // or estimated and reported token numerators in one unlabelled trend.
+  const recent = messages.slice(-14).filter(m => m.provider === lastMessage.provider && (m.responseModel ?? m.model) === (lastMessage.responseModel ?? lastMessage.model))
+    .map(m => usageOf([m])).filter(u => u.tps != null && u.speedBasis === last.speedBasis && u.speedTokensEstimated === last.speedTokensEstimated).map(u => u.tps);
+  const speed = speedDisplay(last); // Missing timing must not resurrect the previous call's speed.
   const peak = Math.max(...recent, 1);
   const rows = [
     ['Input', last.input + last.cacheWrite, total.input + total.cacheWrite],
@@ -45,12 +45,15 @@ function UsageCard({ transcript }) {
     <Card title="Usage">
       <div className="usage">
         <div className="usage-speed">
-          <div className="usage-speed-value" title={speedEstimated ? "Estimated: the provider reported too few output tokens; speed uses the visible answer text. Output tokens ÷ first→last generation window (or API duration when timing is unavailable)." : "Output tokens ÷ first→last generation window; falls back to full API duration when timing is unavailable or a relay replay is detected."}><b>{fmtTps(speed, speedEstimated)}</b><span>tok/s</span></div>
+          <div className="usage-speed-metric" title={speed.title}>
+            <div className="usage-speed-value"><b>{speed.value}</b><span>tok/s</span></div>
+            <span className="usage-speed-kind">{speed.label}</span>
+          </div>
           <div className="spark" aria-hidden="true">{recent.map((v, i) => <span key={i} style={{ height: `${Math.max(8, v / peak * 100)}%` }} />)}</div>
         </div>
-        <div className="usage-table">
+        <div className="usage-table" title="Provider-reported counts; ~ marks bridge estimates. Missing cache measurements show —, not a fabricated cache hit. Reasoning is already included in output.">
           <span /><span className="th">Last turn</span><span className="th">Session</span>
-          {rows.flatMap(([label, a, b]) => [<span key={label} className="td-label">{label}</span>, <span key={label + 'a'}>{formatTokens(a)}</span>, <span key={label + 'b'}>{formatTokens(b)}</span>])}
+          {rows.flatMap(([label, a, b]) => [<span key={label} className="td-label">{label}</span>, <span key={label + 'a'}>{label === 'Cached' && last.cacheUnknown ? '—' : `${last.usageEstimated && a != null ? '~' : ''}${formatTokens(a)}`}</span>, <span key={label + 'b'}>{label === 'Cached' && total.cacheUnknown ? '—' : `${total.usageEstimated && b != null ? '~' : ''}${formatTokens(b)}`}</span>])}
           <span className="td-label">Cache hit</span><span>{last.cacheHit == null ? '—' : `${Math.round(last.cacheHit * 100)}%`}</span><span>{total.cacheHit == null ? '—' : `${Math.round(total.cacheHit * 100)}%`}</span>
         </div>
       </div>

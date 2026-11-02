@@ -1,7 +1,7 @@
 // Turns Pi's AgentMessages (history) and RPC events (live) into one per-session transcript.
 
-// Rough token count of streamed text before the provider reports real usage: CJK characters are about
-// one token each, other text about four characters per token. Calibrated against real counts later.
+// Rough token count for speed ONLY when usage is missing or a gateway sends a placeholder.
+// Never use this estimate to rewrite provider-reported token totals.
 const CJK = /[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/g;
 export const estimateTokens = text => { const cjk = (text.match(CJK) ?? []).length; return cjk + (text.length - cjk) / 4; };
 
@@ -17,7 +17,7 @@ function toolsFromMessages(messages) {
 
 // `timings`: generation timing saved when replies streamed (Pi's history has token counts but no timing).
 export function fromHistory(messages, timings = {}) {
-  const withTiming = messages.map(m => m.role === 'assistant' && timings[m.timestamp] ? { ...m, __timing: timings[m.timestamp] } : m);
+  const withTiming = messages.map(m => m.role === 'assistant' && !m.__timing && timings[m.timestamp] ? { ...m, __timing: timings[m.timestamp] } : m);
   return { messages: withTiming, live: null, tools: toolsFromMessages(messages), loaded: true, error: null };
 }
 
@@ -25,11 +25,9 @@ export function fromHistory(messages, timings = {}) {
 // Pi's usage: input = uncached prompt tokens, cacheRead / cacheWrite = cached prompt tokens, output
 // (which already includes `reasoning` when the provider reports it).
 //
-// TPS is the generation-phase rate: output tokens ÷ (last streamed token - first streamed token).
-// `__timing` comes from the live stream and is persisted per message. When it is missing, fall back
-// to Pi's durationMs (full API call, including first-token latency and queueing). A very dense burst
-// (e.g. a relay replaying a buffered response) is not a generation window, so it also falls back to
-// durationMs instead of reporting an artificial 10k tok/s.
+// Only source-observed stream timing can describe streaming throughput. Renderer receipt timestamps
+// include SSH buffering/replay and cannot measure generation. durationMs is a separate, full-request
+// average (queueing, prefill and reasoning included), never silently mixed with stream throughput.
 // A user-initiated stop sometimes arrives as an ordinary error message ("This
 // operation was aborted") instead of stopReason "aborted". Treat both as an
 // interruption notice, not as a provider failure in a red error box.
@@ -39,71 +37,107 @@ export const isAbortMessage = m => m?.stopReason === 'aborted' || isAbortText(m?
 const isStreamInterruption = text => /\bterminated\b|stream (?:ended|disconnected|was interrupted)|socket hang up|other side closed/i.test(String(text ?? ''));
 const failureText = text => isStreamInterruption(text) ? `Model connection interrupted (${text}). Please retry if it does not recover.` : text;
 
-const textOfMessage = m => typeof m.content === 'string'
-  ? m.content
-  : (m.content ?? []).filter(b => b?.type === 'text' || b?.type === 'thinking').map(b => b.text ?? b.thinking ?? '').join('\n');
-// Tool calls are output tokens too. Counting their name/arguments keeps the TPS
-// generation window meaningful for tool-only turns (Cursor reports no usage
-// before it waits for the tool result, so the bridge estimates from these).
-const toolCallText = m => typeof m.content === 'string'
-  ? ''
-  : (m.content ?? []).filter(b => b?.type === 'toolCall').map(b => `${b.name ?? ''} ${JSON.stringify(b.arguments ?? {})}`).join('\n');
+const nonnegative = n => Number.isFinite(n) && n >= 0 ? n : 0;
+const positive = n => Number.isFinite(n) && n > 0;
 function generation(m) {
+  if (['pending', 'deferred', 'error', 'aborted'].includes(m.stopReason) || isAbortMessage(m)) return null;
+  const blocks = Array.isArray(m.content) ? m.content : [];
+  const answer = typeof m.content === 'string' ? m.content : blocks.filter(b => b?.type === 'text').map(b => b.text ?? '').join('\n');
+  const thinking = blocks.filter(b => b?.type === 'thinking').map(b => b.thinking ?? '').join('\n');
+  const tools = blocks.filter(b => b?.type === 'toolCall').map(b => `${b.name ?? ''} ${JSON.stringify(b.arguments ?? {})}`).join('\n');
+  const visible = [answer, thinking, tools].filter(Boolean).join('\n');
+  const visibleOutput = estimateTokens(visible);
   const reported = m.usage?.output;
+  const reasoning = nonnegative(m.usage?.reasoning);
+  // A one-token placeholder is common in gateways, including Cursor. Beyond this narrow case,
+  // a character heuristic cannot prove a positive token count wrong (especially for tool JSON).
+  const inferTokens = !positive(reported) || (reported === 1 && visibleOutput >= 20);
+  const estimated = inferTokens || m.__usageProvenance?.source === 'estimated';
+  // Reasoning is already part of output. When estimating, use reported reasoning INSTEAD OF its
+  // visible text, not in addition; hidden, unreported reasoning cannot be reconstructed.
+  const out = inferTokens ? estimateTokens([answer, tools].filter(Boolean).join('\n')) + (reasoning || estimateTokens(thinking)) : reported;
+  if (!positive(out)) return null;
   const t = m.__timing;
-  const answerText = textOfMessage(m);
-  const allText = [answerText, toolCallText(m)].filter(Boolean).join('\n');
-  // Tool arguments are real output too, so they count when checking whether the
-  // streamed text covers the reported token count. They must not be used to
-  // "correct" a plausible reported count: a write tool's file body is huge and
-  // would otherwise inflate TPS. Only the visible answer text is a fallback.
-  const visibleOutput = estimateTokens(allText);
-  const visibleAnswer = estimateTokens(answerText);
-  // Prefer first→last from the stream; keep full API duration for replay/burst,
-  // hidden reasoning with no streamed text, or untimed history.
-  const coversOutput = visibleOutput >= Math.max(20, (Number.isFinite(reported) ? reported : 0) * 0.25);
-  let ms = m.durationMs;
-  if (t?.first && t?.last && t.last > t.first && (t.chars ?? 0) >= 20 && coversOutput) {
+  const requestMs = positive(m.durationMs) ? m.durationMs : null;
+  let streamMs = null;
+  // Relay contract: timestamp/character counters captured before buffering and retained on replay.
+  // `complete` means message_start and every update were observed; renderer/legacy timings are not
+  // trusted. First→last excludes the first chunk's generation, so even this rate is approximate.
+  if (['agent', 'relay'].includes(t?.source) && t.complete === true && t.deltas >= 2 &&
+      [t.start, t.first, t.last, t.end].every(Number.isFinite) &&
+      t.start <= t.first && t.first < t.last && t.last <= t.end) {
     const window = t.last - t.first;
-    const chars = t.chars ?? 0;
-    if (chars / window <= 20) ms = window;
+    const coversOutput = visibleOutput >= Math.max(20, out * 0.5) && t.chars >= visible.length * 0.8;
+    const coversReasoning = !(reasoning && m.__usageProvenance?.thinking === 'summary') &&
+      !blocks.some(b => b?.type === 'thinking' && b.redacted) &&
+      (!reasoning || (estimateTokens(thinking) >= reasoning * 0.5 && t.thinkingChars >= thinking.length * 0.8));
+    // Short/one-chunk responses and dense upstream bursts do not establish a useful generation
+    // window. Do not cap genuine throughput: use the independently labeled request average.
+    if (window >= 200 && Number.isFinite(t.chars) && t.chars / window <= 20 && coversOutput && coversReasoning &&
+        (requestMs == null || window <= requestMs)) streamMs = window;
   }
-  if (!Number.isFinite(ms) || ms <= 0) return null;
-  // Some gateways (notably Cursor's Gemini path) report a token count that is
-  // far below the visible answer. Use the visible-text estimate only when the
-  // reported count is implausible, and mark the speed as estimated.
-  let out = reported, estimated = false;
-  if ((!Number.isFinite(out) || out <= 0) && visibleOutput > 0) { out = visibleOutput; estimated = true; }
-  else if (visibleAnswer >= 20 && Number.isFinite(out) && out < visibleAnswer * 0.6) { out = visibleAnswer; estimated = true; }
-  if (!Number.isFinite(out) || out <= 0) return null;
-  return { ms, out, reported: Number.isFinite(reported) ? reported : null, estimated, hiddenWork: (m.usage.reasoning ?? 0) > 0 };
+  return { requestMs, streamMs, out, estimated, hiddenWork: reasoning > 0 };
 }
 export function usageOf(messages) {
-  const u = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0, reasoningReported: false, cost: 0, genMs: 0, genOut: 0, speedEstimated: false, hiddenWork: false, start: null, end: null, calls: 0 };
+  const u = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0, reasoningReported: false, cost: 0, genMs: 0, genOut: 0, speedEstimated: false, speedTokensEstimated: false, speedBasis: null, speedPartial: false, hiddenWork: false, start: null, end: null, calls: 0 };
+  const speeds = [];
+  let speedCalls = 0;
   for (const m of messages) {
     if (m.role === 'toolResult' && m.toolName === 'subagent' && m.usage) {
       // Parallel child calls add usage, not main-model generation time/TPS.
-      u.input += m.usage.input ?? 0; u.cacheRead += m.usage.cacheRead ?? 0; u.cacheWrite += m.usage.cacheWrite ?? 0;
-      u.output += m.usage.output ?? 0; u.cost += m.usage.cost?.total ?? 0;
-      if (m.usage.reasoning != null) { u.reasoningReported = true; u.reasoning += m.usage.reasoning; }
-      u.calls += (m.details?.results ?? []).reduce((n, r) => n + (r.turns ?? 0), 0);
+      u.input += nonnegative(m.usage.input); u.cacheRead += nonnegative(m.usage.cacheRead); u.cacheWrite += nonnegative(m.usage.cacheWrite);
+      u.output += nonnegative(m.usage.output); u.cost += nonnegative(m.usage.cost?.total);
+      if (Number.isFinite(m.usage.reasoning) && m.usage.reasoning >= 0) { u.reasoningReported = true; u.reasoning += m.usage.reasoning; }
+      u.calls += (m.details?.results ?? []).reduce((n, r) => n + nonnegative(r.turns), 0);
       continue;
     }
     if (m.role !== 'assistant' || !m.usage) continue;
     u.calls += 1;
-    u.input += m.usage.input ?? 0; u.cacheRead += m.usage.cacheRead ?? 0; u.cacheWrite += m.usage.cacheWrite ?? 0;
-    if (m.usage.reasoning != null) { u.reasoningReported = true; u.reasoning += m.usage.reasoning; }
-    u.cost += m.usage.cost?.total ?? 0;
+    u.input += nonnegative(m.usage.input); u.cacheRead += nonnegative(m.usage.cacheRead); u.cacheWrite += nonnegative(m.usage.cacheWrite);
+    if (Number.isFinite(m.usage.reasoning) && m.usage.reasoning >= 0) { u.reasoningReported = true; u.reasoning += m.usage.reasoning; }
+    u.cost += nonnegative(m.usage.cost?.total);
+    // Usage is authoritative even when speed requires a clearly marked token estimate.
+    u.output += nonnegative(m.usage.output);
+    u.usageEstimated ||= m.__usageProvenance?.source === 'estimated';
+    u.cacheUnknown ||= m.__usageProvenance?.cache === 'unknown';
+    if (!['pending', 'deferred', 'error', 'aborted'].includes(m.stopReason) && !isAbortMessage(m)) speedCalls += 1;
     const g = generation(m);
-    // Keep the Usage card consistent with the speed: when the provider count is
-    // implausibly low, show the same visible-text estimate TPS uses.
-    u.output += g?.estimated ? g.out : (m.usage.output ?? 0);
-    if (g) { u.genMs += g.ms; u.genOut += g.out; u.speedEstimated ||= g.estimated; u.hiddenWork ||= g.hiddenWork; }
+    if (g) speeds.push(g);
     const t = m.__timing;
-    if (t?.start && t.end) { u.start = Math.min(u.start ?? t.start, t.start); u.end = Math.max(u.end ?? t.end, t.end); }
+    if (Number.isFinite(t?.start) && Number.isFinite(t?.end) && t.end >= t.start) {
+      u.start = Math.min(u.start ?? t.start, t.start); u.end = Math.max(u.end ?? t.end, t.end);
+    }
+  }
+  // Aggregate on ONE denominator. Prefer stream timing only when it covers every call; otherwise
+  // use full-request durations where available. Never average stream TPS with request-average TPS.
+  const streams = speeds.filter(g => g.streamMs != null), requests = speeds.filter(g => g.requestMs != null);
+  const useStreams = streams.length > 0 && (streams.length === speedCalls || !requests.length);
+  const samples = useStreams ? streams : requests;
+  if (samples.length) {
+    u.speedBasis = useStreams ? 'stream' : 'request';
+    u.speedPartial = samples.length < speedCalls;
+    for (const g of samples) {
+      u.genMs += useStreams ? g.streamMs : g.requestMs; u.genOut += g.out;
+      u.speedTokensEstimated ||= g.estimated; u.hiddenWork ||= g.hiddenWork;
+    }
+    u.speedEstimated = useStreams || u.speedTokensEstimated;
   }
   const prompt = u.input + u.cacheRead + u.cacheWrite;
-  return { ...u, prompt, cacheHit: prompt ? u.cacheRead / prompt : null, tps: u.genMs ? u.genOut / (u.genMs / 1000) : null, durationMs: u.start && u.end ? u.end - u.start : null };
+  return { ...u, prompt, cacheHit: u.cacheUnknown ? null : prompt ? u.cacheRead / prompt : null, tps: u.genMs ? u.genOut / (u.genMs / 1000) : null, durationMs: u.start != null && u.end != null ? u.end - u.start : null };
+}
+
+export function speedDisplay(usage) {
+  if (!Number.isFinite(usage.tps)) return { value: '—', label: 'Speed unavailable', title: 'No usable timing or output count for this call. An older call’s speed is not substituted.' };
+  const stream = usage.speedBasis === 'stream';
+  const title = stream
+    ? 'Output tokens ÷ first→last source-observed stream window. Approximate streaming throughput, not server decode-only TPS; chunking and upstream buffering can affect it.'
+    : 'Output tokens ÷ full model request duration, including queueing, prefill and reasoning. Not generation-only TPS.';
+  const estimate = usage.speedTokensEstimated ? ' Token counts are estimated by the bridge or from visible text/tool arguments and reported or visible reasoning; unreported hidden reasoning is excluded. Provider token totals remain unchanged.' : ' Uses provider-reported output tokens; reasoning is already included.';
+  return {
+    value: `${usage.speedEstimated ? '~' : ''}${usage.tps >= 100 ? Math.round(usage.tps) : usage.tps.toFixed(1)}`,
+    label: stream ? 'Stream avg' : 'Request avg',
+    title: title + estimate + (usage.speedPartial ? ' Only calls with usable timing are included.' : ''),
+  };
 }
 // Usage per finished turn (user message → the replies that followed), oldest first.
 export function turnUsages(messages) {
@@ -135,17 +169,18 @@ export function applyEvent(t, event) {
     case 'agent_settled':
       return { ...t, retry: null };
     case 'message_start':
-      if (event.message?.role === 'assistant') return { ...t, live: { ...event.message, content: [], stopReason: 'pending', __t0: Date.now(), __chars: 0 } };
+      if (event.message?.role === 'assistant') return { ...t, live: { ...event.message, content: [], stopReason: 'pending', __t0: Date.now(), __chars: 0, __deltas: 0, __thinkingChars: 0 } };
       return t;
     case 'message_update': {
       // Attached mid-reply (e.g. after an app restart): start a live message from the deltas we do get.
       if (!t.live) t = { ...t, live: { role: 'assistant', content: [], stopReason: 'pending' } };
       const e = event.assistantMessageEvent ?? {};
-      // Speed: time from the first generated token, and characters streamed so far (for a live estimate).
-      if (typeof e.delta === 'string' && e.type?.endsWith('_delta')) {
+      // Receipt timing is useful for activity display, but is never used as generation TPS.
+      if (typeof e.delta === 'string' && e.delta.length > 0 && ['text_delta', 'thinking_delta', 'toolcall_delta'].includes(e.type)) {
         const now = Date.now(), L = t.live, thinking = e.type === 'thinking_delta';
         t = { ...t, live: { ...L, __tFirst: L.__tFirst ?? now, __tLast: now, __chars: (L.__chars ?? 0) + e.delta.length, __est: (L.__est ?? 0) + estimateTokens(e.delta),
-          __thinkStart: thinking ? L.__thinkStart ?? now : L.__thinkStart, __thinkEnd: !thinking && L.__thinkStart && !L.__thinkEnd ? now : L.__thinkEnd } };
+          __deltas: (L.__deltas ?? 0) + 1, __thinkingChars: (L.__thinkingChars ?? 0) + (thinking ? e.delta.length : 0),
+          __thinkStart: thinking ? L.__thinkStart ?? now : L.__thinkStart, __thinkEnd: !thinking && L.__thinkStart != null && L.__thinkEnd == null ? now : L.__thinkEnd } };
       }
       const i = e.contentIndex;
       switch (e.type) {
@@ -171,7 +206,9 @@ export function applyEvent(t, event) {
       if (!message) return t;
       if (message.role === 'assistant') {
         const now = Date.now();
-        const timing = t.live?.__t0 ? { start: t.live.__t0, first: t.live.__tFirst ?? null, end: now, last: t.live.__tLast ?? null, chars: t.live.__chars ?? 0, est: t.live.__est ?? null, think: t.live.__thinkStart ? (t.live.__thinkEnd ?? now) - t.live.__thinkStart : null } : null;
+        // A relay may attach timing gathered on the host before any replay. Never overwrite it with
+        // receipt-time measurements, including when we attached in the middle of a response.
+        const timing = message.__timing ?? (t.live?.__t0 != null ? { source: 'renderer', complete: true, start: t.live.__t0, first: t.live.__tFirst ?? null, end: now, last: t.live.__tLast ?? null, chars: t.live.__chars ?? 0, est: t.live.__est ?? null, deltas: t.live.__deltas ?? 0, thinkingChars: t.live.__thinkingChars ?? 0, think: t.live.__thinkStart != null ? (t.live.__thinkEnd ?? now) - t.live.__thinkStart : null } : null);
         return { ...t, live: null, messages: [...t.messages, timing ? { ...message, __timing: timing } : message] };
       }
       // Your message arrived from Pi: it replaces the optimistic copy shown while editing, and the dimmed

@@ -35,9 +35,8 @@ export function SubagentList({ sessionId, batches, selectedCallId }) {
   const ordered = [...batches].reverse();
   const visible = selected ? [selected] : showAll ? ordered : ordered.slice(0, 5);
   return <section className="panel-card subagent-list">
-    <div className="subagent-list-head"><Icon name="fork" size={16} /><b>Subagents</b>
+    <div className="panel-card-head subagent-list-head"><span>Subagents</span>
       {selected && <button className="link-button" onClick={() => closeSubagent(sessionId)}>Show all</button>}</div>
-    {!batches.length && <div className="subagent-empty">Delegated tasks will appear here.</div>}
     {visible.map(batch => <div className="subagent-batch" key={batch.callId}>
       <div className="subagent-batch-count">{subagentSummary(batch.tasks)}</div>
       {batch.tasks.map(task => <TaskRow key={task.key} task={task} onClick={() => openSubagent(sessionId, batch.callId, task.index)} />)}

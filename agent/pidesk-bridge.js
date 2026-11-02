@@ -90,7 +90,52 @@ export function projectlessNote(cwd) {
   ].join('\n');
 }
 
+// Timing is captured inside Pi before RPC/SSH buffering, then persisted on the final message.
+// Only bounded counters and usage provenance are retained; never raw provider events or credentials.
+export function registerMetrics(pi, clock = () => performance.timeOrigin + performance.now()) {
+  let active = null;
+  let provenance = null;
+  pi.on('turn_start', () => { active = null; provenance = null; });
+  pi.on('session_shutdown', () => { active = null; provenance = null; });
+  pi.on('message_start', ({ message }) => {
+    if (message.role !== 'assistant') return;
+    active = { timestamp: message.timestamp, start: clock(), first: null, last: null,
+      chars: 0, deltas: 0, thinkingChars: 0, thinkStart: null, thinkEnd: null };
+  });
+  pi.on('message_update', ({ message, assistantMessageEvent: e }) => {
+    if (!active || message?.timestamp !== active.timestamp || typeof e?.delta !== 'string' || !e.delta.length ||
+        !['text_delta', 'thinking_delta', 'toolcall_delta'].includes(e.type)) return;
+    const now = clock();
+    active.first ??= now; active.last = now; active.chars += e.delta.length; active.deltas++;
+    if (e.type === 'thinking_delta') { active.thinkingChars += e.delta.length; active.thinkStart ??= now; }
+    else if (active.thinkStart != null) active.thinkEnd ??= now;
+  });
+  pi.on('provider_stream_event', event => {
+    const data = event.data;
+    const marker = data?.usage?.cursor2api ?? data?.message?.usage?.cursor2api ?? data?.response?.usage?.cursor2api;
+    if (marker && ['upstream', 'estimated'].includes(marker.source)) {
+      provenance = { provider: event.provider, model: event.model, source: marker.source,
+        cache: marker.cache === 'reported' ? 'reported' : 'unknown', thinking: 'summary' };
+    }
+  });
+  pi.on('message_end', ({ message }) => {
+    if (message.role !== 'assistant') return;
+    const t = active; active = null;
+    const p = provenance; provenance = null;
+    const owned = p && p.provider === message.provider && p.model === message.model;
+    if (!t || t.timestamp !== message.timestamp) return owned ? { message: { ...message, __usageProvenance: p } } : undefined;
+    const end = clock();
+    return { message: { ...message,
+      ...(owned ? { __usageProvenance: p } : {}),
+      __timing: { source: 'agent', complete: true, start: t.start, first: t.first, last: t.last, end,
+        chars: t.chars, deltas: t.deltas, thinkingChars: t.thinkingChars,
+        think: t.thinkStart == null ? null : (t.thinkEnd ?? end) - t.thinkStart },
+    } };
+  });
+}
+
 export default function pideskBridge(pi) {
+  registerMetrics(pi);
   // Pi re-runs extension factories when it replaces the session (fork, clone, switch), after the boot
   // record has already been removed from the environment, so it is kept for this process here.
   const raw = process.env.PIDESK_BOOT;
