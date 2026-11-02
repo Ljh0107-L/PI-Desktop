@@ -7,7 +7,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
 import { AssistantMessageEventStream, registerSessionResourceCleanup } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
-import { createSubagentTool, SUBAGENT_PROMPT } from '../agent/pidesk-subagent.mjs';
+import { createSubagentTool, recordSubagentStep, SUBAGENT_PROMPT, TRACE_MAX_BYTES, TRACE_MAX_STEPS } from '../agent/pidesk-subagent.mjs';
 import { outputs, usageOf } from '../app/renderer/src/transcript.js';
 import { UsageLedger } from '../app/main/usage.mjs';
 
@@ -91,6 +91,50 @@ test('coding calls go through the parent pipeline and report successful file out
   assert.ok(c.toolCalls[0].options.signal instanceof AbortSignal);
   assert.deepEqual(result.details.results[0].files, [{ path: 'owned.txt', tool: 'write' }]);
   assert.equal(result.details.results[0].turns, 2);
+  const step = result.details.results[0].steps.find(s => s.type === 'tool');
+  assert.equal(step.name, 'write');
+  assert.equal(step.status, 'completed');
+  assert.match(step.input, /owned.txt/);
+  assert.equal(step.output, 'tool result');
+  assert.ok(step.endedAt >= step.at);
+  assert.ok(result.details.results[0].finishedAt >= result.details.results[0].runStartedAt);
+});
+
+test('execution trace excludes hidden thinking, image bodies and inherited prompts', async () => {
+  const c = context(async request => request.transcript.messages.at(-1).role === 'user' ? toolReply() : reply('', { content: [{ type: 'thinking', thinking: 'HIDDEN_THINKING', thinkingSignature: 'PRIVATE_SIGNATURE' }, { type: 'text', text: 'Public conclusion' }] }));
+  c.ctx.executeTool = async () => ({ result: { content: [{ type: 'image', data: 'PRIVATE_IMAGE', mimeType: 'image/png' }, { type: 'text', text: 'Visible tool output' }], details: {} }, isError: false });
+  const result = await run(createSubagentTool(), c);
+  const trace = JSON.stringify(result.details.results[0].steps);
+  assert.ok(trace.includes('Public conclusion'));
+  for (const hidden of ['HIDDEN_THINKING', 'PRIVATE_SIGNATURE', 'PRIVATE_IMAGE', 'Do not run local tests', 'PRIVATE_PARENT_ASSISTANT_HISTORY']) assert.ok(!trace.includes(hidden));
+});
+
+test('execution trace replaces updates and bounds retained steps/bytes with an explicit omission count', () => {
+  const result = { steps: [], omittedSteps: 0 };
+  recordSubagentStep(result, { id: 'tool:1', type: 'tool', status: 'running', input: 'pwd' });
+  recordSubagentStep(result, { id: 'tool:1', output: 'partial' });
+  recordSubagentStep(result, { id: 'tool:1', status: 'completed', output: '/workspace' });
+  assert.equal(result.steps.length, 1);
+  assert.equal(result.steps[0].input, 'pwd');
+  assert.equal(result.steps[0].output, '/workspace');
+  for (let i = 0; i < 200; i++) recordSubagentStep(result, { id: `step:${i}`, type: 'message', text: '界'.repeat(1300) });
+  assert.ok(result.steps.length <= TRACE_MAX_STEPS);
+  assert.ok(Buffer.byteLength(JSON.stringify(result.steps)) <= TRACE_MAX_BYTES);
+  assert.ok(result.omittedSteps > 0);
+  assert.equal(result.steps.at(-1).id, 'step:199');
+});
+
+test('a silent delegated tool publishes its running trace before it completes', async () => {
+  const c = context(async request => request.transcript.messages.at(-1).role === 'user' ? toolReply() : reply('done'));
+  let finish;
+  const held = new Promise(resolve => { finish = resolve; });
+  c.ctx.executeTool = async () => { await held; return { result: { content: [{ type: 'text', text: 'finished output' }], details: {} }, isError: false }; };
+  const updates = [];
+  const pending = run(createSubagentTool(), c, tasks(1), undefined, update => updates.push(update));
+  try {
+    await sleep(1200);
+    assert.ok(updates.some(u => u.details.results[0].steps.some(s => s.type === 'tool' && s.status === 'running')));
+  } finally { finish(); await pending; }
 });
 
 test('retry repeats only a failed model response, not a completed tool', async () => {

@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Icon } from './Icons.jsx';
-import { baseName, envIcon, shortPath } from './ui.jsx';
-import { formatTokens, outputs, usageOf } from './transcript.js';
-import { api, openFile, useStore } from './store.js';
+import { useResizable } from './ui.jsx';
+import { formatTokens, usageOf } from './transcript.js';
+import { useStore } from './store.js';
+import { subagentBatches } from './subagent-state.js';
+import { SubagentDetail, SubagentList } from './Subagents.jsx';
 
 function Card({ title, children, open: initial = true, aside }) {
   const [open, setOpen] = useState(initial);
@@ -59,35 +61,23 @@ function UsageCard({ transcript }) {
 export function RightPanel({ session }) {
   const transcript = useStore(s => s.transcripts[session.id]);
   const stats = useStore(s => s.stats[session.id]);
-  const branch = useStore(s => s.branches[session.id]);
-  const env = useStore(s => s.environments.find(e => e.id === session.environmentId));
-  const home = useStore(s => s.home);
-  const [showAll, setShowAll] = useState(false);
-  const files = transcript ? outputs(transcript) : [];
+  const selection = useStore(s => s.subagentSelection[session.id]);
+  const batches = useMemo(() => subagentBatches(transcript), [transcript]);
+  const batch = batches.find(b => b.callId === selection?.callId);
+  const task = Number.isInteger(selection?.taskIndex) ? batch?.tasks[selection.taskIndex] : null;
+  const [detailWidth, detailHandle] = useResizable('subagent-inspector', 420, 300, 680, 'left');
   const percent = stats?.contextUsage?.percent ?? null;
-  const local = session.environmentId === 'local';
-  const statusLabel = { connected: 'Connected', connecting: 'Connecting…', reconnecting: 'Reconnecting…', disconnected: 'Disconnected', error: 'Unavailable' }[session.status];
+  if (task) return <aside className="right-panel subagent-inspector" style={{ width: detailWidth }}>
+    {detailHandle}<SubagentDetail key={`${session.id}:${task.key}`} sessionId={session.id} task={task} />
+  </aside>;
   return (
     <aside className="right-panel">
-      <Card title="Environment">
-        <div className="panel-row"><Icon name={envIcon(env ?? { kind: local ? 'local' : 'ssh' })} size={18} /><span className="panel-row-text">{session.environmentLabel}</span>
-          {statusLabel && <span className={`status-dot ${session.status}`} title={statusLabel} />}</div>
-        <div className="panel-row" title={session.cwd}><Icon name="folder" size={18} /><span className="panel-row-text">{baseName(session.cwd)} <span className="muted">· {local ? shortPath(session.cwd, home).replace(/\/[^/]+$/, '') || '~' : session.cwd.replace(/\/[^/]+$/, '')}</span></span></div>
-        {branch && <div className="panel-row"><Icon name="branch" size={18} /><span className="panel-row-text">{branch}</span></div>}
-      </Card>
       <Card title="Context" aside={<>
         <span className="muted">{stats?.contextUsage?.tokens != null ? `${formatTokens(stats.contextUsage.tokens)} / ${formatTokens(stats.contextUsage.contextWindow)}` : '—'}</span>
         <span className="meter" title={percent == null ? undefined : `${Math.round(percent)}% of the context window`}><span style={{ width: `${percent > 0 ? Math.max(6, Math.min(100, percent)) : 0}%` }} /></span>
       </>} />
       <UsageCard transcript={transcript} />
-      {files.length > 0 && <Card title="Outputs">
-        {(showAll ? files : files.slice(0, 5)).map(f => (
-          <button key={f.path} className="panel-row file" title={f.path} onClick={() => openFile(session.id, f.path)}>
-            <Icon name={f.tool === 'edit' ? 'fileEdit' : 'file'} size={18} /><span className="panel-row-text">{baseName(f.path)}</span>
-          </button>
-        ))}
-        {files.length > 5 && <button className="panel-more" onClick={() => setShowAll(v => !v)}>{showAll ? 'Show less' : 'Show more'}</button>}
-      </Card>}
+      <SubagentList sessionId={session.id} batches={batches} selectedCallId={selection?.callId} />
     </aside>
   );
 }

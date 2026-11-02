@@ -5,6 +5,7 @@ import { changesOf, displayBlocks, formatTokens, isAbortText, toolSummary } from
 import { api, editMessage, notify, openChanges } from './store.js';
 import { changeStats, hunkLines } from './diffs.js';
 import { Composer } from './Composer.jsx';
+import { SubagentSummary } from './Subagents.jsx';
 
 // Disclosure state belongs to the transcript, not a transient grouped row. A streamed thought can
 // become a work group, and groups can split when text arrives. Preserve the user's choices by step ID.
@@ -89,20 +90,6 @@ function EditDiff({ hunks }) {
 const Caret = ({ open }) => <Icon name={open ? 'caretDown' : 'caretRight'} size={14} className="step-caret" />;
 const outputText = text => text.length > 8000 ? text.slice(0, 8000) + '\n…' : text;
 
-function SubagentResults({ result }) {
-  const results = result?.details?.kind === 'pidesk-subagents' ? result.details.results : [];
-  if (!results.length) return <pre className="tool-output boxed">{outputText(textOf(result)) || 'Starting subagents…'}</pre>;
-  return <div className="subagent-results">{results.map(r => <details key={r.id} className={`subagent-result ${r.status}`}>
-    <summary><span className="subagent-name">{r.name}</span><span className="subagent-status">{r.status.replace('_', ' ')}</span>
-      <span className="subagent-usage">{r.turns} turns · {formatTokens(r.usage?.totalTokens ?? 0)} tokens</span></summary>
-    <div className="subagent-body">
-      <div className="muted">{r.provider}/{r.model}{r.currentTool ? ` · ${r.currentTool}` : ''}</div>
-      {r.error && <div className="block-error">{r.error}</div>}
-      {r.output && <Markdown text={r.output} />}
-    </div>
-  </details>)}</div>;
-}
-
 function ToolCall({ call, tool }) {
   const [open, setOpen] = useDisclosure(`tool:${call.id}`);
   const { verb, subject, detail, mono, title } = describeCall(call);
@@ -126,7 +113,7 @@ function ToolCall({ call, tool }) {
       </div>
       {open && (
         <div className="step-detail tool-detail">
-          {call.name === 'subagent' ? <SubagentResults result={tool?.result} /> : call.name === 'bash'
+          {call.name === 'bash'
             ? <div className={`tool-console ${status === 'error' ? 'error' : ''}`}>
                 <pre className="tool-command"><span className="prompt">$</span> {call.arguments?.command}</pre>
                 {output && <pre className="tool-output">{outputText(output)}</pre>}
@@ -464,6 +451,7 @@ export function Transcript({ session, transcript, questions }) {
             case 'thinking': return <Thinking key={block.key} {...block} blockKey={block.key} />;
             case 'work': return <WorkGroup key={block.key} items={block.items} tools={transcript.tools} live={!!transcript.live} />;
             case 'tools': return <ToolGroup key={block.key} calls={block.calls} tools={transcript.tools} live={!!transcript.live} />;
+            case 'subagents': return <SubagentSummary key={block.key} sessionId={session?.id} call={block.call} tool={transcript.tools[block.call.id]} />;
             case 'ask': return transcript.tools[block.call.id]?.status === 'done' ? <AskBlock key={block.key} call={block.call} tool={transcript.tools[block.call.id]} /> : null;
             case 'bash': return <pre key={block.key} className="tool-output">$ {block.message.command}{'\n'}{block.message.output}</pre>;
             case 'error': return <div key={block.key} className="block-error"><Icon name="alert" size={15} /> {block.text}</div>;

@@ -30,10 +30,10 @@ let state = {
   envStatus: {},                            // environment id -> { status, message }
   notices: [],
   rightPanel: true,
+  subagentSelection: {},                    // session id -> { callId, taskIndex }; changes only on user navigation
   sidebar: true,
   settingsOpen: false, settingsTab: 'providers', addConnectionOpen: false,
   paletteOpen: false,
-  branches: {},                             // session id -> git branch (or '')
   history: [], future: [],                  // back / forward navigation
   draft: { environmentId: 'local', cwd: null, model: null, thinkingLevel: 'medium' },
 };
@@ -177,6 +177,14 @@ export async function loadCatalog() {
 
 export const setDraft = patch => set(s => ({ draft: { ...s.draft, ...patch } }));
 export const setView = patch => set(patch);
+// Inspect child activity in the existing right panel, only after an explicit click.
+// Keep file tabs/selection intact so closing a preview returns to the same child.
+export function openSubagent(id, callId, taskIndex = null) {
+  set(s => ({ subagentSelection: { ...s.subagentSelection, [id]: { callId, taskIndex } }, rightPanel: true, filePaneOpen: false, filePaneMax: false }));
+}
+export function closeSubagent(id) {
+  set(s => ({ subagentSelection: { ...s.subagentSelection, [id]: null } }));
+}
 export const toggleRightPanel = () => set(s => ({ rightPanel: !s.rightPanel }));
 export const openSettings = (open, tab, { addConnection = false } = {}) => set(s => ({ settingsOpen: open, settingsTab: tab ?? s.settingsTab, addConnectionOpen: addConnection, paletteOpen: false }));
 export const setAddConnectionOpen = open => set({ addConnectionOpen: open });
@@ -199,9 +207,6 @@ export function goForward() {
   set(s => ({ future: s.future.slice(1), history: [...s.history, here()] }));
   next.view === 'session' && next.activeId ? openSession(next.activeId, { record: false }) : set({ view: 'new', activeId: null });
 }
-export async function loadBranch(id) {
-  try { const branch = await api('gitBranch', id); set(s => ({ branches: { ...s.branches, [id]: branch ?? '' } })); } catch { /* ignore */ }
-}
 export function pickRecent(environmentId, cwd) { set(s => ({ draft: { ...s.draft, environmentId, cwd } })); if (environmentId !== 'local') api('prepareEnvironment', environmentId); }
 export const setSettings = settings => set({ settings });
 export const setEnvironments = environments => set({ environments });
@@ -217,7 +222,6 @@ export function warmSession(id) {
 export async function openSession(id, { record = true } = {}) {
   if (record) navigate({ view: 'session', activeId: id });
   set({ activeId: id, view: 'session', paletteOpen: false });
-  loadBranch(id);
   // Once it is open, keep a spare Pi in its folder so Fork (or a new session there) needn't start one.
   setTimeout(() => { if (state.activeId === id) api('warmFolder', id).catch(() => {}); }, 1500);
   const t = transcriptOf(id);
@@ -327,7 +331,7 @@ export async function deleteSession(id) {
   try {
     await api('deleteSession', id);
     const without = object => Object.fromEntries(Object.entries(object).filter(([key]) => key !== id));
-    set(s => ({ transcripts: without(s.transcripts), questions: without(s.questions), stats: without(s.stats), files: without(s.files),
+    set(s => ({ transcripts: without(s.transcripts), questions: without(s.questions), stats: without(s.stats), files: without(s.files), subagentSelection: without(s.subagentSelection),
       history: s.history.filter(v => v.activeId !== id), future: s.future.filter(v => v.activeId !== id) }));
   } catch (error) {
     // Don't silently lose the conversation or navigate away from whatever the user opened meanwhile.

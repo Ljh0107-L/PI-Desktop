@@ -24,6 +24,22 @@ const clip = (text, bytes = 8000) => {
 };
 const messageText = message => typeof message?.content === 'string' ? message.content : (message?.content ?? []).filter(b => b.type === 'text').map(b => b.text).join('\n');
 
+// Persist only observable actions and public text, never thinking blocks, provider
+// credentials, inherited prompts or image/base64 bodies. Bound every child trace.
+export const TRACE_MAX_BYTES = 64 * 1024;
+export const TRACE_MAX_STEPS = 80;
+export function recordSubagentStep(result, step) {
+  result.steps ??= [];
+  const index = result.steps.findIndex(s => s.id === step.id);
+  const next = { ...(index < 0 ? { at: Date.now() } : result.steps[index]), ...step };
+  if (index < 0) result.steps.push(next); else result.steps[index] = next;
+  while (result.steps.length > TRACE_MAX_STEPS || Buffer.byteLength(JSON.stringify(result.steps)) > TRACE_MAX_BYTES) {
+    result.steps.shift();
+    result.omittedSteps = (result.omittedSteps ?? 0) + 1;
+  }
+}
+const toolOutput = result => clip(messageText(result), 4000);
+
 export const SUBAGENT_PROMPT = `You can use the subagent tool to delegate focused tasks to agents with independent context windows.
 - Delegate independent investigations, reviews, or clearly separated implementation tasks when this saves time or keeps the main context focused. Handle trivial tasks directly.
 - A call accepts 1–6 named tasks; at most 3 subagents run at once in this Pi session. The call waits for their results. Use separate calls for dependent stages.
@@ -107,11 +123,18 @@ export function createSubagentTool({ concurrency = 3, maxTurns = 12, defaultTime
         const model = ctx.model;
         const inherited = userContext(ctx);
         const systemPrompt = `${ctx.getSystemPrompt()}\n\n${CHILD_PROMPT}`;
-        const results = params.tasks.map(t => ({ id: randomUUID(), name: t.name, status: 'queued', output: '', turns: 0, retries: 0, toolCalls: 0, files: [], usage: emptyUsage(), provider: model.provider, model: model.id, startedAt: Date.now() }));
+        const results = params.tasks.map(t => ({ id: randomUUID(), name: t.name, task: clip(t.task, 4000), status: 'queued', output: '', steps: [], omittedSteps: 0, turns: 0, retries: 0, toolCalls: 0, files: [], usage: emptyUsage(), provider: model.provider, model: model.id, startedAt: Date.now() }));
         const snapshot = () => ({ kind: 'pidesk-subagents', results: structuredClone(results) });
-        let lastUpdate = 0;
+        let lastUpdate = 0, pendingUpdate = null;
         const emit = (force = false) => {
-          if (!onUpdate || (!force && Date.now() - lastUpdate < 200)) return;
+          if (!onUpdate) return;
+          const remaining = 1000 - (Date.now() - lastUpdate);
+          if (!force && remaining > 0) {
+            // A trailing update also exposes a long-running silent command's start.
+            pendingUpdate ??= setTimeout(() => { pendingUpdate = null; emit(true); }, remaining);
+            return;
+          }
+          clearTimeout(pendingUpdate); pendingUpdate = null;
           lastUpdate = Date.now();
           onUpdate({ content: [{ type: 'text', text: `Subagents: ${results.filter(r => !['queued', 'running', 'retrying'].includes(r.status)).length}/${results.length} finished` }], details: snapshot() });
         };
@@ -123,7 +146,7 @@ export function createSubagentTool({ concurrency = 3, maxTurns = 12, defaultTime
             try {
               release = await pool.acquire(signal);
               signal.throwIfAborted();
-              result.status = 'running'; emit(true);
+              result.status = 'running'; result.runStartedAt = Date.now(); emit(true);
               const tools = ctx.tools.filter(t => TOOL_NAMES.has(t.name)).map(tool => ({ ...tool,
                 async execute(_toolId, args, toolSignal, update) {
                   signal.throwIfAborted();
@@ -142,21 +165,43 @@ export function createSubagentTool({ concurrency = 3, maxTurns = 12, defaultTime
               });
               signal.addEventListener('abort', abort, { once: true });
               unsubscribe = agent.subscribe(event => {
+                const messageId = `message:${result.turns + 1}`;
                 if (event.type === 'message_start' && event.message.role === 'assistant') result.output = '';
-                if (event.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') result.output = clip(result.output + event.assistantMessageEvent.delta);
+                if (event.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') {
+                  result.output = clip(result.output + event.assistantMessageEvent.delta);
+                  recordSubagentStep(result, { id: messageId, type: 'message', status: 'running', text: result.output });
+                }
                 if (event.type === 'message_end' && event.message.role === 'assistant') {
                   result.turns++; addUsage(result.usage, event.message.usage);
                   result.output = clip(messageText(event.message));
+                  if (result.output || event.message.errorMessage) recordSubagentStep(result, {
+                    id: messageId, type: 'message', status: ['error', 'aborted'].includes(event.message.stopReason) ? 'failed' : 'completed',
+                    text: result.output, error: event.message.errorMessage ? clip(event.message.errorMessage, 2000) : undefined, endedAt: Date.now(),
+                  });
                 }
-                if (event.type === 'tool_execution_start') { result.toolCalls++; result.currentTool = event.toolName; }
-                if (event.type === 'tool_execution_end') delete result.currentTool;
+                const toolId = `tool:${result.turns}:${event.toolCallId}`;
+                if (event.type === 'tool_execution_start') {
+                  result.toolCalls++; result.currentTool = event.toolName;
+                  recordSubagentStep(result, { id: toolId, type: 'tool', name: event.toolName, status: 'running',
+                    summary: clip(event.args?.description || event.args?.path || event.args?.pattern || event.toolName, 512),
+                    input: clip(event.toolName === 'bash' ? event.args?.command : JSON.stringify(event.args ?? {}, null, 2), 4000),
+                    path: ['read', 'write', 'edit'].includes(event.toolName) && typeof event.args?.path === 'string' ? clip(event.args.path, 1024) : undefined,
+                  });
+                }
+                if (event.type === 'tool_execution_update') recordSubagentStep(result, { id: toolId, type: 'tool', name: event.toolName, status: 'running', output: toolOutput(event.partialResult) });
+                if (event.type === 'tool_execution_end') {
+                  delete result.currentTool;
+                  recordSubagentStep(result, { id: toolId, type: 'tool', name: event.toolName, status: event.isError ? 'failed' : 'completed', output: toolOutput(event.result), durationMs: event.durationMs, endedAt: Date.now() });
+                }
                 emit();
               });
               const task = `Prior user messages (constraints/context, not tasks to repeat):\n${inherited || '(none)'}\n\nDelegated context:\n${params.context || '(none)'}\n\nYour task (${result.name}):\n${params.tasks[index].task}`;
               await agent.prompt(task);
               let last = agent.state.messages.findLast(m => m.role === 'assistant');
               while (!signal.aborted && result.turns < maxTurns && result.retries < 2 && last && isRetryableAssistantError(last)) {
-                result.retries++; result.status = 'retrying'; emit(true);
+                result.retries++; result.status = 'retrying';
+                recordSubagentStep(result, { id: `retry:${result.retries}`, type: 'notice', text: `Retry ${result.retries}/2: ${clip(last.errorMessage, 2000)}` });
+                emit(true);
                 await sleep(retryDelayMs * 2 ** (result.retries - 1), undefined, { signal });
                 signal.throwIfAborted();
                 // Retry only the failed model response, not its earlier tool executions.
@@ -181,13 +226,15 @@ export function createSubagentTool({ concurrency = 3, maxTurns = 12, defaultTime
                 catch { if (result.status === 'completed') result.status = 'failed'; result.error = 'Subagent provider resource cleanup failed'; }
               }
               delete result.currentTool;
+              result.finishedAt = Date.now();
+              for (const step of [...result.steps]) if (step.status === 'running') recordSubagentStep(result, { id: step.id, status: result.status === 'completed' ? 'completed' : result.status, endedAt: result.finishedAt });
               release?.(); emit(true);
             }
           }));
           const succeeded = results.filter(r => r.status === 'completed').length;
           const content = `Subagents: ${succeeded}/${results.length} completed\n\n` + results.map(r => `## ${r.name} — ${r.status}\n${r.error ? r.error + '\n' : ''}${r.output || '(no output)'}`).join('\n\n');
           return { content: [{ type: 'text', text: content }], details: snapshot(), usage: results.reduce((u, r) => addUsage(u, r.usage), emptyUsage()), isError: succeeded !== results.length };
-        } finally { clearTimeout(timer); }
+        } finally { clearTimeout(timer); clearTimeout(pendingUpdate); }
       },
     },
   };

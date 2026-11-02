@@ -2,7 +2,17 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## 0.1.20 — Subagents and delegation guidance
+## 0.1.21 — Inspect subagent execution
+
+- **Click into a task's execution.** Subagents now have a standalone summary card in the main conversation and a task list on the right. Select a task to see its live tool calls, commands/arguments, text output, error states, durations and public messages, with its assignment and final result.
+- **A cleaner right panel.** Removed Environment and Outputs. Context and Usage remain alongside the Subagents list. Files are still accessible through the header's Files button and Open file links in execution steps; no workspace files are removed.
+- **No window or focus surprises.** Inspection happens in the existing, resizable right panel. New activity does not switch away from an open file preview. The selected task stays selected across updates, and manual scrolling pauses following until Latest activity is clicked.
+- **Execution history stays available.** Completed traces are saved with the parent result and can be reopened after restarting the app. Per-child traces are bounded to 80 steps / 64 KiB, with explicit truncation/omission notices and throttled live updates. Hidden thinking, inherited prompts and image bodies are not added to the trace.
+- **Older tasks remain readable.** A task from 0.1.20 that saved only its result displays that result with an explanatory notice; missing execution history is not invented.
+
+New trace recording requires a Pi process running the updated extension. Start a new conversation after updating if the old conversation's Pi has been kept alive. All regression, UI and packaging checks run in GitHub CI.
+
+## Included from 0.1.20 — Subagents and delegation guidance
 
 - **Delegate focused subtasks.** The new `subagent` tool accepts 1–6 named tasks, with at most 3 active subagents per parent session, including overlapping calls. Each uses an independent context, the parent's selected model/reasoning level and its available coding tools.
 - **No extra app windows or Pi subprocesses.** Agents run inside the owning Pi process. Tool calls go through the parent tool pipeline, on the parent's machine and working directory; subagents cannot call the delegation, goal or question tools.

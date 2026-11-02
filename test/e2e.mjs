@@ -174,6 +174,9 @@ try {
   await send('hello from the desktop');
   await waitText('.markdown', '[mock-lab/alpha-1] echo: hello from the desktop');
   check('local session streamed a reply', true);
+  await page.locator('.usage-table').waitFor({ timeout: 15000 });
+  const rightTitles = await page.locator('.right-panel .panel-card-head').allInnerTexts();
+  check('right panel retains Context/Usage without Environment or Outputs', rightTitles.some(t => t.includes('Context')) && rightTitles.some(t => t.includes('Usage')) && !rightTitles.some(t => /Environment|Outputs/.test(t)));
   await send('recover this reply [[drop-once]]');
   await page.locator('.working', { hasText: 'Reconnecting to model' }).waitFor({ timeout: 15000 });
   check('a broken model stream shows a bounded retry, not a final red error', await page.locator('.block-error', { hasText: 'terminated' }).count() === 0);
@@ -253,17 +256,18 @@ try {
   check('composer continues 1. 2. 3. lists', listed === '1. first\n2. ' && ended === '1. first\n', JSON.stringify({ listed, ended }));
 
   await waitNew('.markdown', 'Tool result', () => send('[[write:notes/plan.md|# Plan\n- ship M1]]'));
-  await page.locator('.panel-row.file', { hasText: 'plan.md' }).waitFor();
   // change review: the turn's changed files with diffs
   await page.locator('.changes-pill', { hasText: 'plan.md' }).last().click();
   await page.locator('.change-file', { hasText: 'notes/plan.md' }).waitFor({ timeout: 10000 });
   check('change review lists the turn\'s files with added lines', await page.locator('.change-file .diff-row.add').count() >= 2);
   await S('05c-changes');
   await page.click('.fp-actions .tool-button[aria-label="Close files"]');
-  // Claude-style file preview: open the output, rendered and as source, and browse the tree
-  await page.locator('.panel-row.file', { hasText: 'plan.md' }).click();
+  // Files remain accessible from the header/tree after removing the Outputs card.
+  await page.click('.main-tools .tool-button[aria-label="Files"]');
+  await page.locator('.fp-tree-row', { hasText: /^notes$/ }).click();
+  await page.locator('.fp-tree-row.file', { hasText: 'plan.md' }).click();
   await page.locator('.file-pane .fp-markdown h1', { hasText: 'Plan' }).waitFor({ timeout: 15000 });
-  check('file preview renders Markdown from Outputs', await page.locator('.fp-tab.active', { hasText: 'plan.md' }).count() === 1);
+  check('file preview renders Markdown from the file browser', await page.locator('.fp-tab.active', { hasText: 'plan.md' }).count() === 1);
   await page.click('.fp-crumbs .tool-button');
   await page.locator('.fp-source', { hasText: '# Plan' }).waitFor();
   await page.locator('.fp-tree-row', { hasText: 'notes' }).waitFor();
@@ -282,7 +286,7 @@ try {
   check('file pane maximizes over the conversation', !(await page.locator('.session-main').isVisible()));
   await S('05b-files-empty-max');
   await page.click('.fp-actions .tool-button[aria-label="Close files"]');
-  check('write tool created the file and Outputs lists it', existsSync(join(localProject, 'notes/plan.md')) && readFileSync(join(localProject, 'notes/plan.md'), 'utf8').includes('ship M1'));
+  check('write tool created the file and file browsing still works', existsSync(join(localProject, 'notes/plan.md')) && readFileSync(join(localProject, 'notes/plan.md'), 'utf8').includes('ship M1'));
 
   // Pi asks a question with choices: answered by clicking an option
   await send('[[ask:Which database should the demo use?|Postgres,SQLite,No database]]');
@@ -420,23 +424,41 @@ try {
   await S('08-remote-session');
 
   await waitNew('.markdown', 'Subagents: 2/2 completed', () => send('[[subagents]]'), 60000);
-  await page.locator('.tool-group-head', { hasText: 'Subagents Inspect cwd' }).click();
-  await page.locator('.tool-call-head', { hasText: 'Subagents' }).click();
-  await page.locator('.subagent-result.completed').nth(1).waitFor({ timeout: 15000 });
-  check('remote subagents display per-task results inside the parent conversation', await page.locator('.subagent-result.completed').count() === 2);
-  await page.locator('.panel-row.file', { hasText: 'subagent-result.txt' }).waitFor();
-  check('delegated file writes appear in Outputs', existsSync(join(remoteProject, 'subagent-result.txt')));
+  const delegation = () => page.locator('.subagent-summary').filter({ hasText: 'Inspect cwd' });
+  check('subagent tasks are visible without expanding a command group', await delegation().locator('.subagent-task-row.completed').count() === 2);
+  check('subagent tasks are also listed on the right', await page.locator('.subagent-list .subagent-task-row.completed').count() === 2);
+  await delegation().locator('.subagent-task-row', { hasText: 'Inspect cwd' }).click();
+  await page.locator('.subagent-inspector').waitFor();
+  await page.locator('.subagent-trace-tool summary', { hasText: 'bash' }).click();
+  await page.locator('.subagent-trace-output', { hasText: 'api-server' }).waitFor();
+  check('clicking a subagent shows its actual command and output', (await page.locator('.subagent-trace-input').innerText()).includes('pwd'));
+  await S('08b-subagent-execution');
+  await delegation().locator('.subagent-task-row', { hasText: 'Write delegated file' }).click();
+  await page.locator('.subagent-trace-tool summary', { hasText: 'write' }).click();
+  await page.locator('.subagent-trace-body .link-button', { hasText: 'Open file' }).click();
+  await page.locator('.file-pane .fp-source', { hasText: 'created by subagent' }).waitFor();
+  check('delegated files open from the execution trace without an Outputs card', existsSync(join(remoteProject, 'subagent-result.txt')));
+  await page.click('.fp-actions .tool-button[aria-label="Close files"]');
+  check('closing file preview returns to the same subagent', (await page.locator('.subagent-inspector-head').innerText()).includes('Write delegated file'));
+  await page.getByRole('button', { name: 'Back to subagents' }).click();
   check('subagents do not create sidebar conversations or extra windows', (await app.windows()).length === 1 && await page.locator('.session-row').count() === 2);
-  await S('08b-subagents');
+  await page.click('.main-tools .tool-button[aria-label="Files"]');
   await waitNew('.markdown', 'Subagents: 2/2 completed', async () => {
     await send('[[subagents-background]]');
     await page.waitForFunction(() => {
       const state = window.__pideskState();
       return Object.values(state.transcripts[state.activeId]?.tools ?? {}).some(t => t.status === 'running' && t.args?.command?.includes('background-subagent'));
     }, undefined, { timeout: 15000 });
+    check('new subagent activity does not replace the open file pane', await page.locator('.file-pane').isVisible());
+    await page.locator('.subagent-summary').last().locator('.subagent-task-row', { hasText: 'Delayed task 1' }).click();
+    await page.locator('.subagent-trace-tool.running').waitFor({ timeout: 15000 });
+    check('running subagent commands can be inspected before completion', await page.locator('.subagent-inspector-meta', { hasText: 'Running' }).count() === 1);
     check('dropped SSH during delegated work', dropSsh());
   }, 60000);
   check('subagents finish on the host through a dropped desktop connection', [1, 2].every(i => existsSync(join(remoteProject, `background-subagent-${i}.txt`))));
+  await page.locator('.subagent-inspector-meta', { hasText: 'Completed' }).waitFor();
+  check('the selected execution view updates after reconnecting', await page.locator('.subagent-trace-tool.completed').count() === 1);
+  await page.getByRole('button', { name: 'Back to subagents' }).click();
 
   // concurrent sessions: start a remote run, switch to local, run there, both complete
   await send('remote run ' + 'x'.repeat(300));
@@ -536,6 +558,11 @@ try {
   check('after a restart, a conversation shows its history without waiting for Pi to start', remoteOpenMs < (process.env.CI ? 3000 : 1500), `${remoteOpenMs} ms (SSH)`);
   await page.locator('.session-row').first().waitFor();
   check('sessions restored after restart', await page.locator('.session-row').count() === 2);
+  await page.locator('.subagent-summary').filter({ hasText: 'Inspect cwd' }).locator('.subagent-task-row', { hasText: 'Inspect cwd' }).click();
+  await page.locator('.subagent-trace-tool summary', { hasText: 'bash' }).click();
+  await page.locator('.subagent-trace-output', { hasText: 'api-server' }).waitFor();
+  check('subagent command/output history remains inspectable after an app restart', true);
+  await page.getByRole('button', { name: 'Back to subagents' }).click();
   await page.locator('.session-row', { hasText: 'hello from the desktop' }).click();
   await waitText('.markdown', '[mock-lab/alpha-1] echo: hello from the desktop', 90000);
   await waitText('.markdown', 'Tool result: local-after-quit', 60000);

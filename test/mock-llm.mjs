@@ -77,7 +77,7 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
       send({ role: 'assistant', content: '' });
       const slow = userText.includes('[[subagents-slow]]'), background = userText.includes('[[subagents-background]]');
       const tasks = slow || background
-        ? [1, 2].map(i => ({ name: `Delayed task ${i}`, task: `[[bash:sleep 3 && echo done > ${slow ? 'cancelled' : 'background'}-subagent-${i}.txt]]` }))
+        ? [1, 2].map(i => ({ name: `Delayed task ${i}`, task: `[[bash:sleep ${background ? 6 : 3} && echo done > ${slow ? 'cancelled' : 'background'}-subagent-${i}.txt]]` }))
         : [{ name: 'Inspect cwd', task: '[[bash:pwd]]' }, { name: 'Write delegated file', task: '[[write:subagent-result.txt|created by subagent]]' }];
       send({ tool_calls: [{ index: 0, id: 'call_sub' + requests.length, type: 'function', function: { name: 'subagent', arguments: JSON.stringify({ tasks, context: 'Only inspect cwd and write the assigned file. Do not run tests or open GUI applications.' }) } }] });
       finish('tool_calls');

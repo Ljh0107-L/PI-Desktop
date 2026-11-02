@@ -250,6 +250,7 @@ export function displayBlocks(t) {
     (message.content ?? []).forEach((block, bi) => {
       if (!block) return;
       if (block.type === 'toolCall' && block.name === 'ask_user') { flush(); blocks.push({ kind: 'ask', key: `q${mi}-${bi}`, call: block }); return; }
+      if (block.type === 'toolCall' && block.name === 'subagent') { flush(); blocks.push({ kind: 'subagents', key: `subagents:${block.id}`, call: block }); return; }
       if (block.type === 'toolCall') {
         if (!group) group = { kind: 'tools', key: `g${mi}-${bi}`, calls: [] };
         group.calls.push(block);
