@@ -956,7 +956,9 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 .subagent-task-caption, .subagent-batch-count { color: var(--muted); font-size: 11px; }
 .subagent-task-row.completed > svg, .subagent-trace-tool.completed > summary > svg { color: #56d364; }
 .subagent-task-row.failed > svg, .subagent-task-row.timed_out > svg, .subagent-trace-tool.failed > summary > svg { color: #ff7b72; }
-.subagent-list-head .link-button { margin-left: auto; font-size: 11px; }
+.subagent-list-header { display: flex; align-items: center; }
+.subagent-list-head { flex: 1; min-width: 0; }
+.subagent-list-header > .link-button { flex-shrink: 0; margin-right: 8px; font-size: 11px; }
 .subagent-batch-count { padding: 8px; }
 .subagent-empty, .subagent-trace-notice { padding: 10px; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .right-panel.subagent-inspector { position: relative; max-width: min(680px, 50vw); min-height: 0; overflow: visible; padding: 12px; border-left: 1px solid var(--hairline); }

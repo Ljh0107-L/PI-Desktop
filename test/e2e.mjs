@@ -177,10 +177,15 @@ try {
   await page.locator('.usage-table').waitFor({ timeout: 15000 });
   const rightTitles = await page.locator('.right-panel .panel-card-head').allInnerTexts();
   check('right panel retains Context/Usage without Environment or Outputs', rightTitles.some(t => t.includes('Context')) && rightTitles.some(t => t.includes('Usage')) && !rightTitles.some(t => /Environment|Outputs/.test(t)));
-  check('Subagents uses a plain section title without icon or empty helper text',
+  check('Subagents has plain text followed only by its disclosure arrow, without helper text',
     await page.locator('.subagent-list-head').innerText() === 'Subagents' &&
-    await page.locator('.subagent-list-head svg').count() === 0 &&
+    await page.locator('.subagent-list-head').evaluate(el => el.firstElementChild.tagName === 'SPAN') &&
+    await page.locator('.subagent-list-head svg').count() === 1 &&
     await page.getByText('Delegated tasks will appear here.').count() === 0);
+  await page.locator('.subagent-list-head').click();
+  check('empty Subagents section can collapse', await page.locator('.subagent-list-head').getAttribute('aria-expanded') === 'false');
+  await page.locator('.subagent-list-head').press('Enter');
+  check('Subagents expands from keyboard like Usage', await page.locator('.subagent-list-head').getAttribute('aria-expanded') === 'true');
   await S('04-plain-subagent-header');
   await send('recover this reply [[drop-once]]');
   await page.locator('.working', { hasText: 'Reconnecting to model' }).waitFor({ timeout: 15000 });
@@ -429,10 +434,15 @@ try {
   check('remote command ran in the remote folder', (await page.locator('.tool-output').last().innerText()).includes('api-server'));
   await S('08-remote-session');
 
+  await page.locator('.subagent-list-head').click();
   await waitNew('.markdown', 'Subagents: 2/2 completed', () => send('[[subagents]]'), 60000);
   const delegation = () => page.locator('.subagent-summary').filter({ hasText: 'Inspect cwd' });
   check('subagent tasks are visible without expanding a command group', await delegation().locator('.subagent-task-row.completed').count() === 2);
-  check('subagent tasks are also listed on the right', await page.locator('.subagent-list .subagent-task-row.completed').count() === 2);
+  check('collapsed Subagents stays closed as work runs and completes', await page.locator('.subagent-list-head').getAttribute('aria-expanded') === 'false' && await page.locator('.subagent-list .subagent-task-row').count() === 0);
+  await S('08a1-subagents-collapsed');
+  await page.locator('.subagent-list-head').click();
+  check('reopening Subagents restores completed tasks without rerunning work', await page.locator('.subagent-list .subagent-task-row.completed').count() === 2);
+  await S('08a2-subagents-expanded');
   await delegation().locator('.subagent-task-row', { hasText: 'Inspect cwd' }).click();
   await page.locator('.subagent-inspector').waitFor();
   await page.locator('.subagent-trace-tool summary', { hasText: 'bash' }).click();

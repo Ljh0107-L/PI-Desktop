@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { Markdown, Spinner } from './ui.jsx';
 import { closeSubagent, openFile, openSubagent } from './store.js';
@@ -31,17 +31,27 @@ export function SubagentSummary({ sessionId, call, tool }) {
 
 export function SubagentList({ sessionId, batches, selectedCallId }) {
   const [showAll, setShowAll] = useState(false);
+  const [open, setOpen] = useState(true);
+  const bodyId = useId();
   const selected = batches.find(b => b.callId === selectedCallId);
   const ordered = [...batches].reverse();
   const visible = selected ? [selected] : showAll ? ordered : ordered.slice(0, 5);
   return <section className="panel-card subagent-list">
-    <div className="panel-card-head subagent-list-head"><span>Subagents</span>
-      {selected && <button className="link-button" onClick={() => closeSubagent(sessionId)}>Show all</button>}</div>
-    {visible.map(batch => <div className="subagent-batch" key={batch.callId}>
-      <div className="subagent-batch-count">{subagentSummary(batch.tasks)}</div>
-      {batch.tasks.map(task => <TaskRow key={task.key} task={task} onClick={() => openSubagent(sessionId, batch.callId, task.index)} />)}
-    </div>)}
-    {!selected && ordered.length > 5 && <button className="panel-more" onClick={() => setShowAll(v => !v)}>{showAll ? 'Show recent' : 'Show all batches'}</button>}
+    <div className="subagent-list-header">
+      <button type="button" className="panel-card-head subagent-list-head" onClick={() => setOpen(v => !v)} aria-expanded={open} aria-controls={bodyId}>
+        <span>Subagents</span><Icon name={open ? 'caretDown' : 'caretRight'} size={13} className="muted" />
+      </button>
+      {open && selected && <button className="link-button" onClick={() => closeSubagent(sessionId)}>Show all</button>}
+    </div>
+    <div id={bodyId} hidden={!open}>
+      {open && <>
+        {visible.map(batch => <div className="subagent-batch" key={batch.callId}>
+          <div className="subagent-batch-count">{subagentSummary(batch.tasks)}</div>
+          {batch.tasks.map(task => <TaskRow key={task.key} task={task} onClick={() => openSubagent(sessionId, batch.callId, task.index)} />)}
+        </div>)}
+        {!selected && ordered.length > 5 && <button className="panel-more" onClick={() => setShowAll(v => !v)}>{showAll ? 'Show recent' : 'Show all batches'}</button>}
+      </>}
+    </div>
   </section>;
 }
 

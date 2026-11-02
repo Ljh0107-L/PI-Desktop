@@ -1,7 +1,7 @@
 // Isolated model/tool loops inside the owning Pi process. No new credentials,
 // daemon, shell bootstrap or desktop window; tool calls use the parent's pipeline.
 import { randomUUID } from 'node:crypto';
-import { setTimeout as sleep } from 'node:timers/promises';
+import { setTimeout as sleep, setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import { Agent } from '@earendil-works/pi-agent-core';
 import { cleanupSessionResources, isRetryableAssistantError } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
@@ -161,10 +161,22 @@ export function createSubagentTool({ concurrency = 3, defaultTimeoutMs = 300000,
               agent = new Agent({
                 initialState: { systemPrompt, model, thinkingLevel: ctx.thinkingLevel ?? 'medium', tools },
                 sessionId: result.id,
-                streamFn: (m, context, options) => ctx.modelRegistry.streamSimple(m, context, { ...options, cacheRetention: 'long', maxRetries: 0, timeoutMs: params.timeoutSeconds ? params.timeoutSeconds * 1000 : defaultTimeoutMs }),
-                // The task ends on a final answer, cancellation or the batch deadline,
-                // not after an arbitrary number of useful model/tool turns.
-              });
+                prepareRequest: (_request, runSignal) => {
+                  signal.throwIfAborted();
+                  runSignal?.throwIfAborted();
+                },
+                streamFn: (m, context, options) => {
+                  signal.throwIfAborted();
+                  return ctx.modelRegistry.streamSimple(m, context, { ...options,
+                    signal: AbortSignal.any([signal, ...(options?.signal ? [options.signal] : [])]),
+                    cacheRetention: 'long', maxRetries: 0, timeoutMs: params.timeoutSeconds ? params.timeoutSeconds * 1000 : defaultTimeoutMs });
+                },
+                // No turn cap. Yield so even an immediately resolving provider/tool loop
+                // services Stop/deadline timers; don't rely on a provider honouring abort.
+                finishTurn: async (_turn, runSignal) => {
+                  await yieldToEventLoop();
+                  return signal.aborted || runSignal?.aborted ? { action: 'end' } : undefined;
+                },              });
               signal.addEventListener('abort', abort, { once: true });
               unsubscribe = agent.subscribe(event => {
                 const messageId = `message:${result.turns + 1}`;

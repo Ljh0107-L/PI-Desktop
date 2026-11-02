@@ -5,7 +5,8 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 ## 0.1.23 — Let subagents finish useful work
 
 - **No fixed model-turn cap.** Removed the 12-turn cutoff that could mark a healthy multi-step review or implementation as failed before it returned its report. The displayed turn count is informational only.
-- **Cancellation and deadlines remain.** Tasks still stop on user cancellation, session shutdown, the selected batch deadline or a genuine terminal provider failure. The concurrency limit and bounded transient retry policy are unchanged; completed tools are never replayed just to retry the model.
+- **Cancellation and deadlines remain.** Tasks still stop on user cancellation, session shutdown, the selected batch deadline or a genuine terminal provider failure. Turn boundaries yield to cancellation timers, and new model requests are blocked once cancelled, even if a provider returns a late tool call. The concurrency limit and bounded transient retry policy are unchanged; completed tools are never replayed just to retry the model.
+- **Collapsible Subagents list.** Click its plain-text heading to expand/collapse it like Usage. The small disclosure arrow remains, but the leading fork icon and empty-state helper text do not. Collapsing only hides the list; work and progress continue without reopening it automatically.
 - **Regression coverage.** Offline CI covers a 26-turn successful task, a transient failure after 15 tool calls, cancellation after 12 turns, and deadline cancellation of an endless tool loop.
 
 Start a new conversation after updating to load the new subagent implementation. Already failed tasks are not automatically rerun, and live sessions are not force-restarted.

@@ -33,6 +33,8 @@ For implementation, assign disjoint files and explicit constraints:
 
 Since 0.1.21, each delegation appears as a standalone, compact card in the main conversation, not inside a command group. The right panel contains Context, Usage and a Subagents list; the old Environment and Outputs cards are removed. This is only a UI change: it does not delete workspace files or the `outputs/` directory.
 
+Since 0.1.23, click the plain **Subagents** heading to expand or collapse its list, just like Usage (keyboard Enter/Space works too). Collapsing does not cancel work or discard results; incoming progress does not force the list open. The heading has only a disclosure arrow, no leading fork icon or empty-state helper text.
+
 Click a task in the chat card or the right-hand list to open its execution inspector in the same panel. It shows the assignment, status, elapsed time, model/usage, public assistant messages, and individual tool calls. Expand a tool step to see the command/arguments, text output, error state and duration. File operations provide an **Open file** link. You can also browse files using the header's Files button.
 
 Running tasks update in place. New activity never opens or replaces a file pane automatically. The inspector can be resized, keeps the selected task as updates arrive, and offers **Latest activity** after you scroll away from the bottom. Closing a file preview returns to the selected task.

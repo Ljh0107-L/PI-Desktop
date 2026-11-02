@@ -192,7 +192,11 @@ test('removing the turn cap does not make an endless loop ignore the batch deadl
 
 test('user stop still cancels a task after more than twelve turns', async () => {
   const parent = new AbortController();
-  const c = context(async (_request, n) => { if (n === 20) parent.abort(new Error('User stopped long task')); return toolReply(); });
+  const c = context(async (_request, n) => {
+    if (n > 20) throw new Error('Unexpected model request after cancellation');
+    if (n === 20) parent.abort(new Error('User stopped long task'));
+    return toolReply();
+  });
   const result = await run(createSubagentTool(), c, tasks(1), parent.signal);
   assert.equal(c.requests.length, 20);
   assert.equal(result.isError, true);
