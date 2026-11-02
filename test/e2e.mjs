@@ -432,6 +432,8 @@ try {
   await page.locator('.subagent-trace-tool summary', { hasText: 'bash' }).click();
   await page.locator('.subagent-trace-output', { hasText: 'api-server' }).waitFor();
   check('clicking a subagent shows its actual command and output', (await page.locator('.subagent-trace-input').innerText()).includes('pwd'));
+  await page.waitForTimeout(100);
+  check('Latest activity stays hidden when all execution details are already visible', await page.locator('.subagent-latest').count() === 0);
   await S('08b-subagent-execution');
   await delegation().locator('.subagent-task-row', { hasText: 'Write delegated file' }).click();
   await page.locator('.subagent-trace-tool summary', { hasText: 'write' }).click();
