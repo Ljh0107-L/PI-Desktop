@@ -7,8 +7,8 @@ import { createHash } from 'node:crypto';
 import { accessSync, constants, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { readdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { MAX_MANIFEST_BYTES, parseUpdateManifest, UPDATE_MANIFEST_URL } from '../../core/update-manifest.mjs';
 
-const REPO = 'Ljh0107-L/PI-Desktop';
 const CHECK_EVERY_MS = 6 * 60 * 60 * 1000;
 
 const newer = (a, b) => {
@@ -40,19 +40,22 @@ export class Updater {
     if (['checking', 'downloading', 'ready'].includes(this.status.state)) return this.status;
     this.#set({ state: 'checking' });
     try {
-      const res = await this.net.fetch(`https://api.github.com/repos/${REPO}/releases/latest`, { headers: { Accept: 'application/vnd.github+json' } });
-      if (!res.ok) throw new Error(`GitHub returned ${res.status}`);
-      const release = await res.json();
-      const version = release.tag_name.replace(/^v/, '');
+      // No api.github.com call: unauthenticated REST requests share a 60/hour
+      // allowance across a company's outbound proxy. The public asset needs no token.
+      const res = await this.net.fetch(UPDATE_MANIFEST_URL, {
+        cache: 'no-store', headers: { 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(30000),
+      });
+      if (!res.ok) throw new Error(`Could not read the update manifest (HTTP ${res.status}). Try the Releases download page if your network blocks GitHub assets.`);
+      const chunks = [];
+      let bytes = 0;
+      for await (const chunk of res.body) {
+        bytes += chunk.length;
+        if (bytes > MAX_MANIFEST_BYTES) throw new Error('The update manifest is too large');
+        chunks.push(chunk);
+      }
+      const { version, asset, sha512 } = parseUpdateManifest(Buffer.concat(chunks).toString('utf8'));
       if (!newer(version, this.app.getVersion())) { this.#set({ state: 'current', version: this.app.getVersion() }); return this.status; }
-      const arch = process.arch === 'arm64' ? 'arm64' : 'x64';
-      const zip = release.assets.find(a => a.name.endsWith('.zip') && a.name.includes(`-${arch}`)) ?? (arch === 'x64' ? release.assets.find(a => a.name.endsWith('-mac.zip') && !a.name.includes('arm64')) : null);
-      const manifest = release.assets.find(a => a.name === 'latest-mac.yml');
-      if (!zip || !manifest) throw new Error('This release has no build for this Mac');
-      const yml = await (await this.net.fetch(manifest.browser_download_url)).text();
-      const sha512 = new RegExp(`url: ${zip.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s+sha512: (\\S+)`).exec(yml)?.[1];
-      if (!sha512) throw new Error('The release manifest has no checksum for this build');
-      await this.#download(version, zip, sha512);
+      await this.#download(version, asset, sha512);
       return this.status;
     } catch (error) {
       this.#set({ state: manual ? 'error' : 'idle', message: error.message });
@@ -65,16 +68,19 @@ export class Updater {
     const dir = join(this.cacheDir, version);
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dir, { recursive: true });
-    const res = await this.net.fetch(asset.browser_download_url);
+    const res = await this.net.fetch(asset.browser_download_url, { signal: AbortSignal.timeout(10 * 60 * 1000) });
     if (!res.ok) throw new Error(`Download failed (${res.status})`);
-    const total = Number(res.headers.get('content-length')) || asset.size || 0;
+    const total = asset.size;
     const chunks = [];
     let received = 0, last = 0;
     for await (const chunk of res.body) {
-      chunks.push(chunk); received += chunk.length;
+      received += chunk.length;
+      if (received > asset.size) throw new Error('The download size did not match the release manifest');
+      chunks.push(chunk);
       const progress = total ? received / total : 0;
       if (progress - last > 0.01) { last = progress; this.#set({ state: 'downloading', version, progress }); }
     }
+    if (received !== asset.size) throw new Error('The download size did not match the release manifest');
     const data = Buffer.concat(chunks);
     if (createHash('sha512').update(data).digest('base64') !== sha512) throw new Error('The download did not match its checksum');
     const zipPath = join(dir, 'update.zip');

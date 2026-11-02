@@ -10,6 +10,12 @@ A Claude Desktop–style app for the [Pi](https://github.com/earendil-works/pi) 
 
 Download the `.dmg` for your Mac (Apple Silicon `arm64` or Intel `x64`) from [Releases](https://github.com/Ljh0107-L/PI-Desktop/releases/latest) and drag Pi Desktop to Applications. The app is ad-hoc signed rather than notarized, so the first time **right-click it → Open** (or run `xattr -dr com.apple.quarantine "/Applications/Pi Desktop.app"`). After that it updates itself: when a new release is downloaded, an **Update** button appears next to Settings.
 
+## Updates behind a shared company proxy
+
+Since **0.1.18**, update checks read the public [`latest-mac.yml` Release asset](https://github.com/Ljh0107-L/PI-Desktop/releases/latest/download/latest-mac.yml), not `api.github.com`. They need no GitHub token and do not consume the unauthenticated REST API's shared-IP 60-requests/hour allowance. Downloads are pinned to the manifest's version and verified against its SHA-512 and size.
+
+If **0.1.17 or earlier** shows `GitHub returned 403`, download the latest DMG from [Releases](https://github.com/Ljh0107-L/PI-Desktop/releases/latest), quit the desktop and replace the app in Applications once. Your settings and conversations are stored separately. Future updates use the new method. The network must still allow `github.com` and GitHub's release-asset download host; this does not bypass a company firewall or general download restrictions.
+
 ## Run from source
 
 ```sh
@@ -48,7 +54,7 @@ build/         app icon, packaging hook
 CI runs every suite on GitHub's macOS runners on each push; screenshots are uploaded as an artifact. Locally:
 
 ```sh
-npm run test:backend       # isolated lifecycle + real HTTP stream-interruption recovery
+npm run test:backend       # lifecycle, stream recovery, and API-free updater regressions
 npm run test:sshd &        # throwaway unprivileged sshd on 127.0.0.1 (host alias pidesk-test)
 npm run test:protocol      # Pi RPC protocol, local and over SSH
 npm run test:relay         # sessions survive drops, replay, pending questions, secrets

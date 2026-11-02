@@ -2,7 +2,16 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## 0.1.17 — Connection lifecycle and stream recovery
+## 0.1.18 — Updates without GitHub API quota
+
+- **No more shared-IP API quota for updates.** Checks now fetch the public `releases/latest/download/latest-mac.yml` asset directly. No GitHub token, REST API call or quota-dependent fallback is used.
+- **Version-pinned, verified downloads.** The ZIP URL is pinned to the version in that manifest, preventing a new release appearing mid-download from mixing versions. SHA-512 verification is retained, with strict manifest, filename and size validation.
+- **Bounded requests and fresh checks.** Manifest and archive fetches have deadlines, overlapping checks are coalesced, and metadata requests bypass the local cache.
+- **Regression coverage.** Added tests for both Mac architectures, an API-unavailable update with a real ZIP extraction, tampered/truncated downloads, invalid manifests and retryable network failures.
+
+**One-time upgrade from 0.1.17 or earlier:** if the old app shows `GitHub returned 403`, download this release's DMG directly from the assets below, quit Pi Desktop, and replace the app in Applications. Settings and conversation files are stored separately. After that, automatic updates use the API-free method. Company-wide blocks on GitHub/download hosts are separate from the REST API limit and still need network access.
+
+## Included from 0.1.17 — Connection lifecycle and stream recovery
 
 - **No false “connection closed” toast when changing folders.** Cancelling a background pre-warm no longer reports a failed conversation, drops its replacement, or starts a process after that warm-up was cancelled. Genuine foreground startup errors remain visible.
 - **`terminated` now reflects actual recovery.** Pi already retries interrupted model streams with bounded backoff. The desktop now shows the retry count instead of a permanent red error while that retry runs. Recovered attempts become neutral notices, including after reopening the conversation. A final failure after retry exhaustion still appears as an error; stopping cancels the retry.
