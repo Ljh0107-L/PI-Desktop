@@ -156,6 +156,16 @@ try {
     const childRequests = mock.requests.slice(before).filter(r => r.subagent);
     check(`[${session.id}] subagents inherit current provider credentials`, childRequests.length >= 4 && childRequests.every(r => r.provider === 'mock-beta' && r.model === 'beta-1' && r.authorization === `Bearer ${keys.beta}`));
     check(`[${session.id}] delegation guidance reaches the parent prompt`, mock.requests.slice(before).some(r => !r.subagent && r.system.includes('independent context windows')));
+    const runtimeCheck = await run(session, '[[subagents-runtime]]');
+    const runtimeResult = runtimeCheck.tools.find(t => t.toolName === 'subagent')?.result?.details?.results?.[0];
+    const runtimeOutput = runtimeResult?.steps.find(s => s.name === 'bash')?.output ?? '';
+    check(`[${session.id}] child shell can use node and PI_NODE from the actual runtime`, runtimeResult?.status === 'completed' && runtimeOutput.includes('runtime=false') && runtimeOutput.includes('pi-node=false'), runtimeOutput);
+    for (const scenario of ['length', 'length-tools', 'length-repeat']) {
+      const limited = await run(session, `[[subagents-${scenario}]]`);
+      const child = limited.tools.find(t => t.toolName === 'subagent')?.result?.details?.results?.[0];
+      check(`[${session.id}] real SSE ${scenario} has one bounded output-limit recovery`, child?.lengthRecoveries === 1 && (scenario === 'length-repeat' ? child.status === 'failed' && child.failureKind === 'output_limit' : child.status === 'completed'), JSON.stringify({ status: child?.status, error: child?.error }));
+      check(`[${session.id}] ${scenario} neither leaks reasoning nor executes clipped writes`, !JSON.stringify(child).includes('PRIVATE_REASONING_FIXTURE_NOT_FOR_TRACE') && !existsSync(join(cwd, 'must-not-be-written.txt')) && (scenario !== 'length-tools' || child.skippedToolCalls === 1));
+    }
   }
 
   // Abort an actual delegated shell tool, not only a mock model request.

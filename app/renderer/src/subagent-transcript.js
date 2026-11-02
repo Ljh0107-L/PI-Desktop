@@ -3,7 +3,7 @@ import { isAbortText } from './transcript.js';
 
 const text = value => typeof value === 'string' ? value : '';
 const timestamp = value => Number.isFinite(value) ? value : null;
-const TOOL_STATUSES = new Map([['completed', 'done'], ['done', 'done'], ['failed', 'error'], ['error', 'error'], ['cancelled', 'cancelled'], ['timed_out', 'timed_out']]);
+const TOOL_STATUSES = new Map([['completed', 'done'], ['done', 'done'], ['failed', 'error'], ['error', 'error'], ['cancelled', 'cancelled'], ['timed_out', 'timed_out'], ['skipped', 'skipped']]);
 const toolStatus = status => TOOL_STATUSES.get(status) ?? 'running';
 
 function argumentsOf(step) {

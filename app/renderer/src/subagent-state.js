@@ -10,6 +10,7 @@ export const visibleSubagentTasks = (tasks, clearedIds = []) => {
 export const visibleSubagentBatches = (batches, clearedIds = []) => batches.map(batch => ({ ...batch, tasks: visibleSubagentTasks(batch.tasks, clearedIds) }))
   .filter(batch => batch.tasks.length > 0);
 export const subagentStatus = status => ({ pending: 'Waiting for details', queued: 'Queued', running: 'Running', retrying: 'Retrying', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled', timed_out: 'Timed out' })[status] ?? status;
+export const subagentTaskStatus = task => task.status === 'failed' && (task.failureKind === 'output_limit' || /ended without a complete answer \(length\)/i.test(task.error ?? '')) ? 'Output limit' : subagentStatus(task.status);
 
 export function subagentBatch(call, tool) {
   const details = tool?.result?.details;

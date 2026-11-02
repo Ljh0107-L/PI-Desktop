@@ -147,13 +147,15 @@ test('retry repeats only a failed model response, not a completed tool', async (
   assert.equal(result.usage.totalTokens, 54);
 });
 
-test('authentication failures and output limits remain failures, not successful summaries', async () => {
+test('authentication failures and repeated output limits remain failures, not successful summaries', async () => {
   for (const failure of [{ stopReason: 'error', errorMessage: '401 invalid API key' }, { stopReason: 'length' }]) {
     const c = context(async () => reply('partial', failure));
     const result = await run(createSubagentTool(), c);
     assert.equal(result.isError, true);
     assert.equal(result.details.results[0].status, 'failed');
-    assert.equal(c.requests.length, 1);
+    assert.equal(c.requests.length, failure.stopReason === 'length' ? 2 : 1);
+    assert.equal(result.details.results[0].failureKind, failure.stopReason === 'length' ? 'output_limit' : 'provider_error');
+    if (failure.stopReason === 'length') assert.match(result.details.results[0].error, /Output token limit reached again after one recovery/);
   }
 });
 
@@ -227,6 +229,10 @@ test('pre-aborted work never starts; invalid batches fail before invoking a mode
   assert.equal(c.requests.length, 0);
   await assert.rejects(run(controller, c, []), /1–6/);
   await assert.rejects(run(controller, c, tasks(7)), /1–6/);
+  for (const params of [undefined, null, {}, { context: 'not a task' }, { tasks: [null] }, { tasks: [{ name: ' ', task: 'work' }] }]) {
+    await assert.rejects(controller.tool.execute('invalid', params, undefined, undefined, c.ctx), /1–6/);
+  }
+  assert.equal(c.requests.length, 0);
 });
 
 test('subagent output is bounded; tool usage and file outputs survive history reload/dedup', async t => {

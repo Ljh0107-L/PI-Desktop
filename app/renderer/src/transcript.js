@@ -381,6 +381,8 @@ export function outputs(t) {
 }
 
 export function toolSummary(calls) {
+  const skipped = calls.filter(call => call.__trace?.status === 'skipped').length;
+  calls = calls.filter(call => call.__trace?.status !== 'skipped');
   const counts = {};
   for (const call of calls) counts[call.name] = (counts[call.name] ?? 0) + 1;
   const parts = [];
@@ -397,6 +399,7 @@ export function toolSummary(calls) {
   if (counts.subagent) parts.push(`Delegated ${plural(calls.filter(c => c.name === 'subagent').reduce((n, c) => n + (c.arguments?.tasks?.length ?? 0), 0), 'subtask', 'subtasks')}`);
   const other = calls.length - (counts.bash ?? 0) - edited - (counts.read ?? 0) - searched - (counts.subagent ?? 0);
   if (other) parts.push(`${parts.length ? 'used' : 'Used'} ${plural(other, 'tool', 'tools')}`);
+  if (skipped) parts.push(`${plural(skipped, 'tool call', 'tool calls')} not executed`);
   return parts.join(', ');
 }
 

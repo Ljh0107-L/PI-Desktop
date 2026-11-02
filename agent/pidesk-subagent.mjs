@@ -40,9 +40,70 @@ export function recordSubagentStep(result, step) {
 }
 const toolOutput = result => clip(messageText(result), 4000);
 
+export const LENGTH_RECOVERY_PROMPT = `The previous response reached the output-token limit (including reasoning), not a process crash. Its tool calls, if any, were not executed; earlier successful actions and tool results remain. Continue the same delegated task and all original constraints from current state, without repeating successful edits. Use smaller complete writes/edits and incremental progress instead of planning or generating the whole implementation in one response. Keep discovery scoped and shell commands bounded. If completion is not feasible in the remaining time, return concise partial progress and blockers. This is the only automatic output-limit recovery.`;
+
+// Only remove the exact settled turn suffix. IDs alone are unsafe: providers can
+// reuse them in earlier, successfully executed turns.
+export function pruneLengthTurn(messages, last, turn) {
+  const index = messages.lastIndexOf(last);
+  const calls = last?.content?.filter(b => b.type === 'toolCall') ?? [];
+  const skipped = turn?.toolResults;
+  if (last?.stopReason !== 'length' || turn?.message !== last || index < 0 || !Array.isArray(skipped)
+    || skipped.length !== calls.length || messages.length !== index + 1 + skipped.length
+    || !skipped.every((m, i) => messages[index + 1 + i] === m && m.role === 'toolResult' && m.isError === true
+      && m.toolCallId === calls[i].id && m.toolName === calls[i].name)) {
+    throw new Error('Output token limit reached; cannot safely recover the truncated response. Split the remaining task into smaller parts.');
+  }
+  return messages.slice(0, index);
+}
+
+export function subagentResponseDiagnostics(message, model) {
+  const diagnostics = { publicTextPresent: Boolean(messageText(message).trim()), skippedToolCalls: message.stopReason === 'length' ? message.content.filter(b => b.type === 'toolCall').length : 0 };
+  for (const [key, value] of [['outputTokens', message.usage?.output], ['reasoningTokens', message.usage?.reasoning], ['configuredMaxTokens', model.maxTokens]]) {
+    if (Number.isFinite(value) && value >= 0) diagnostics[key] = value;
+  }
+  if (model.reasoning === false && diagnostics.reasoningTokens > 0) diagnostics.reasoningConfigurationMismatch = true;
+  return diagnostics;
+}
+
+function outputLimitMessage(d, repeated = false) {
+  const tokens = [];
+  if (d.outputTokens !== undefined) tokens.push(`response output: ${d.outputTokens} tokens`);
+  if (d.reasoningTokens !== undefined) tokens.push(`including ${d.reasoningTokens} reasoning tokens`);
+  if (d.configuredMaxTokens !== undefined) tokens.push(`configured cap: ${d.configuredMaxTokens}`);
+  return `Output token limit reached${repeated ? ' again after one recovery' : ''}${tokens.length ? ` (${tokens.join('; ')})` : ''}. ${d.publicTextPresent ? 'The public answer may be incomplete.' : 'No public answer was produced in this response.'} Its tool calls were not executed; earlier actions may have completed. Split the remaining task into smaller parts.${d.reasoningConfigurationMismatch ? ' Reasoning usage was reported although model.reasoning is configured false; check provider/model configuration.' : ''}`;
+}
+
+// Fail closed for replacement bash contracts. Only an optional numeric seconds
+// field with understood constraints gets a default; never mutate parent schemas.
+export function childBashParameters(tool) {
+  const schema = tool.parameters, timeout = schema?.properties?.timeout;
+  const rootKeys = new Set(['type', 'properties', 'required', 'additionalProperties', 'description', 'title', '$id', '$schema']);
+  const numberKeys = new Set(['type', 'description', 'title', 'default', 'examples', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum', 'multipleOf', 'enum', 'const']);
+  if (tool.name !== 'bash' || schema?.type !== 'object' || !timeout || !['number', 'integer'].includes(timeout.type)
+    || schema.required?.includes('timeout') || !/\bseconds\b/i.test(timeout.description ?? '') || /\b(?:milliseconds|minutes|hours)\b/i.test(timeout.description ?? '')
+    || Object.keys(schema).some(k => !rootKeys.has(k) && !k.startsWith('~'))
+    || Object.keys(timeout).some(k => !numberKeys.has(k) && !k.startsWith('~'))) return schema;
+  const value = 120;
+  if ((timeout.minimum !== undefined && !(value >= timeout.minimum)) || (timeout.maximum !== undefined && !(value <= timeout.maximum))
+    || (timeout.exclusiveMinimum !== undefined && !(value > timeout.exclusiveMinimum)) || (timeout.exclusiveMaximum !== undefined && !(value < timeout.exclusiveMaximum))
+    || (timeout.multipleOf !== undefined && !(timeout.multipleOf > 0 && Number.isInteger(value / timeout.multipleOf)))
+    || (timeout.enum !== undefined && (!Array.isArray(timeout.enum) || !timeout.enum.includes(value)))
+    || (timeout.const !== undefined && timeout.const !== value)) return schema;
+  return { ...schema, properties: { ...schema.properties, timeout: { ...timeout,
+    description: 'Timeout in seconds (optional; subagent default 120 seconds when omitted). Explicit values are preserved; the batch deadline still applies.',
+  } } };
+}
+
+// A timeout summary must not echo raw commands, tool results or provider errors.
+const blockedToolSummary = (tool, args) => clip(typeof args?.description === 'string'
+  ? args.description.replace(/https?:\/\/\S+/gi, '[url]').replace(/(?:bearer\s+\S+|(?:api[_-]?key|token|password|secret)\s*[:=]\s*\S+|sk-[\w-]+)/gi, '[redacted]').replace(/[\r\n\t]/g, ' ')
+  : tool === 'bash' ? 'shell command' : `${tool} operation`, 180);
+
 export const SUBAGENT_PROMPT = `You can use the subagent tool to delegate focused tasks to agents with independent context windows.
 - Delegate independent investigations, reviews, or clearly separated implementation tasks when this saves time or keeps the main context focused. Handle trivial tasks directly.
-- A call accepts 1–6 named tasks; at most 3 subagents run at once in this Pi session. The call waits for their results. Use separate calls for dependent stages.
+- Every call must include tasks: an array of 1–6 objects with non-empty name and task. context alone is not a task. At most 3 subagents run at once in this Pi session. The call waits for their results. Use separate calls for dependent stages.
+- Scope large implementations into incremental, complete writes/edits. Keep discovery within known project/runtime paths, not unbounded filesystem scans. Compatible bash tools default to 120 seconds when timeout is omitted; specify a bounded timeout for longer commands.
 - Each subagent uses your current model, reasoning effort, working directory and available coding tools. It does not see your assistant/tool transcript. Supply concrete goals, relevant paths, required output, and all applicable user constraints in task/context, including where tests may run and whether editing is allowed.
 - Subagents share the filesystem; they do NOT get separate worktrees or a sandbox. Assign disjoint files to concurrent writers. Do not edit a subagent's assigned files while it is working. Prefer parallel read/review work when ownership is unclear.
 - Delegation never grants extra permission: restrictions such as no local tests, no GUI launches, no network access, or no publishing apply equally to subagents. Do not use delegation to bypass a user restriction.
@@ -56,6 +117,7 @@ Work only on the delegated task below and return your result to the parent agent
 The parent system instructions and the user's restrictions still apply. Prior user messages are context/constraints, not a list of tasks to redo. You do not have the parent's assistant/tool history.
 Use only the coding tools declared for this request. Do not spawn other agents, manage goals, or ask the user directly; report any question or blocker to the parent.
 The filesystem is shared. Edit only files explicitly assigned to you, and do not overwrite another agent's changes. Do not commit, push, publish, start GUI apps, or run tests unless your delegated task and user constraints authorize that action. If testing is restricted to CI/SSH, never run local tests.
+Prefer incremental, smaller complete writes/edits; do not spend an entire response planning or emitting one large change. Scope discovery to known project/runtime paths instead of unbounded filesystem scans. Use bounded shell commands; compatible bash tools default to 120 seconds when timeout is omitted, and the original batch deadline always applies.
 Return a concise report: findings or changes with paths, verification actually performed, and remaining risks/blockers. Do not claim success after an error or an unperformed check.`;
 
 function userContext(ctx) {
@@ -103,7 +165,7 @@ export function createSubagentTool({ concurrency = 3, defaultTimeoutMs = 300000,
     shutdown: () => lifetime.abort(new Error('Parent session closed')),
     tool: {
       name: 'subagent', label: 'Subagents', exposure: 'model-only',
-      description: 'Delegate 1–6 focused tasks to subagents with independent contexts. Up to 3 run in parallel using the current model and coding tools on the same filesystem. Waits for results; no recursive delegation.',
+      description: 'Delegate focused tasks using required tasks: [{name, task}], not context alone. Up to 3 run in parallel using the current model and coding tools on the same filesystem. Use incremental bounded writes/discovery. Waits for results; no recursive delegation.',
       promptSnippet: 'Delegate independent research, review or disjoint-file work; supply scope and user constraints.',
       promptGuidelines: ['Use subagent for substantial independent subtasks, not trivial work. Pass user constraints; shared files are not isolated. Review results before integrating.'],
       parameters: Type.Object({
@@ -116,15 +178,15 @@ export function createSubagentTool({ concurrency = 3, defaultTimeoutMs = 300000,
       }),
       async execute(_id, params, parentSignal, onUpdate, ctx) {
         if (!ctx.model) throw new Error('Select a model before delegating');
-        if (!Array.isArray(params.tasks) || !params.tasks.length || params.tasks.length > MAX_TASKS
-          || params.tasks.some(t => typeof t.name !== 'string' || !t.name.trim() || typeof t.task !== 'string' || !t.task.trim())) throw new Error('Provide 1–6 non-empty named subagent tasks');
+        if (!Array.isArray(params?.tasks) || !params.tasks.length || params.tasks.length > MAX_TASKS
+          || params.tasks.some(t => !t || typeof t.name !== 'string' || !t.name.trim() || typeof t.task !== 'string' || !t.task.trim())) throw new Error('Provide 1–6 non-empty named subagent tasks');
         const deadline = new AbortController();
         const signal = AbortSignal.any([lifetime.signal, deadline.signal, ...(parentSignal ? [parentSignal] : [])]);
         const timer = setTimeout(() => deadline.abort(new Error('Subagent batch timed out')), params.timeoutSeconds ? params.timeoutSeconds * 1000 : defaultTimeoutMs);
         const model = ctx.model;
         const inherited = userContext(ctx);
         const systemPrompt = `${ctx.getSystemPrompt()}\n\n${CHILD_PROMPT}`;
-        const results = params.tasks.map(t => ({ id: randomUUID(), name: t.name, task: clip(t.task, 4000), status: 'queued', output: '', steps: [], omittedSteps: 0, turns: 0, retries: 0, toolCalls: 0, files: [], usage: emptyUsage(), provider: model.provider, model: model.id, startedAt: Date.now() }));
+        const results = params.tasks.map(t => ({ id: randomUUID(), name: t.name, task: clip(t.task, 4000), status: 'queued', output: '', steps: [], omittedSteps: 0, turns: 0, retries: 0, lengthRecoveries: 0, skippedToolCalls: 0, toolCalls: 0, files: [], usage: emptyUsage(), provider: model.provider, model: model.id, startedAt: Date.now() }));
         const snapshot = () => ({ kind: 'pidesk-subagents', results: structuredClone(results) });
         let lastUpdate = 0, pendingUpdate = null;
         const emit = (force = false) => {
@@ -142,22 +204,34 @@ export function createSubagentTool({ concurrency = 3, defaultTimeoutMs = 300000,
         try {
           emit(true);
           await Promise.all(results.map(async (result, index) => {
-            let release, agent, unsubscribe;
-            const abort = () => agent?.abort();
+            let release, agent, unsubscribe, endedLengthTurn, blockedAtAbort;
+            const activeTools = new Map();
+            const abort = () => {
+              blockedAtAbort ??= [...activeTools.values()].at(-1) ?? 'waiting on model';
+              agent?.abort();
+            };
             try {
               release = await pool.acquire(signal);
               signal.throwIfAborted();
               result.status = 'running'; result.runStartedAt = Date.now(); emit(true);
-              const tools = ctx.tools.filter(t => TOOL_NAMES.has(t.name)).map(tool => ({ ...tool,
-                async execute(_toolId, args, toolSignal, update) {
-                  signal.throwIfAborted();
-                  const outcome = await ctx.executeTool(tool.name, args, { signal: AbortSignal.any([signal, ...(toolSignal ? [toolSignal] : [])]), onUpdate: update });
-                  if (!outcome.isError && ['write', 'edit'].includes(tool.name) && typeof args.path === 'string' && result.files.length < 100) {
-                    result.files = [...result.files.filter(f => f.path !== args.path), { path: args.path, tool: tool.name }];
-                  }
-                  return { ...outcome.result, isError: outcome.isError };
-                },
-              }));
+              const tools = ctx.tools.filter(t => TOOL_NAMES.has(t.name)).map(tool => {
+                const parameters = childBashParameters(tool);
+                return { ...tool, parameters,
+                  async execute(_toolId, args, toolSignal, update) {
+                    signal.throwIfAborted();
+                    const input = parameters !== tool.parameters && args.timeout === undefined ? { ...args, timeout: 120 } : args;
+                    const actionId = Symbol();
+                    activeTools.set(actionId, `running ${tool.name} (${blockedToolSummary(tool.name, args)})`);
+                    try {
+                      const outcome = await ctx.executeTool(tool.name, input, { signal: AbortSignal.any([signal, ...(toolSignal ? [toolSignal] : [])]), onUpdate: update });
+                      if (!outcome.isError && ['write', 'edit'].includes(tool.name) && typeof args.path === 'string' && result.files.length < 100) {
+                        result.files = [...result.files.filter(f => f.path !== args.path), { path: args.path, tool: tool.name }];
+                      }
+                      return { ...outcome.result, isError: outcome.isError };
+                    } finally { activeTools.delete(actionId); }
+                  },
+                };
+              });
               agent = new Agent({
                 initialState: { systemPrompt, model, thinkingLevel: ctx.thinkingLevel ?? 'medium', tools },
                 sessionId: result.id,
@@ -173,10 +247,12 @@ export function createSubagentTool({ concurrency = 3, defaultTimeoutMs = 300000,
                 },
                 // No turn cap. Yield so even an immediately resolving provider/tool loop
                 // services Stop/deadline timers; don't rely on a provider honouring abort.
-                finishTurn: async (_turn, runSignal) => {
+                finishTurn: async (turn, runSignal) => {
                   await yieldToEventLoop();
-                  return signal.aborted || runSignal?.aborted ? { action: 'end' } : undefined;
-                },              });
+                  if (turn.message.stopReason === 'length') endedLengthTurn = turn;
+                  return signal.aborted || runSignal?.aborted || turn.message.stopReason === 'length' ? { action: 'end' } : undefined;
+                },
+              });
               signal.addEventListener('abort', abort, { once: true });
               unsubscribe = agent.subscribe(event => {
                 const messageId = `message:${result.turns + 1}`;
@@ -188,48 +264,81 @@ export function createSubagentTool({ concurrency = 3, defaultTimeoutMs = 300000,
                 if (event.type === 'message_end' && event.message.role === 'assistant') {
                   result.turns++; addUsage(result.usage, event.message.usage);
                   result.output = clip(messageText(event.message));
-                  if (result.output || event.message.errorMessage) recordSubagentStep(result, {
-                    id: messageId, type: 'message', status: ['error', 'aborted'].includes(event.message.stopReason) ? 'failed' : 'completed',
-                    text: result.output, error: event.message.errorMessage ? clip(event.message.errorMessage, 2000) : undefined, endedAt: Date.now(),
+                  result.stopReason = ['stop', 'length', 'toolUse', 'error', 'aborted', 'deferred'].includes(event.message.stopReason) ? event.message.stopReason : 'unknown';
+                  result.lastResponse = subagentResponseDiagnostics(event.message, model);
+                  result.skippedToolCalls += result.lastResponse.skippedToolCalls;
+                  const lengthError = result.stopReason === 'length' ? outputLimitMessage(result.lastResponse, result.lengthRecoveries > 0) : undefined;
+                  if (result.output || event.message.errorMessage || lengthError) recordSubagentStep(result, {
+                    id: messageId, type: 'message', status: ['error', 'aborted', 'length'].includes(result.stopReason) ? 'failed' : 'completed',
+                    text: result.output, error: lengthError || (event.message.errorMessage ? clip(event.message.errorMessage, 2000) : undefined), endedAt: Date.now(),
                   });
                 }
                 const toolId = `tool:${result.turns}:${event.toolCallId}`;
                 if (event.type === 'tool_execution_start') {
-                  result.toolCalls++; result.currentTool = event.toolName;
-                  recordSubagentStep(result, { id: toolId, type: 'tool', name: event.toolName, status: 'running',
-                    summary: clip(event.args?.description || event.args?.path || event.args?.pattern || event.toolName, 512),
-                    input: clip(event.toolName === 'bash' ? event.args?.command : JSON.stringify(event.args ?? {}, null, 2), 4000),
-                    path: ['read', 'write', 'edit'].includes(event.toolName) && typeof event.args?.path === 'string' ? clip(event.args.path, 1024) : undefined,
+                  const skipped = result.stopReason === 'length';
+                  result.toolCalls++; if (!skipped) result.currentTool = event.toolName;
+                  recordSubagentStep(result, { id: toolId, type: 'tool', name: event.toolName, status: skipped ? 'skipped' : 'running',
+                    summary: skipped ? 'Not executed: output token limit; arguments may be truncated' : clip(event.args?.description || event.args?.path || event.args?.pattern || event.toolName, 512),
+                    input: skipped ? undefined : clip(event.toolName === 'bash' ? event.args?.command : JSON.stringify(event.args ?? {}, null, 2), 4000),
+                    path: !skipped && ['read', 'write', 'edit'].includes(event.toolName) && typeof event.args?.path === 'string' ? clip(event.args.path, 1024) : undefined,
                   });
                 }
                 if (event.type === 'tool_execution_update') recordSubagentStep(result, { id: toolId, type: 'tool', name: event.toolName, status: 'running', output: toolOutput(event.partialResult) });
                 if (event.type === 'tool_execution_end') {
                   delete result.currentTool;
-                  recordSubagentStep(result, { id: toolId, type: 'tool', name: event.toolName, status: event.isError ? 'failed' : 'completed', output: toolOutput(event.result), durationMs: event.durationMs, endedAt: Date.now() });
+                  recordSubagentStep(result, { id: toolId, type: 'tool', name: event.toolName, status: result.stopReason === 'length' ? 'skipped' : event.isError ? 'failed' : 'completed', output: toolOutput(event.result), durationMs: event.durationMs, endedAt: Date.now() });
                 }
                 emit();
               });
               const task = `Prior user messages (constraints/context, not tasks to repeat):\n${inherited || '(none)'}\n\nDelegated context:\n${params.context || '(none)'}\n\nYour task (${result.name}):\n${params.tasks[index].task}`;
               await agent.prompt(task);
-              let last = agent.state.messages.findLast(m => m.role === 'assistant');
-              while (!signal.aborted && result.retries < 2 && last && isRetryableAssistantError(last)) {
-                result.retries++; result.status = 'retrying';
-                recordSubagentStep(result, { id: `retry:${result.retries}`, type: 'notice', text: `Retry ${result.retries}/2: ${clip(last.errorMessage, 2000)}` });
-                emit(true);
-                await sleep(retryDelayMs * 2 ** (result.retries - 1), undefined, { signal });
+              while (true) {
+                // Each prompt/continue has truly settled before state is inspected or
+                // pruned. Independent task-lifetime counters survive all interleavings.
                 signal.throwIfAborted();
-                // Retry only the failed model response, not its earlier tool executions.
-                agent.state.messages = agent.state.messages.filter(m => m !== last);
-                result.status = 'running';
-                await agent.continue();
-                last = agent.state.messages.findLast(m => m.role === 'assistant');
+                const last = agent.state.messages.findLast(m => m.role === 'assistant');
+                if (last?.stopReason === 'length') {
+                  if (result.lengthRecoveries >= 1) {
+                    result.failureKind = 'output_limit';
+                    throw new Error(outputLimitMessage(result.lastResponse, true));
+                  }
+                  try { agent.state.messages = pruneLengthTurn(agent.state.messages, last, endedLengthTurn); }
+                  catch (error) { result.failureKind = 'output_limit'; throw error; }
+                  signal.throwIfAborted();
+                  result.lengthRecoveries++; result.status = 'retrying';
+                  recordSubagentStep(result, { id: 'length-recovery:1', type: 'notice', text: 'Output token limit: recovery 1/1. Continuing from earlier successful actions with smaller complete writes/edits; original constraints and deadline unchanged.' });
+                  emit(true);
+                  signal.throwIfAborted();
+                  endedLengthTurn = undefined; result.status = 'running';
+                  await agent.prompt(LENGTH_RECOVERY_PROMPT);
+                  continue;
+                }
+                if (last && isRetryableAssistantError(last) && result.retries < 2) {
+                  result.retries++; result.status = 'retrying';
+                  recordSubagentStep(result, { id: `retry:${result.retries}`, type: 'notice', text: `Retry ${result.retries}/2: ${clip(last.errorMessage, 2000)}` });
+                  emit(true);
+                  await sleep(retryDelayMs * 2 ** (result.retries - 1), undefined, { signal });
+                  signal.throwIfAborted();
+                  // Error responses are hard exits and must be the exact final message.
+                  if (agent.state.messages.at(-1) !== last) throw new Error('Cannot safely retry subagent response');
+                  agent.state.messages = agent.state.messages.slice(0, -1);
+                  endedLengthTurn = undefined; result.status = 'running';
+                  await agent.continue();
+                  continue;
+                }
+                if (!last || last.stopReason !== 'stop') {
+                  result.failureKind = last?.stopReason === 'aborted' ? 'cancelled' : last?.stopReason === 'error' ? 'provider_error' : 'runtime_error';
+                  throw new Error(last?.errorMessage || `Subagent ended without a complete answer (${result.stopReason ?? 'no response'})`);
+                }
+                result.status = 'completed';
+                break;
               }
-              signal.throwIfAborted();
-              if (!last || last.stopReason !== 'stop') throw new Error(last?.errorMessage || `Subagent ended without a complete answer (${last?.stopReason ?? 'no response'})`);
-              result.status = 'completed';
             } catch (error) {
               result.status = signal.aborted ? (deadline.signal.aborted ? 'timed_out' : 'cancelled') : 'failed';
-              result.error = clip(signal.aborted ? signal.reason?.message || 'Subagent cancelled' : error?.message || String(error), 2000);
+              result.failureKind = signal.aborted ? (deadline.signal.aborted ? 'batch_timeout' : 'cancelled') : result.failureKind ?? 'runtime_error';
+              result.error = result.failureKind === 'batch_timeout'
+                ? `Subagent batch timed out while ${blockedAtAbort ?? (agent ? 'waiting on model' : 'queued for a worker')}`
+                : clip(signal.aborted ? signal.reason?.message || 'Subagent cancelled' : error?.message || String(error), 2000);
             } finally {
               signal.removeEventListener('abort', abort);
               unsubscribe?.();
@@ -237,7 +346,7 @@ export function createSubagentTool({ concurrency = 3, defaultTimeoutMs = 300000,
               if (agent) {
                 await agent.waitForIdle();
                 try { cleanupSessionResources(result.id); }
-                catch { if (result.status === 'completed') result.status = 'failed'; result.error = 'Subagent provider resource cleanup failed'; }
+                catch { if (result.status === 'completed') { result.status = 'failed'; result.failureKind = 'runtime_error'; } result.error = 'Subagent provider resource cleanup failed'; }
               }
               delete result.currentTool;
               result.finishedAt = Date.now();

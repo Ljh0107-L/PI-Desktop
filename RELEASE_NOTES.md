@@ -2,7 +2,17 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## 0.1.24 — Subagent conversations and clearable task history
+## 0.1.25 — Recover output-limited subagents and expose the bundled runtime
+
+- **Output limits are not process crashes.** Subagents now identify `length` as the model response-token limit (reasoning included), retain per-response output/reasoning counts and the configured cap, and label the failure **Output limit**. Hidden-only exhaustion still produces an actionable diagnostic. Unexpected reasoning on a model configured with `reasoning: false` is reported, not silently reconfigured.
+- **One safe, bounded recovery.** A length-truncated response always ends its low-level loop. The child may recover once with guidance to use smaller complete operations, preserving earlier successful tool results, model/thinking settings and the original deadline. Only the exact truncated turn is removed from its in-memory model context. A second limit stops clearly; no unlimited retries or larger hidden budgets. Clipped tool calls never execute and appear as **not executed**, not as running edits. Recovery remains best-effort when a gateway spends the whole cap on hidden reasoning.
+- **Node is available to coding tools.** Local Electron-backed sessions expose a private `node` fallback using the bundled helper in Node mode; SSH sessions expose their actual Node runtime. Existing PATH entries retain precedence, and `"$PI_NODE"` explicitly selects Pi's runtime. No system Node/npm installation or shell-profile modification is performed. npm/npx are not supplied. Runtime facts are included in the prompt without granting permission to run local tests or GUI apps.
+- **Bounded shell discovery.** Compatible child bash tools default to a 120-second timeout only when omitted; explicit timeouts and replacement-tool contracts are preserved. The batch deadline still wins and waits for actual cleanup. Timeout reports identify a blocked tool versus waiting on a model, and prompts discourage unbounded filesystem scans.
+- **Strict tasks stay required.** A context-only call remains invalid; clearer guidance asks for `tasks: [{name, task}]` and incremental work rather than blindly repeating a failed large task.
+
+Verification uses offline model streams and isolated GitHub CI runners, including an Electron app with system Node directories absent from PATH. No real model-quota test, local workstation test, service restart, user model-setting change or modification to the functional-test game's files is part of this release. New runtime/recovery logic requires a newly started Pi session; old records are not automatically rerun.
+
+## Included from 0.1.24 — Subagent conversations and clearable task history
 
 - **The same conversation interface.** Subagent details now reuse the main conversation renderer: the assignment is a message bubble, public replies are ordinary Markdown, and tools fold into compact work groups with the same disclosure and scrolling behavior. Removed the separate stack of large per-tool cards. This is a read-only execution view, not a new chat/model session.
 - **Recorded arguments remain honest.** Expand tools to see the recorded command/arguments, output and file link. Truncated JSON is retained as recorded, not repaired into invented arguments or file diffs. Older result-only tasks and omitted trace records remain explicitly labelled.

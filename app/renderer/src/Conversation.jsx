@@ -55,6 +55,7 @@ function FadeText({ className = '', children, title }) {
 
 // How a step reads in a row: an icon, a short sentence, and (for files) the folder in grey.
 function describeCall(call) {
+  if (call.__trace?.status === 'skipped') return { subject: `${call.name} — not executed`, title: 'Output token limit: incomplete tool arguments were not executed.' };
   const a = call.arguments ?? {};
   const path = a.path ?? a.file_path ?? '';
   switch (call.name) {
@@ -111,6 +112,7 @@ function ToolCall({ call, tool }) {
         </FadeText>
         {stats && <span className="step-stats">{stats.added > 0 && <span className="plus">+{stats.added}</span>}{stats.removed > 0 && <span className="minus">−{stats.removed}</span>}</span>}
         {trace?.durationMs != null && <span className="step-duration">{trace.durationMs < 1000 ? '<1s' : seconds(trace.durationMs)}</span>}
+        {status === 'skipped' && <span className="step-duration">Skipped</span>}
         {failed && <span className="step-failed">{status === 'cancelled' ? 'Cancelled' : status === 'timed_out' ? 'Timed out' : 'Failed'}</span>}
         <Caret open={open} />
       </div>

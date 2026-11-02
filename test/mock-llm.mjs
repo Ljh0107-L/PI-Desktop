@@ -73,6 +73,34 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
     const hiddenThink = userText.includes('[[hidden-think]]') && last.role !== 'tool';
     if (hiddenThink) { send({ role: 'assistant', content: '' }); sentChars = 0; await new Promise(r => setTimeout(r, 1500)); }
     const askMatch = /\[\[ask:([^|\]]+)(?:\|([^\]]*))?\]\]/.exec(userText);
+    // Functional-test fixtures: real SSE finish_reason/usage goes through the actual SDK.
+    const childLength = subagent && messages.some(m => m.role === 'user' && /\[\[child-length(?:-repeat|-tools)?\]\]/.test(textOf(m.content)));
+    if (childLength) {
+      const repeated = messages.some(m => textOf(m.content).includes('[[child-length-repeat]]'));
+      const clippedTools = messages.some(m => textOf(m.content).includes('[[child-length-tools]]'));
+      const recovery = messages.some(m => m.role === 'user' && textOf(m.content).includes('This is the only automatic output-limit recovery.'));
+      send({ role: 'assistant', content: '' });
+      if (!recovery || repeated) {
+        send({ reasoning_content: 'PRIVATE_REASONING_FIXTURE_NOT_FOR_TRACE' });
+        if (clippedTools) send({ tool_calls: [{ index: 0, id: 'call_clipped_write', type: 'function', function: {
+          name: 'write', arguments: '{"path":"must-not-be-written.txt","content":"incomplete response"}',
+        } }] });
+        send({}, 'length', { usage: { prompt_tokens: 100, completion_tokens: 32768, total_tokens: 32868, completion_tokens_details: { reasoning_tokens: 32768 } } });
+        res.end('data: [DONE]\n\n');
+      } else { send({ content: 'Recovered with smaller complete operations.' }); finish('stop'); }
+      return;
+    }
+    const special = /\[\[subagents-(runtime|length|length-repeat|length-tools)\]\]/.exec(userText);
+    if (!subagent && special && last.role !== 'tool') {
+      const runtimeCommand = `node -p "'runtime=' + Boolean(process.versions.electron)"; "$PI_NODE" -p "'pi-node=' + Boolean(process.versions.electron)"`;
+      const task = special[1] === 'runtime' ? `[[bash:${runtimeCommand}]]` : `[[child-${special[1]}]]`;
+      send({ role: 'assistant', content: '' });
+      send({ tool_calls: [{ index: 0, id: 'call_sub' + requests.length, type: 'function', function: { name: 'subagent', arguments: JSON.stringify({
+        tasks: [{ name: special[1] === 'runtime' ? 'Runtime check' : 'Output budget check', task }],
+        context: 'Offline CI fixture only. Preserve task constraints. Do not launch GUI or install packages.',
+      }) } }] });
+      finish('tool_calls'); return;
+    }
     if (!subagent && /\[\[subagents(?:-slow|-background)?\]\]/.test(userText) && last.role !== 'tool') {
       send({ role: 'assistant', content: '' });
       const slow = userText.includes('[[subagents-slow]]'), background = userText.includes('[[subagents-background]]');

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { isSubagentFinished, subagentHistoryId, visibleSubagentBatches, visibleSubagentTasks } from '../app/renderer/src/subagent-state.js';
 import { subagentTranscript } from '../app/renderer/src/subagent-transcript.js';
-import { changesOf, displayBlocks } from '../app/renderer/src/transcript.js';
+import { changesOf, displayBlocks, toolSummary } from '../app/renderer/src/transcript.js';
 
 const task = (id, index, status) => ({ id, index, key: `batch:${index}`, status, name: id });
 
@@ -40,6 +40,17 @@ test('legacy tasks use their stable call/index identity and separate batches do 
   const legacy = { key: 'one:0', index: 0, status: 'failed' };
   const other = { ...legacy, key: 'two:0' };
   assert.deepEqual(visibleSubagentTasks([legacy, other], [subagentHistoryId(legacy)]), [other]);
+});
+
+test('skipped truncated tool calls are neither running nor described as executed edits', () => {
+  const t = subagentTranscript({ key: 'length:0', task: 'Write safely', status: 'failed', failureKind: 'output_limit', steps: [
+    { id: 'write', type: 'tool', name: 'write', status: 'skipped', output: 'Tool call was not executed: output token limit.' },
+    { id: 'edit', type: 'tool', name: 'edit', status: 'skipped', output: 'Tool call was not executed: output token limit.' },
+  ] });
+  const calls = t.messages.flatMap(message => Array.isArray(message.content) ? message.content.filter(block => block.type === 'toolCall') : []);
+  assert.ok(calls.every(call => t.tools[call.id].status === 'skipped'));
+  assert.equal(toolSummary(calls), '2 tool calls not executed');
+  assert.deepEqual(changesOf(t.messages, t.tools), []);
 });
 
 test('public trace notices render in order, and bounded trace arguments never manufacture diffs', () => {

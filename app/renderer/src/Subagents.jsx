@@ -5,7 +5,7 @@ import { clearSubagentRecords, closeSubagent, openFile, openSubagent, useStore }
 import { formatTokens } from './transcript.js';
 import { Transcript } from './Conversation.jsx';
 import { subagentTranscript } from './subagent-transcript.js';
-import { isSubagentActive, isSubagentFinished, subagentBatch, subagentElapsed, subagentHistoryId, subagentStatus, subagentSummary, visibleSubagentTasks } from './subagent-state.js';
+import { isSubagentActive, isSubagentFinished, subagentBatch, subagentElapsed, subagentHistoryId, subagentTaskStatus, subagentSummary, visibleSubagentTasks } from './subagent-state.js';
 
 const duration = ms => ms < 1000 ? '<1s' : ms < 60000 ? `${Math.floor(ms / 1000)}s` : `${Math.floor(ms / 60000)}m ${Math.floor(ms % 60000 / 1000)}s`;
 function StatusIcon({ status }) {
@@ -16,7 +16,7 @@ function TaskRow({ task, onClick }) {
   return <button className={`subagent-task-row ${task.status}`} onClick={onClick}>
     <StatusIcon status={task.status} />
     <span className="subagent-task-text"><span className="subagent-task-name">{task.name}</span>
-      <span className="subagent-task-caption">{subagentStatus(task.status)}{task.currentTool ? ` · ${task.currentTool}` : ''}</span></span>
+      <span className="subagent-task-caption">{subagentTaskStatus(task)}{task.currentTool ? ` · ${task.currentTool}` : ''}</span></span>
     <Icon name="chevronRight" size={14} />
   </button>;
 }
@@ -82,7 +82,7 @@ export function SubagentDetail({ sessionId, task }) {
       <button className="link-button subagent-clear" aria-label="Clear this subagent record" disabled={!isSubagentFinished(task)} title="Clear this finished task from task history" onClick={() => clearSubagentRecords(sessionId, [subagentHistoryId(task)])}>Clear</button>
     </div>
     <div className={`subagent-inspector-meta ${task.status}`} title={[task.provider, task.model].filter(Boolean).join('/')}>
-      <span>{subagentStatus(task.status)}</span><span>·</span>
+      <span>{subagentTaskStatus(task)}</span><span>·</span>
       <span>{elapsed == null ? 'Time unavailable' : duration(elapsed)}</span>
       <span>·</span><span>{task.turns ?? 0} turns</span><span>·</span><span>{formatTokens(task.usage?.totalTokens ?? 0)} tokens</span>
     </div>

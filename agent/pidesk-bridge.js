@@ -18,8 +18,10 @@
 // 6. No folder (Codex's projectless chats): a conversation started without a folder runs in its own
 //    generated directory, <root>/<YYYY-MM-DD>/<name>/ with work/ and outputs/. When the desktop marks the
 //    Pi as such (PIDESK_PROJECTLESS), a prompt section tells the model how to use it, as Codex does.
-import { existsSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { homedir } from 'node:os';
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { Type } from 'typebox';
 import { createBashToolDefinition } from '@earendil-works/pi-coding-agent';
 import { createSubagentTool, SUBAGENT_PROMPT } from './pidesk-subagent.mjs';
@@ -40,6 +42,88 @@ function modelDefaults(model) {
     maxTokens: 16384,
     ...model,
   };
+}
+
+// Expose only the already-running runtime, without installing packages or executing a probe.
+// Appended PATH entries never take precedence over an existing user/system node. Electron needs
+// an executable shim (not a symlink) so invoking node cannot open another desktop application.
+export function setupRuntimeEnvironment({ env = process.env, execPath = process.execPath,
+  electron = Boolean(process.versions.electron), platform = process.platform,
+  agentDir = env.PI_CODING_AGENT_DIR || join(homedir(), '.pi', 'agent') } = {}) {
+  let stage = 'runtime executable', temporary;
+  try {
+    if (!isAbsolute(execPath) || !statSync(execPath).isFile()) throw Object.assign(new Error(), { code: 'EINVAL' });
+    accessSync(execPath, constants.X_OK);
+    let node = execPath;
+    if (electron) {
+      stage = 'Electron shim';
+      if (platform === 'win32') throw Object.assign(new Error(), { code: 'ENOTSUP' });
+      const hash = createHash('sha256').update(execPath).digest('hex').slice(0, 24);
+      const root = join(resolve(agentDir), 'runtime');
+      const scope = join(root, `node-${hash}`);
+      const bin = join(scope, 'bin');
+      for (const directory of [root, scope, bin]) {
+        mkdirSync(directory, { recursive: true, mode: 0o700 });
+        const info = lstatSync(directory);
+        if (!info.isDirectory() || info.isSymbolicLink() ||
+            (process.getuid && info.uid !== process.getuid()) ||
+            (info.mode & (directory === root ? 0o022 : 0o077))) {
+          throw Object.assign(new Error(), { code: 'EACCES' });
+        }
+      }
+      node = join(bin, 'node');
+      const quotedExecutable = `'${execPath.replace(/'/g, `'"'"'`)}'`;
+      const script = `#!/bin/sh\n# Pi Desktop's private Node fallback.\nELECTRON_RUN_AS_NODE=1 exec ${quotedExecutable} "$@"\n`;
+      let current = null;
+      try {
+        const info = lstatSync(node);
+        if (!info.isFile() || (process.getuid && info.uid !== process.getuid()) || (info.mode & 0o077)) {
+          throw Object.assign(new Error(), { code: 'EACCES' });
+        }
+        current = readFileSync(node, 'utf8');
+      } catch (error) { if (error.code !== 'ENOENT') throw error; }
+      if (current !== script) {
+        // Unique temporary + atomic replacement is safe across simultaneous Pi sessions.
+        temporary = join(bin, `.node-${randomUUID()}`);
+        writeFileSync(temporary, script, { flag: 'wx', mode: 0o700 });
+        renameSync(temporary, node);
+        temporary = undefined;
+      }
+      accessSync(node, constants.X_OK);
+    }
+    stage = 'runtime PATH';
+    const bin = dirname(node);
+    const pathKey = Object.keys(env).find(key => key.toLowerCase() === 'path') ?? 'PATH';
+    // A colon (or platform delimiter) in a directory cannot be represented in PATH; PI_NODE
+    // still works because tools quote its absolute path rather than reparsing it as PATH.
+    const representable = !bin.includes(delimiter);
+    let nodeOnPath = false;
+    if (representable) {
+      const candidate = join(bin, platform === 'win32' ? 'node.exe' : 'node');
+      try { accessSync(candidate, constants.X_OK); nodeOnPath = statSync(candidate).isFile(); } catch { /* PI_NODE remains usable */ }
+      if (env[pathKey] === undefined) env[pathKey] = bin;
+      else if (!env[pathKey].split(delimiter).includes(bin)) env[pathKey] += delimiter + bin;
+    }
+    env.PI_NODE = node;
+    return { ready: true, node, nodeOnPath, source: electron ? 'Electron shim' : 'Node executable' };
+  } catch (error) {
+    delete env.PI_NODE; // Never retain a stale executable after a failed setup.
+    if (temporary) { try { unlinkSync(temporary); } catch { /* another session is unaffected */ } }
+    // Do not serialize an exception, environment, or boot record into prompts/logs.
+    const code = ['EACCES', 'EPERM', 'ENOENT', 'ENOTDIR', 'EISDIR', 'EROFS', 'ENOSPC', 'EEXIST', 'EINVAL', 'ENOTSUP'].includes(error?.code) ? error.code : 'ERROR';
+    return { ready: false, diagnostic: `${stage}: ${code}` };
+  }
+}
+
+export function runtimeNote(runtime) {
+  return [
+    runtime?.ready
+      ? `Node is available through ${runtime.nodeOnPath ? 'node and ' : ''}the absolute executable in PI_NODE (${JSON.stringify(runtime.node)}). Use "$PI_NODE" to select Pi's runtime explicitly; existing PATH entries retain priority.`
+      : `Pi's Node fallback is unavailable (${runtime?.diagnostic ?? 'session setup has not run'}). Do not assume node or PI_NODE works.`,
+    'Pi Desktop does not supply npm or npx with this fallback; do not assume either is installed.',
+    "Runtime availability is not permission to run tests, builds, installs, or GUI applications. Respect the user's restrictions, including no local tests or GUI launches and CI/SSH-only verification.",
+    'Prefer bounded lookup in known paths (for example command -v node), not a filesystem-wide find / search. Report missing tools instead of installing them without permission.',
+  ].join('\n');
 }
 
 const BOOT = Symbol.for('pidesk.boot');
@@ -136,6 +220,11 @@ export function registerMetrics(pi, clock = () => performance.timeOrigin + perfo
 
 export default function pideskBridge(pi) {
   registerMetrics(pi);
+  let runtime = null;
+  pi.on('session_start', () => {
+    runtime = setupRuntimeEnvironment();
+    if (!runtime.ready) process.stderr.write(`pidesk: Node fallback unavailable (${runtime.diagnostic})\n`);
+  });
   // Pi re-runs extension factories when it replaces the session (fork, clone, switch), after the boot
   // record has already been removed from the environment, so it is kept for this process here.
   const raw = process.env.PIDESK_BOOT;
@@ -196,7 +285,10 @@ export default function pideskBridge(pi) {
     const options = event.systemPromptOptions;
     const note = options && projectlessNote(options.cwd);
     if (note) (options.sections ??= {}).projectless = note;
-    if (options) (options.sections ??= {}).subagents = SUBAGENT_PROMPT;
+    if (options) {
+      (options.sections ??= {}).subagents = SUBAGENT_PROMPT;
+      options.sections.runtime = runtimeNote(runtime);
+    }
   });
 
   // ---------------------------------------------------------------- titles
