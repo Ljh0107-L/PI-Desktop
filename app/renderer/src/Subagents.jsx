@@ -87,7 +87,7 @@ export function SubagentDetail({ sessionId, task }) {
       <span>·</span><span>{task.turns ?? 0} turns</span><span>·</span><span>{formatTokens(task.usage?.totalTokens ?? 0)} tokens</span>
     </div>
     <div className="subagent-conversation">
-      <Transcript session={session} transcript={transcript} readOnly onOpenFile={path => openFile(sessionId, path)} />
+      <Transcript session={session} transcript={transcript} readOnly copyText={!active ? task.output : null} onOpenFile={path => openFile(sessionId, path)} />
     </div>
   </>;
 }

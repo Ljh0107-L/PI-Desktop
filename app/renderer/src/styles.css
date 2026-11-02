@@ -798,7 +798,7 @@ a[href], .markdown a { cursor: pointer; }
 
 /* ------------------------------------------------------------ menus, confirm */
 .session-row.menu-open { background: var(--row-hover); }
-.confirm-text { font-size: 14.5px; color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.confirm-text { font-size: 14.5px; color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
 .button.danger-solid { color: #fff; background: linear-gradient(180deg, #e2604f, #c94a3b); border-color: transparent; }
 .button.danger-solid:hover { filter: brightness(1.06); }
 .connection .row-head { min-height: 40px; }

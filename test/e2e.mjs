@@ -469,6 +469,7 @@ try {
   check('the inspector is read only and leaves the main composer alone',
     await inspector().getByRole('button', { name: 'Edit message', exact: true }).count() === 0 &&
     await inspector().locator('.composer, textarea').count() === 0 && await composer().count() === 1);
+  check('completed subagent replies have the same copy action as main replies', await inspector().getByRole('button', { name: 'Copy reply', exact: true }).count() === 1);
   await S('08b1-subagent-conversation-folded');
   await inspector().locator('.tool-group.work .tool-group-head').click();
   await inspector().locator('.tool-call-head').click();
@@ -493,6 +494,7 @@ try {
   await page.getByRole('button', { name: 'Clear finished subagents', exact: true }).click();
   await clearDialog().waitFor();
   check('clear confirmation explains what is preserved', (await clearDialog().innerText()).includes('Running tasks, main conversation, usage and files are kept'));
+  check('clear confirmation is fully readable, not clipped to one line', await clearDialog().locator('.confirm-text').evaluate(el => getComputedStyle(el).whiteSpace !== 'nowrap' && el.scrollWidth <= el.clientWidth + 1 && el.scrollHeight <= el.clientHeight + 1));
   await S('08c1-subagent-clear-confirmation');
   await clearDialog().getByRole('button', { name: 'Cancel', exact: true }).click();
   check('cancelling clear leaves all records and conversation intact', await page.locator('.subagent-list .subagent-task-row.completed').count() === 2 &&

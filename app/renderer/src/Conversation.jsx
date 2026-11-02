@@ -116,7 +116,7 @@ function ToolCall({ call, tool }) {
       </div>
       {open && (
         <div className="step-detail tool-detail">
-          {trace ? <>
+          {trace && call.name !== 'bash' ? <>
             {trace.input && <pre className="tool-command">{call.name === 'bash' ? '$ ' : ''}{trace.input}</pre>}
             {output && <pre className={`tool-output boxed ${failed ? 'error' : ''}`}>{outputText(output)}</pre>}
             {!output && status === 'running' && <div className="tool-running">Running…</div>}
@@ -393,7 +393,7 @@ function WorkingRow({ session, transcript }) {
 }
 
 const NO_QUESTIONS = [];
-export function Transcript({ session, transcript, questions = NO_QUESTIONS, readOnly = false, onOpenFile, renderSubagents }) {
+export function Transcript({ session, transcript, questions = NO_QUESTIONS, readOnly = false, onOpenFile, renderSubagents, copyText }) {
   const scroller = useRef(null);
   const stick = useRef(true);
   const scrollIntent = useRef(false);
@@ -470,6 +470,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             default: return null;
           }
         })}
+        {readOnly && copyText && <TurnFooter text={copyText} last />}
         {(transcript.queued ?? []).map(q => (
           <div key={q.id} className="user-row queued" aria-label="Queued message">
             <div className="user-stack">
