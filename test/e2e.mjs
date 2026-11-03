@@ -767,3 +767,4 @@ console.log(`\n${results.length - failed}/${results.length} checks passed. Scree
 process.exitCode = failed ? 1 : 0;
 // Same CI entry point: isolated Cursor SDK fixtures run only after Pi's suite closes.
 if (!failed) await import('./cursor-ui.mjs');
+if (!process.exitCode) await import('./cursor-official.mjs');

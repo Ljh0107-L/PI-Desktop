@@ -1,18 +1,16 @@
 // Dedicated offline Cursor UI coverage. Run only by GitHub CI after the normal E2E suite.
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { launch, root, shot } from './harness.mjs';
-import { shellQuote } from '../core/transports.mjs';
+import { launch, shot } from './harness.mjs';
+import { mockCursorCommand } from './cursor-fixture.mjs';
 
 const KEY = 'cursor-fixture-key-one', NEXT_KEY = 'cursor-fixture-key-two';
 const work = '/tmp/pidesk-e2e/cursor';
 rmSync(work, { recursive: true, force: true });
 const profile = join(work, 'profile'), project = join(work, 'project');
 mkdirSync(profile, { recursive: true }); mkdirSync(project, { recursive: true });
-const command = join(work, 'mock cursor');
-writeFileSync(command, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(join(root, 'test/fixtures/cursor-peer.mjs'))} --config-models --require-key "$@"\n`);
-chmodSync(command, 0o700);
+const command = mockCursorCommand(work, ['--config-models', '--require-key']);
 // Reuse only the isolated test-host install; never ~/.pidesk.
 writeFileSync(join(profile, 'settings.json'), JSON.stringify({ environments: { 'ssh:pidesk-test': { root: '/tmp/pidesk-e2e/remote-install', added: true, enabled: true } } }));
 const env = { PIDESK_SSH_CONFIG: '/tmp/pidesk-e2e/ssh_config', PIDESK_TEST_PICK_FOLDER: project, PIDESK_DEFAULT_WORKSPACE: join(work, 'Pi'), PIDESK_FORCE_PI_UPLOAD: '1' };

@@ -2,16 +2,37 @@
 import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { access, readFile, realpath, stat } from 'node:fs/promises';
+import { constants } from 'node:fs';
 
-export function cursorCommand(value = '~/.local/bin/agent', home = homedir()) {
+export function cursorCommand(value = '~/.local/bin/cursor-agent', home = homedir()) {
   if (typeof value !== 'string' || !value.trim() || /[\0\r\n]/.test(value)) throw new Error('Enter a Cursor CLI executable path');
   return value.startsWith('~/') ? join(home, value.slice(2)) : value;
 }
+export async function validateCursorCommand(command, { path = process.env.PATH ?? '', cwd = process.cwd() } = {}) {
+  const candidates = command.includes('/') ? [isAbsolute(command) ? command : resolve(cwd, command)] : path.split(':').filter(Boolean).slice(0, 100).map(dir => resolve(cwd, dir, command));
+  let resolved;
+  for (const candidate of candidates) {
+    try { await access(candidate, constants.X_OK); resolved = await realpath(candidate); break; } catch { /* next PATH entry */ }
+  }
+  if (!resolved) throw new Error('Cursor CLI was not found. Use automatic Cursor SDK setup in Settings. No API key was passed to a program.');
+  try {
+    const dir = dirname(resolved);
+    const pkg = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8'));
+    if (!['cursor-agent', 'cursor-agent-sea'].includes(basename(resolved)) || pkg.name !== '@anysphere/agent-cli-runtime') throw new Error('wrong program');
+    for (const name of ['node', 'index.js']) if (!(await stat(join(dir, name))).isFile()) throw new Error('incomplete runtime');
+    return resolved;
+  } catch {
+    throw new Error(`Not a verified Cursor CLI: ${command} resolves to ${resolved}. No API key was passed to this program. Use automatic Cursor SDK setup instead of a generic agent/Grok command.`);
+  }
+}
+
 export function cursorEnvironment(source = process.env, apiKey) {
   // In particular never forward Pi provider keys, PIDESK_BOOT or ELECTRON_RUN_AS_NODE.
   const keep = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM', 'CURSOR_API_KEY', 'CURSOR_AUTH_TOKEN'];
   const env = Object.fromEntries(keep.filter(key => source[key] !== undefined).map(key => [key, source[key]]));
+  env.NO_OPEN_BROWSER = '1';
   if (apiKey) { env.CURSOR_API_KEY = apiKey; delete env.CURSOR_AUTH_TOKEN; }
   return env;
 }
@@ -38,8 +59,10 @@ export class CursorAcp extends EventEmitter {
     this.closed = false;
   }
   get stderr() { return this._stderr.slice(-4000); }
-  async start() {
-    const child = this.child = this.spawnProcess(this.command, ['acp'], { cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+  async start({ authenticate = true } = {}) {
+    // Identity checks are filesystem-only and happen before ANY key-bearing spawn.
+    this.command = await validateCursorCommand(this.command, { path: this.env.PATH, cwd: this.cwd });
+    const child = this.child = this.spawnProcess(this.command, ['--disable-auto-update', 'acp'], { cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     let buffer = '';
@@ -67,7 +90,7 @@ export class CursorAcp extends EventEmitter {
     const init = await this.request('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 'pi-desktop', version: '0.1' } });
     if (init.protocolVersion !== 1) throw new Error(`Unsupported Cursor ACP protocol: ${init.protocolVersion}`);
     this.capabilities = init.agentCapabilities ?? {};
-    if (init.authMethods?.some(method => method.id === 'cursor_login')) await this.request('authenticate', { methodId: 'cursor_login' });
+    if (authenticate && init.authMethods?.some(method => method.id === 'cursor_login')) await this.request('authenticate', { methodId: 'cursor_login' });
     return init;
   }
   send(message) {

@@ -7,6 +7,7 @@ import { readFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { CURSOR_KEY_ID } from './store.mjs';
+import { managedCursor } from '../../core/cursor-release.mjs';
 import { PiSession } from '../../core/pi-session.mjs';
 import { egressEnv, localRelayTransport, localTransport, relaySpawnSpec, shellQuote, sshRelayTransport } from '../../core/transports.mjs';
 import { startEgressProxy, hostPortOf } from '../../core/egress-proxy.mjs';
@@ -80,7 +81,7 @@ export class SessionManager extends EventEmitter {
   providersVersion = 0;   // bumped whenever providers/keys change in Settings
   egress = null;
 
-  constructor({ store, environments, local, piVersion, piPackageDir, bridgePath, relayPath, cacheDir, remoteSetup = prepareRemote }) {
+  constructor({ store, environments, local, piVersion, piPackageDir, bridgePath, relayPath, cacheDir, remoteSetup = prepareRemote, cursorRuntime }) {
     super();
     this.focused = null; // the session on screen: never stopped by the sweep
     this.sweeper = setInterval(() => this.sweep().catch(() => {}), SWEEP_MS);
@@ -94,6 +95,7 @@ export class SessionManager extends EventEmitter {
     this.cacheDir = cacheDir;
     this.piPackageDir = piPackageDir;
     this.remoteSetup = remoteSetup;
+    this.cursorRuntime = cursorRuntime;
   }
 
   env(id) {
@@ -231,6 +233,15 @@ export class SessionManager extends EventEmitter {
           onProgress: message => this.emit('environment', { id: envId, status: 'preparing', message }),
         });
         await providerHosts;
+        if (this.cursorRuntime && this.store.settings.cursor?.enabled && managedCursor(this.store.settings.cursor.command)) {
+          try {
+            facts.cursorCommand = await this.cursorRuntime.ensure(env, facts, message => this.emit('environment', { id: envId, status: 'preparing', message }));
+          } catch (error) {
+            // Optional SDK setup must not break an otherwise working Pi connection.
+            facts.cursorSetupError = error.message;
+            this.emit('notice', { level: 'warning', message: `${env.label}: Cursor SDK setup failed: ${error.message}` });
+          }
+        }
         // Merge the latest settings, not a snapshot from before a potentially long install.
         const current = this.store.settings.environments[envId] ?? {};
         if (current.root !== facts.root || !current.added) { this.store.settings.environments[envId] = { ...current, added: true, root: facts.root }; this.store.saveSettings(); this.emit('environments-changed'); }
@@ -249,6 +260,19 @@ export class SessionManager extends EventEmitter {
       this.emit('environment', { id: envId, status: 'error', message: error.message });
     }).catch(() => {}); // an event listener must not create an unobserved derived rejection
     return promise;
+  }
+
+  async cursorCommand(environmentId) {
+    const command = this.store.settings.cursor?.command;
+    if (!managedCursor(command)) return command;
+    if (!this.cursorRuntime) throw new Error('Managed Cursor SDK setup is unavailable');
+    const env = this.env(environmentId);
+    const facts = env.kind === 'local' ? {} : await this.prepare(environmentId);
+    try {
+      const path = await this.cursorRuntime.ensure(env, facts, message => this.emit('environment', { id: environmentId, status: 'preparing', message }));
+      this.emit('environment', { id: environmentId, status: 'ready', facts });
+      return path;
+    } catch (error) { this.emit('environment', { id: environmentId, status: 'error', message: error.message }); throw error; }
   }
 
   async #egressFor(hosts, { required = false } = {}) {
@@ -534,7 +558,7 @@ export class SessionManager extends EventEmitter {
       const facts = env.kind === 'local' ? { node: this.local.node, agentDir: this.local.agentDir, runDir: this.local.runDir, relay: this.relayPath, bridge: this.bridgePath } : await this.prepare(env.id);
       this.#assertCurrent(record, runtime);
       const file = record.piSessionFile || `${facts.agentDir}/cursor-sessions/${record.id}.jsonl`;
-      const command = this.store.settings.cursor?.command || '~/.local/bin/agent';
+      const command = await this.cursorCommand(record.environmentId);
       const adapter = `${dirname(facts.bridge)}/pidesk-cursor.mjs`;
       const spawn = { cwd: record.cwd, env: env.kind === 'local' ? { ...this.local.extraEnv } : {}, argv: [facts.node, adapter, '--cwd', record.cwd, '--command', command, '--session-file', file, ...(record.model?.id ? ['--model', record.model.id] : [])] };
       const transport = env.kind === 'local'

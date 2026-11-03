@@ -7,8 +7,9 @@ export function CursorSettings() {
   const environments = useStore(s => s.environments);
   const [enabled, setEnabled] = useState(settings?.enabled ?? false);
   const [apiKey, setApiKey] = useState('');
-  const [command, setCommand] = useState(settings?.command || '~/.local/bin/agent');
+  const [command, setCommand] = useState(settings?.command || '');
   const [environmentId, setEnvironment] = useState('local');
+  const setup = useStore(s => s.envStatus[environmentId]);
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
   const save = async (action = 'save') => {
@@ -23,23 +24,24 @@ export function CursorSettings() {
   };
   return <section className="section cursor-settings">
     <h2 className="section-title">Cursor API Key</h2>
-    <p className="row-meta">Use your Cursor API Key for independent Cursor sessions in Pi Desktop. No quota bridge or manual CLI login is needed when a key is saved.</p>
+    <p className="row-meta">Enter a Cursor API Key. Pi Desktop installs the official Cursor runtime in its own directory on this Mac or the selected SSH host. It never replaces your global agent or Grok command.</p>
     <label className="check"><input type="checkbox" checked={enabled} disabled={busy} onChange={e => setEnabled(e.target.checked)} /> Enable Cursor SDK</label>
     <label className="field">Cursor API Key<input type="password" autoComplete="new-password" value={apiKey} disabled={busy} onChange={e => setApiKey(e.target.value)} placeholder={settings?.hasKey ? 'Key saved — leave blank to keep it' : 'Paste your Cursor API Key'} spellCheck={false} /></label>
     <p className="row-meta">The key is encrypted on this Mac and sent only to the Cursor process on the selected local or SSH machine. Saving an empty field keeps the saved key. Key changes apply between turns without interrupting running work.</p>
     {settings?.hasKey && <button className="link-button" disabled={busy} onClick={() => save('remove')}>Remove saved key</button>}
     <button className="link-button" onClick={() => api('openExternal', 'https://cursor.com/docs/cli/reference/authentication')}>Get a Cursor API Key</button>
-    <details className="cursor-advanced"><summary>Advanced · CLI executable</summary>
-      <label className="field">Cursor CLI executable<input value={command} disabled={busy} onChange={e => setCommand(e.target.value)} placeholder="~/.local/bin/agent" spellCheck={false} /></label>
-      <p className="row-meta">The official Cursor CLI must still be installed on each machine. Pi Desktop uses its ACP interface; it does not install the CLI automatically. Without a saved key, an existing CLI login can still be used.</p>
+    <details className="cursor-advanced"><summary>Advanced · custom Cursor installation</summary>
+      <label className="field">Cursor CLI executable<input value={command} disabled={busy} onChange={e => setCommand(e.target.value)} placeholder="Automatic — installed and managed by Pi Desktop" spellCheck={false} /></label>
+      <p className="row-meta">Leave this blank for automatic setup. A custom path must point to the official cursor-agent runtime, not a generic agent/Grok executable. The package identity is checked before providing any key.</p>
       <button className="link-button" onClick={() => api('openExternal', 'https://cursor.com/docs/cli/installation')}>Cursor CLI installation</button>
     </details>
     <label className="field">Check on<select value={environmentId} disabled={busy} onChange={e => setEnvironment(e.target.value)}>{environments.filter(e => e.kind === 'local' || (e.added && e.enabled)).map(e => <option key={e.id} value={e.id}>{e.label}</option>)}</select></label>
     <div className="row-actions">
-      <button className="button primary" disabled={busy || !command.trim()} onClick={() => save()}>Save</button>
-      <button className="button" disabled={busy || !enabled || !command.trim()} onClick={() => save('check')}>{busy ? <Spinner /> : null} Check connection and models</button>
+      <button className="button primary" disabled={busy} onClick={() => save()}>Save</button>
+      <button className="button" disabled={busy || !enabled} onClick={() => save('check')}>{busy ? <Spinner /> : null} Check connection and models</button>
     </div>
-    {result?.error && <p className="error" role="alert">{result.error}</p>}
+    {busy && setup?.status === 'preparing' && <p className="row-meta" role="status">{setup.message}</p>}
+    {result?.error && <p className="error" role="alert">{result.error.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')}</p>}
     {result?.models && <div className="cursor-model-list"><p>{result.models.length} models available</p>{result.models.map(model => <div key={model.id}>{model.name} <span className="muted">{model.id}</span></div>)}</div>}
     <p className="row-meta">Create a new conversation, choose Cursor CLI, then select a model normally. Existing Pi conversations are unchanged. Cursor owns compaction and tool approvals; Pi goals, history editing, fork and Pi subagent controls are not available. Unreported token usage stays unavailable.</p>
   </section>;

@@ -13,6 +13,8 @@ import { Updater } from './updater.mjs';
 import { CURSOR_KEY_ID, Store } from './store.mjs';
 import { UsageLedger } from './usage.mjs';
 import { cursorCommand } from '../../agent/cursor-acp.mjs';
+import { managedCursor } from '../../core/cursor-release.mjs';
+import { CursorRuntime } from './cursor-runtime.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const piPackage = join(root, 'node_modules/@earendil-works/pi-coding-agent');
@@ -107,7 +109,7 @@ function syncCompactionReserves() {
 
 function publicSettings() {
   const s = store.settings;
-  return { ...s, cursor: { enabled: !!s.cursor?.enabled, command: s.cursor?.command || '~/.local/bin/agent', hasKey: store.hasKey(CURSOR_KEY_ID) }, providers: s.providers.map(p => ({ ...p, hasKey: store.hasKey(p.id) })), builtinProviders: BUILTIN_PROVIDERS };
+  return { ...s, cursor: { enabled: !!s.cursor?.enabled, command: managedCursor(s.cursor?.command) ? '' : s.cursor.command, hasKey: store.hasKey(CURSOR_KEY_ID) }, providers: s.providers.map(p => ({ ...p, hasKey: store.hasKey(p.id) })), builtinProviders: BUILTIN_PROVIDERS };
 }
 
 const send = (channel, payload) => { if (window && !window.isDestroyed()) window.webContents.send('pidesk:event', { channel, payload }); };
@@ -158,9 +160,10 @@ const api = {
     const result = await dialog.showOpenDialog(window, { properties: ['openDirectory', 'createDirectory'] });
     return result.canceled ? null : result.filePaths[0];
   },
-  saveCursorSettings({ enabled, command = '~/.local/bin/agent', apiKey, clearKey }) {
-    cursorCommand(command);
-    store.saveCursorSettings({ enabled, command: command.trim(), apiKey, clearKey });
+  saveCursorSettings({ enabled, command = '', apiKey, clearKey }) {
+    if (!managedCursor(command)) cursorCommand(command);
+    store.saveCursorSettings({ enabled, command: managedCursor(command) ? '' : command.trim(), apiKey, clearKey });
+    manager.prepared.clear();
     return publicSettings();
   },
   async cursorModels(environmentId = 'local', sessionId) {
@@ -172,7 +175,7 @@ const api = {
       return { models: await session.availableModels(), currentModelId: (await session.state()).model?.id };
     }
     const env = manager.env(environmentId);
-    const command = store.settings.cursor.command || '~/.local/bin/agent';
+    const command = await manager.cursorCommand(environmentId);
     // Credentials travel on stdin, never in the process command or remote shell script.
     const input = JSON.stringify({ cursorApiKey: store.getKey(CURSOR_KEY_ID) || '', cursorCredentialVersion: store.settings.cursor.credentialVersion ?? 0 }) + '\n';
     let output;
@@ -326,6 +329,7 @@ app.whenReady().then(() => {
     relayPath: join(root, 'agent/pidesk-relay.mjs'),
     piPackageDir: join(root, 'node_modules/@earendil-works/pi-coding-agent'),
     cacheDir: join(app.getPath('userData'), 'downloads'),
+    cursorRuntime: new CursorRuntime({ cacheDir: join(app.getPath('userData'), 'downloads', 'cursor-sdk'), localRoot: join(app.getPath('userData'), 'cursor-sdk'), fetchImpl: (url, options) => net.fetch(url, options) }),
     local: {
       node: nodeBinary(), piCli: join(piPackage, 'dist/bundle/cli.js'),
       agentDir: join(app.getPath('userData'), 'agent'),

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
@@ -9,15 +9,12 @@ import test from 'node:test';
 import { CursorAcp, cursorCommand, cursorEnvironment, cursorModels } from '../agent/cursor-acp.mjs';
 import { CursorDesktopSession } from '../agent/pidesk-cursor.mjs';
 import { branchMessages } from '../app/main/session-manager.mjs';
-import { shellQuote } from '../core/transports.mjs';
+import { mockCursorCommand } from './cursor-fixture.mjs';
 
 function fixture(t, { configModels = false } = {}) {
   const cwd = mkdtempSync(join(tmpdir(), 'pidesk-cursor-'));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
-  const command = join(cwd, 'mock cursor');
-  const peer = join(dirname(fileURLToPath(import.meta.url)), 'fixtures/cursor-peer.mjs');
-  writeFileSync(command, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(peer)} ${configModels ? '--config-models ' : ''}"$@"\n`);
-  chmodSync(command, 0o700);
+  const command = mockCursorCommand(cwd, configModels ? ['--config-models'] : []);
   const file = join(cwd, 'history/session.jsonl');
   const events = [];
   const client = new CursorAcp({ command, cwd });
@@ -29,7 +26,7 @@ function fixture(t, { configModels = false } = {}) {
 // These execute only in GitHub CI; the peer and models are offline fixtures.
 test('Cursor environment excludes Pi boot credentials and Electron Node mode', () => {
   const env = cursorEnvironment({ PATH: '/bin', HOME: '/home/user', PIDESK_BOOT: 'secret', ANTHROPIC_API_KEY: 'secret', ELECTRON_RUN_AS_NODE: '1', CURSOR_AUTH_TOKEN: 'cursor-login' });
-  assert.deepEqual(env, { PATH: '/bin', HOME: '/home/user', CURSOR_AUTH_TOKEN: 'cursor-login' });
+  assert.deepEqual(env, { PATH: '/bin', HOME: '/home/user', CURSOR_AUTH_TOKEN: 'cursor-login', NO_OPEN_BROWSER: '1' });
   assert.equal(cursorCommand('~/.local/bin/agent', '/remote/home'), '/remote/home/.local/bin/agent');
   assert.equal(cursorCommand('/path with spaces/agent'), '/path with spaces/agent');
   assert.throws(() => cursorCommand('bad\npath'));

@@ -1,7 +1,7 @@
 // Offline API-key regressions; executed by GitHub CI, never against a real Cursor account.
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -10,7 +10,7 @@ import { CURSOR_KEY_ID, Store } from '../app/main/store.mjs';
 import { SessionManager } from '../app/main/session-manager.mjs';
 import { CursorAcp, cursorEnvironment } from '../agent/cursor-acp.mjs';
 import { CursorDesktopSession } from '../agent/pidesk-cursor.mjs';
-import { shellQuote } from '../core/transports.mjs';
+import { mockCursorCommand } from './cursor-fixture.mjs';
 
 const KEY = 'cursor-fixture-key-one', NEXT_KEY = 'cursor-fixture-key-two';
 const root = dirname(fileURLToPath(import.meta.url));
@@ -62,15 +62,13 @@ test('failed settings/key writes preserve the previously saved Cursor ciphertext
 });
 
 function cli(t) {
-  const cwd = temp(t), command = join(cwd, 'mock cursor');
-  writeFileSync(command, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(join(root, 'fixtures/cursor-peer.mjs'))} --require-key "$@"\n`);
-  chmodSync(command, 0o700);
+  const cwd = temp(t), command = mockCursorCommand(cwd, ['--require-key']);
   return { cwd, command };
 }
 
 test('saved Cursor key overrides inherited auth without copying Pi credentials', () => {
   const env = cursorEnvironment({ HOME: '/tmp', CURSOR_AUTH_TOKEN: 'old-login', CURSOR_API_KEY: 'old-key', PIDESK_BOOT: 'pi-secret', ANTHROPIC_API_KEY: 'pi-key' }, KEY);
-  assert.deepEqual(env, { HOME: '/tmp', CURSOR_API_KEY: KEY });
+  assert.deepEqual(env, { HOME: '/tmp', CURSOR_API_KEY: KEY, NO_OPEN_BROWSER: '1' });
 });
 
 test('catalog reads API key from stdin, never argv or output', { timeout: 15000 }, async t => {
