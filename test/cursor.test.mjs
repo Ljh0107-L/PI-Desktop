@@ -38,7 +38,7 @@ test('Cursor environment excludes Pi boot credentials and Electron Node mode', (
 test('official ACP initializes, advertises models, switches and streams exactly once', { timeout: 15000 }, async t => {
   const f = fixture(t);
   await f.desktop.start('cursor-test-b');
-  assert.equal(f.desktop.models.length, 2);
+  assert.equal(f.desktop.models.length,  3);
   assert.equal(f.desktop.state().model.id, 'cursor-test-b');
   assert.deepEqual(f.desktop.prompt('hello'), { disposition: 'started' });
   await f.desktop.turn;
@@ -60,13 +60,13 @@ test('catalog entry point works through symlinks, including macOS /tmp SSH insta
   const link = join(f.cwd, 'cursor-adapter.mjs');
   symlinkSync(adapter, link);
   const { stdout } = await promisify(execFile)(process.execPath, [link, '--catalog', '--cwd', f.cwd, '--command', f.command], { timeout: 10000 });
-  assert.equal(JSON.parse(stdout).models.length, 2);
+  assert.equal(JSON.parse(stdout).models.length,  3);
 });
 
 test('Cursor model config options support grouped models and the standard setter', { timeout: 15000 }, async t => {
   const f = fixture(t, { configModels: true });
   await f.desktop.start('cursor-test-b');
-  assert.equal(f.desktop.models.length, 2);
+  assert.equal(f.desktop.models.length,  3);
   assert.equal(f.desktop.state().model.id, 'cursor-test-b');
   await f.desktop.setModel('cursor-test-a');
   assert.equal(f.desktop.state().model.name, 'Cursor Test A');

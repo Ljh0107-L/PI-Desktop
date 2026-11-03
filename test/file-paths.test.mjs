@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { headingSlug, normalizeFilePath, relativeSessionPath, resolveMarkdownReference } from '../app/renderer/src/file-paths.js';
+import { favouriteModels, headingSlug, normalizeFilePath, relativeSessionPath, resolveMarkdownReference } from '../app/renderer/src/file-paths.js';
 
 test('Markdown references resolve from the document, decode once and strip URL suffixes before decoding', () => {
   const doc = '/project/report/draft-zh.md';
@@ -37,4 +37,10 @@ test('anchors, external destinations and unsafe schemes are classified explicitl
   }
   assert.equal(headingSlug('Preview details'), 'preview-details');
   assert.equal(headingSlug('第一部分 · 拆解 WRF'), '第一部分--拆解-wrf');
+});
+
+test('Cursor favourites resolve cached names and tolerate missing cache entries', () => {
+  const settings = { models: [{ id: 'gpt-5', name: 'GPT-5' }, { id: 'sonnet', name: 'Sonnet' }], favorites: ['sonnet', 'removed'] };
+  assert.deepEqual(favouriteModels(settings), [{ id: 'sonnet', name: 'Sonnet' }, { id: 'removed', name: 'removed' }]);
+  assert.deepEqual(favouriteModels({}), []);
 });

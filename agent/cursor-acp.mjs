@@ -91,7 +91,9 @@ export class CursorAcp extends EventEmitter {
       this.emit('closed', error);
       resolve();
     }));
-    const init = await this.request('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 'pi-desktop', version: '0.1' } });
+    // Ask for the official parameterized model picker. Without this meta hint the
+    // CLI collapses variants into one long list and needs extra model lookups.
+    const init = await this.request('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false, _meta: { parameterizedModelPicker: true } }, clientInfo: { name: 'pi-desktop', version: '0.1' } });
     if (init.protocolVersion !== 1) throw new Error(`Unsupported Cursor ACP protocol: ${init.protocolVersion}`);
     this.capabilities = init.agentCapabilities ?? {};
     // The official CLI marks env API keys/auth tokens and an existing CLI login

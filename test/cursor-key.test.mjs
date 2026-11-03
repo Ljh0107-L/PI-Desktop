@@ -61,6 +61,28 @@ test('failed settings/key writes preserve the previously saved Cursor ciphertext
   for (const apiKey of [123, 'bad\nkey', 'bad\0key', 'a'.repeat(16385)]) assert.throws(() => store.saveCursorSettings({ ...config, apiKey }));
 });
 
+test('Cursor favourites and cached models survive key/config changes and are bounded', { skip: process.platform !== 'darwin' }, t => {
+  const dir = temp(t), store = storeAt(dir);
+  store.saveCursorSettings({ ...config, apiKey: KEY });
+  store.saveCursorModels({ models: [{ id: 'a', name: 'A' }, { id: 42, name: 'bad' }, { id: 'b', name: '' }], currentModelId: 'a' });
+  store.saveCursorSettings({ enabled: true, command: '', favorites: ['b', 'a'] });
+  assert.deepEqual(store.settings.cursor.favorites, ['b', 'a']);
+  assert.deepEqual(store.settings.cursor.models, [{ id: 'a', name: 'A' }, { id: 'b', name: 'b' }]);
+  store.saveCursorSettings({ ...config, apiKey: NEXT_KEY });
+  assert.deepEqual(storeAt(dir).settings.cursor.favorites, ['b', 'a'], 'a new key keeps the user\'s model subset');
+  store.saveCursorSettings({ ...config, clearKey: true });
+  const saved = storeAt(dir).settings.cursor;
+  assert.deepEqual(saved.favorites, ['b', 'a']);
+  assert.deepEqual(saved.models.map(m => m.id), ['a', 'b']);
+  assert.ok(saved.modelsAt > 0);
+  store.clearCursorModels();
+  assert.deepEqual(store.settings.cursor.models, []);
+  assert.deepEqual(store.settings.cursor.favorites, ['b', 'a']);
+  store.saveCursorModels({ models: Array.from({ length: 600 }, (_, i) => ({ id: `m${i}`, name: 'x'.repeat(400) })) });
+  assert.equal(store.settings.cursor.models.length, 500);
+  assert.equal(store.settings.cursor.models[0].name.length, 300);
+});
+
 function cli(t) {
   const cwd = temp(t), command = mockCursorCommand(cwd, ['--require-key']);
   return { cwd, command };
@@ -81,7 +103,7 @@ test('catalog reads API key from stdin, never argv or output', { timeout: 15000 
   });
   child.stdin.end(JSON.stringify({ cursorApiKey: KEY, cursorCredentialVersion: 7 }) + '\n');
   const stdout = await output;
-  assert.equal(JSON.parse(stdout).models.length, 2);
+  assert.equal(JSON.parse(stdout).models.length,  3);
   assert.ok(!child.spawnargs.join(' ').includes(KEY));
   assert.ok(!stdout.includes(KEY));
 });

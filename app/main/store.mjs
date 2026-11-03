@@ -111,7 +111,7 @@ export class Store {
     try {
       if (changed) { this.setKey(CURSOR_KEY_ID, key || null); wroteKey = true; }
       // Whitelist settings: plaintext keys and renderer hasKey flags never reach settings.json.
-      this.settings.cursor = { enabled: !!enabled, command, credentialVersion: version + (changed ? 1 : 0) };
+      this.settings.cursor = { ...previous, enabled: !!enabled, command, favorites: Array.isArray(previous?.favorites) ? previous.favorites : [], models: Array.isArray(previous?.models) ? previous.models : [], modelsAt: previous?.modelsAt, currentModelId: previous?.currentModelId, credentialVersion: version + (changed ? 1 : 0) };
       this.saveSettings();
     } catch (error) {
       if (previous === undefined) delete this.settings.cursor; else this.settings.cursor = previous;
@@ -121,6 +121,17 @@ export class Store {
       }
       throw error;
     }
+  }
+  saveCursorModels({ models, currentModelId }) {
+    const clean = (models ?? []).filter(m => m && typeof m.id === 'string' && m.id && m.id.length < 300).slice(0, 500).map(m => ({ id: m.id, name: typeof m.name === 'string' && m.name ? m.name.slice(0, 300) : m.id }));
+    const previous = this.settings.cursor;
+    this.settings.cursor = { ...previous, models: clean, modelsAt: Date.now(), currentModelId: typeof currentModelId === 'string' ? currentModelId : undefined };
+    try { this.saveSettings(); } catch (error) { this.settings.cursor = previous; throw error; }
+  }
+  clearCursorModels() {
+    const previous = this.settings.cursor;
+    this.settings.cursor = { ...previous, models: [], modelsAt: 0, currentModelId: undefined };
+    try { this.saveSettings(); } catch (error) { this.settings.cursor = previous; throw error; }
   }
   getKey(providerId) {
     const entry = this.secrets[providerId];

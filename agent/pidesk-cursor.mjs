@@ -47,6 +47,7 @@ export class CursorDesktopSession {
   applyModelState(state) {
     this.modelConfig = cursorModelConfig(state);
     this.models = cursorModels(state);
+    this.modelOptions = this.modelConfig ? (this.modelConfig.options ?? []).flatMap(option => option.options ?? [option]).map(option => ({ id: option.value, name: option.name })) : this.models;
     const id = cursorCurrentModel(state) ?? this.model?.id;
     if (id) this.model = { provider: 'cursor', id, name: this.models.find(model => model.id === id)?.name ?? id };
   }
@@ -198,7 +199,7 @@ export class CursorDesktopSession {
   async request(type, p = {}) {
     switch (type) {
       case 'get_state': return this.state();
-      case 'get_available_models': return { models: this.models };
+      case 'get_available_models': return { models: this.models, currentModelId: this.model?.id };
       case 'get_messages': return { messages: this.messages() };
       case 'get_entries': return { entries: this.entries, leafId: this.entries.at(-1)?.id };
       case 'get_session_stats': return { contextUsage: null };
@@ -234,6 +235,7 @@ async function main() {
   const client = new CursorAcp({ command: value('--command'), cwd, apiKey: boot.cursorApiKey });
   const credentialVersion = boot.cursorCredentialVersion ?? 0;
   delete boot.cursorApiKey;
+  const send = message => process.stdout.write(JSON.stringify(message) + '\n');
   if (args.includes('--catalog')) {
     // Discovery is also cancellable when its parent process enforces a deadline.
     // Cursor has its own process group, so killing only this adapter would leak it.
@@ -245,7 +247,6 @@ async function main() {
     finally { await client.close(); process.off('SIGTERM', stop); process.off('SIGINT', stop); }
     return;
   }
-  const send = message => process.stdout.write(JSON.stringify(message) + '\n');
   const file = value('--session-file');
   if (!file) throw new Error('Missing Cursor desktop history path');
   const desktop = new CursorDesktopSession({ client, file, cwd, send, credentialVersion });

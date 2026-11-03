@@ -4,7 +4,7 @@ import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 const send = message => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n');
 const result = (id, value) => send({ id, result: value });
-const models = [{ modelId: 'cursor-test-a', name: 'Cursor Test A' }, { modelId: 'cursor-test-b', name: 'Cursor Test B' }];
+const models = [{ modelId: 'cursor-test-a', name: 'Cursor Test A' }, { modelId: 'cursor-test-b', name: 'Cursor Test B' }, { modelId: 'cursor-test-c', name: 'Cursor Test C' }];
 let sessionId = 'cursor-fixture-session', modelId = models[0].modelId, turn, requestId = 10000;
 const requiresKey = process.argv.includes('--require-key');
 const validKeys = ['cursor-fixture-key-one', 'cursor-fixture-key-two'];

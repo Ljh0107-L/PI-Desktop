@@ -25,14 +25,24 @@ try {
   await page.getByLabel('Cursor API Key', { exact: true }).fill(KEY);
   await page.locator('.cursor-advanced summary').click();
   await page.getByLabel('Cursor CLI executable').fill(command);
-  await page.getByRole('button', { name: 'Check connection and models', exact: true }).click();
-  await page.locator('.cursor-model-list', { hasText: '2 models available' }).waitFor({ timeout: 90000 });
+  await page.locator('.cursor-key').getByRole('button', { name: 'Save', exact: true }).click();
+  await page.waitForFunction(() => window.__pideskState().settings.cursor.hasKey);
+  await page.getByRole('button', { name: 'Check connection', exact: true }).click();
+  const picker = page.locator('.modal', { hasText: 'Choose Cursor models' });
+  await picker.locator('.pick-row', { hasText: 'Cursor Test A' }).waitFor({ timeout: 90000 });
+  assert.equal(await picker.locator('.pick-row').count(), 3);
+  await picker.locator('.pick-row', { hasText: 'Cursor Test A' }).click();
+  await picker.locator('.pick-row', { hasText: 'Cursor Test B' }).click();
+  await picker.getByRole('button', { name: 'Done', exact: true }).click();
+  assert.deepEqual(await page.evaluate(() => window.__pideskState().settings.cursor.favorites), ['cursor-test-a', 'cursor-test-b']);
+  assert.deepEqual(await page.evaluate(() => window.__pideskState().settings.cursor.models.map(m => m.id)), ['cursor-test-a', 'cursor-test-b', 'cursor-test-c']);
   assert.equal(await page.getByLabel('Cursor API Key', { exact: true }).getAttribute('type'), 'password');
   assert.equal(await page.getByLabel('Cursor API Key', { exact: true }).inputValue(), '');
   assert.equal(await page.evaluate(() => window.__pideskState().settings.cursor.hasKey), true);
   for (const file of ['settings.json', 'secrets.json']) assert.ok(!readFileSync(join(profile, file), 'utf8').includes(KEY), 'plaintext key must not be written to desktop settings/secrets');
   assert.ok(!JSON.stringify(await page.evaluate(() => window.__pideskState().settings)).includes(KEY), 'bootstrap/settings expose only key presence');
   assert.ok(await page.locator('.cursor-settings .row-meta').evaluateAll(nodes => nodes.every(node => getComputedStyle(node).whiteSpace === 'normal' && node.scrollWidth <= node.clientWidth + 1)), 'Cursor setup instructions must wrap instead of being clipped');
+  assert.ok((await page.locator('.cursor-settings').innerText()).length < 900, 'settings must stay concise');
   await shot(page, '/tmp/pidesk-e2e/shots', 'cursor-sdk-settings');
   await page.getByRole('button', { name: 'Back to app', exact: true }).click();
   for (const environmentId of ['local', 'ssh:pidesk-test']) {
@@ -53,7 +63,9 @@ try {
       await page.locator('.popover .menu-item', { hasText: 'Choose a folder' }).click();
     }
     await page.getByRole('button', { name: 'Model', exact: true }).click();
-    await page.locator('.cursor-model-menu .menu-item', { hasText: 'Cursor Test B' }).click({ timeout: 90000 });
+    assert.equal(await page.locator('.cursor-model-menu .menu-item', { hasText: 'Cursor Test C' }).count(), 0, 'unselected models stay out of the conversation menu');
+    assert.equal(await page.locator('.cursor-model-menu .menu-scroll .menu-item').count(), 2);
+    await page.locator('.cursor-model-menu .menu-item', { hasText: 'Cursor Test B' }).click({ timeout: 5000 });
     await send(`hello ${environmentId}`);
     await page.locator('.session-main .markdown', { hasText: `Cursor (cursor-test-b): 回复 hello ${environmentId}` }).waitFor({ timeout: 90000 });
     await idle();
@@ -102,7 +114,7 @@ try {
   });
   await page.click('.settings-button');
   await page.getByRole('button', { name: 'Cursor SDK', exact: true }).click();
-  assert.match(await page.getByLabel('Cursor API Key', { exact: true }).getAttribute('placeholder'), /Key saved/);
+  assert.equal(await page.getByLabel('Cursor API Key', { exact: true }).getAttribute('placeholder'), 'Saved');
   await page.getByLabel('Cursor API Key', { exact: true }).fill(NEXT_KEY);
   await page.getByRole('button', { name: 'Save', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('.cursor-settings input[type="password"]')?.value === '');
@@ -115,12 +127,13 @@ try {
   assert.ok(!readFileSync(afterRotation.piSessionFile, 'utf8').includes(NEXT_KEY), 'SSH transcript must never store credentials');
   await page.click('.settings-button');
   await page.getByRole('button', { name: 'Cursor SDK', exact: true }).click();
-  await page.getByRole('button', { name: 'Remove saved key', exact: true }).click();
-  await page.getByRole('button', { name: 'Remove saved key', exact: true }).waitFor({ state: 'detached' });
+  assert.deepEqual(await page.evaluate(() => window.__pideskState().settings.cursor.favorites), ['cursor-test-a', 'cursor-test-b'], 'key rotation preserves the chosen models');
+  await page.getByRole('button', { name: 'Remove key', exact: true }).click();
+  await page.getByRole('button', { name: 'Remove key', exact: true }).waitFor({ state: 'detached' });
   assert.equal(await page.evaluate(() => window.__pideskState().settings.cursor.hasKey), false);
-  await page.getByRole('button', { name: 'Check connection and models', exact: true }).click();
-  await page.locator('.cursor-settings .error', { hasText: 'Cursor API Key is missing or invalid' }).waitFor({ timeout: 90000 });
-  console.log('PASS Cursor API-key entry, encrypted storage, local/SSH auth, rotation/removal, SDK models, tools, approvals, cancel and restart');
+  await page.getByRole('button', { name: 'Check connection', exact: true }).click();
+  await page.locator('.modal .error', { hasText: 'Cursor API Key is missing or invalid' }).waitFor({ timeout: 90000 });
+  console.log('PASS Cursor API-key entry, encrypted storage, model subset, local/SSH auth, rotation/removal, tools, approvals, cancel and restart');
 } catch (error) {
   await shot(page, '/tmp/pidesk-e2e/shots', 'zz-cursor-failure').catch(() => {});
   console.error(error);

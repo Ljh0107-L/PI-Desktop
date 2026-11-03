@@ -3,6 +3,7 @@ import { Icon } from './Icons.jsx';
 import { MenuItem, MenuSection, Modal, Popover, Spinner, baseName, envIcon, shortPath } from './ui.jsx';
 import { api, clearQueued, getState, notify, openSettings, setDraft, setEnvironments, useStore } from './store.js';
 import { composerEngine } from './session-engine.js';
+import { favouriteModels } from './file-paths.js';
 import { CursorModelMenu } from './Cursor.jsx';
 import { cachedDir, listDir, prefetchDir } from './dirs.js';
 
@@ -390,9 +391,15 @@ export function ComposerBar({ session }) {
   const environmentId = isNew ? draft.environmentId : session.environmentId;
   const env = environments.find(e => e.id === environmentId) ?? { id: environmentId, label: session?.environmentLabel ?? 'This computer', kind: environmentId?.startsWith('ssh:') ? 'ssh' : 'local' };
   const cursorEnabled = useStore(s => !!s.settings.cursor?.enabled);
+  const settingsCursor = useStore(s => s.settings.cursor);
+  const favourite = cursorSettings => {
+    const first = cursorSettings?.favorites?.[0];
+    const model = cursorSettings?.models?.find(m => m.id === first);
+    return model ? { provider: 'cursor', id: model.id, name: model.name } : first ? { provider: 'cursor', id: first } : null;
+  };
   const engine = composerEngine(session, draft);
   const cursor = engine === 'cursor';
-  const model = isNew ? cursor ? draft.cursorModel : draft.model : session.model;
+  const model = isNew ? cursor ? (draft.cursorModel ?? favouriteModels(settingsCursor)[0] ?? null) : draft.model : session.model;
   const effort = isNew ? draft.thinkingLevel : session.thinkingLevel;
   const cwd = isNew ? draft.cwd : session.cwd;
   const modelInfo = catalog.find(m => m.provider === model?.provider && m.id === model?.id);
@@ -425,7 +432,7 @@ export function ComposerBar({ session }) {
       </div>
       <div className="composer-bar-right">
         {(cursorEnabled || cursor) && (isNew
-          ? <Trigger width={220} label="Agent" className="engine-trigger" menu={close => <><MenuItem label="Pi" checked={!cursor} onClick={() => { setDraft({ engine: 'pi' }); close(); }} /><MenuItem label="Cursor CLI" checked={cursor} disabled={!cursorEnabled} onClick={() => { setDraft({ engine: 'cursor' }); close(); }} /></>}><span>{cursor ? 'Cursor CLI' : 'Pi'}</span></Trigger>
+          ? <Trigger width={220} label="Agent" className="engine-trigger" menu={close => <><MenuItem label="Pi" checked={!cursor} onClick={() => { setDraft({ engine: 'pi' }); close(); }} /><MenuItem label="Cursor CLI" checked={cursor} disabled={!cursorEnabled} onClick={() => { setDraft({ engine: 'cursor', cursorModel: draft.cursorModel ?? favourite(settingsCursor) }); close(); }} /></>}><span>{cursor ? 'Cursor CLI' : 'Pi'}</span></Trigger>
           : <span className="muted engine-label" title="Conversation engine — choose a different engine when starting a new conversation">{cursor ? 'Cursor CLI' : 'Pi'}</span>)}
         {cursor ? <Trigger width={340} label="Model" title={modelTitle} className="model-trigger" menu={close => <CursorModelMenu environmentId={environmentId} sessionId={session?.id} value={model} onChange={changeModel} close={close} />}><span className="strong">{model?.name ?? model?.id ?? 'Cursor default'}</span></Trigger> : catalog.length || model
           ? <Trigger width={320} label="Model" title={modelTitle} className="model-trigger" menu={close => <ModelMenu value={model} onChange={changeModel} close={close} />}>

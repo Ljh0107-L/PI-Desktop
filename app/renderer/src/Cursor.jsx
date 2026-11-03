@@ -1,6 +1,32 @@
-import { useEffect, useState } from 'react';
-import { MenuItem, MenuSection, Spinner } from './ui.jsx';
+import { useEffect, useMemo, useState } from 'react';
+import { Icon } from './Icons.jsx';
+import { MenuItem, MenuSection, Modal, Spinner } from './ui.jsx';
 import { api, notify, openSettings, setSettings, useStore } from './store.js';
+import { favouriteModels } from './file-paths.js';
+
+// Cached list first; a refresh is only requested explicitly. This keeps menus instant
+// after the models have been loaded once.
+function useCursorModels(environmentId, { auto = true, refreshOnOpen = false } = {}) {
+  const settings = useStore(s => s.settings.cursor);
+  const [state, setState] = useState(() => settings?.models?.length ? { models: settings.models, currentModelId: settings.currentModelId, source: 'cache' } : null);
+  const [error, setError] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const load = async ({ refresh = false } = {}) => {
+    if (loading) return null;
+    setLoading(true); if (refresh) setError(null);
+    try {
+      const result = await api('cursorModels', environmentId, undefined, { refresh });
+      setState(result);
+      return result;
+    } catch (reason) { setError(reason.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')); return null; }
+    finally { setLoading(false); }
+  };
+  useEffect(() => {
+    if (!auto || (!refreshOnOpen && state)) return;
+    void load({ refresh: refreshOnOpen });
+  }, [environmentId]);
+  return { state, error, loading, load, settings };
+}
 
 export function CursorSettings() {
   const settings = useStore(s => s.settings.cursor);
@@ -9,61 +35,109 @@ export function CursorSettings() {
   const [apiKey, setApiKey] = useState('');
   const [command, setCommand] = useState(settings?.command || '');
   const [environmentId, setEnvironment] = useState('local');
-  const setup = useStore(s => s.envStatus[environmentId]);
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState(null);
-  const save = async (action = 'save') => {
-    setBusy(true); setResult(null);
+  const [error, setError] = useState(null);
+  const [picker, setPicker] = useState(null);
+  const setup = useStore(s => s.envStatus[environmentId]);
+  const favorites = favouriteModels(settings);
+  const save = async ({ key, enabled: nextEnabled = enabled } = {}) => {
+    setBusy(true); setError(null);
     try {
-      const updated = await api('saveCursorSettings', { enabled, command, apiKey: action === 'remove' ? undefined : apiKey, clearKey: action === 'remove' });
+      const updated = await api('saveCursorSettings', { enabled: nextEnabled, command, apiKey: key === 'remove' ? undefined : apiKey, clearKey: key === 'remove' });
       setSettings(updated); setApiKey('');
-      if (action === 'check') setResult(await api('cursorModels', environmentId));
-      else notify(action === 'remove' ? 'Saved Cursor API Key removed' : 'Cursor SDK settings saved');
-    } catch (error) { setResult({ error: error.message }); }
+      if (key === 'remove') notify('Cursor API Key removed');
+      return updated;
+    } catch (reason) { setError(reason.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')); return null; }
     finally { setBusy(false); }
   };
+  const saveFavourites = async ids => {
+    try { setSettings(await api('saveCursorSettings', { enabled, command, favorites: ids })); return true; }
+    catch (reason) { setError(reason.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')); return false; }
+  };
+  const toggle = async next => { setEnabled(next); if (!await save({ enabled: next })) setEnabled(!next); };
   return <section className="section cursor-settings">
-    <h2 className="section-title">Cursor API Key</h2>
-    <p className="row-meta">Enter a Cursor API Key. Pi Desktop installs the official Cursor runtime in its own directory on this Mac or the selected SSH host. It never replaces your global agent or Grok command.</p>
-    <label className="check"><input type="checkbox" checked={enabled} disabled={busy} onChange={e => setEnabled(e.target.checked)} /> Enable Cursor SDK</label>
-    <label className="field">Cursor API Key<input type="password" autoComplete="new-password" value={apiKey} disabled={busy} onChange={e => setApiKey(e.target.value)} placeholder={settings?.hasKey ? 'Key saved — leave blank to keep it' : 'Paste your Cursor API Key'} spellCheck={false} /></label>
-    <p className="row-meta">The key is encrypted on this Mac and sent only to the Cursor process on the selected local or SSH machine. Saving an empty field keeps the saved key. Key changes apply between turns without interrupting running work.</p>
-    {settings?.hasKey && <button className="link-button" disabled={busy} onClick={() => save('remove')}>Remove saved key</button>}
-    <button className="link-button" onClick={() => api('openExternal', 'https://cursor.com/docs/cli/reference/authentication')}>Get a Cursor API Key</button>
-    <details className="cursor-advanced"><summary>Advanced · custom Cursor installation</summary>
-      <label className="field">Cursor CLI executable<input value={command} disabled={busy} onChange={e => setCommand(e.target.value)} placeholder="Automatic — installed and managed by Pi Desktop" spellCheck={false} /></label>
-      <p className="row-meta">Leave this blank for automatic setup. A custom path must point to the official cursor-agent runtime, not a generic agent/Grok executable. The package identity is checked before providing any key.</p>
-      <button className="link-button" onClick={() => api('openExternal', 'https://cursor.com/docs/cli/installation')}>Cursor CLI installation</button>
-    </details>
-    <label className="field">Check on<select value={environmentId} disabled={busy} onChange={e => setEnvironment(e.target.value)}>{environments.filter(e => e.kind === 'local' || (e.added && e.enabled)).map(e => <option key={e.id} value={e.id}>{e.label}</option>)}</select></label>
-    <div className="row-actions">
-      <button className="button primary" disabled={busy} onClick={() => save()}>Save</button>
-      <button className="button" disabled={busy || !enabled} onClick={() => save('check')}>{busy ? <Spinner /> : null} Check connection and models</button>
+    <div className="cursor-head">
+      <div>
+        <h2 className="section-title">Cursor</h2>
+        <p className="row-meta">Cursor's agent, with your API key.</p>
+      </div>
+      <div className="cursor-toggle"><span>{enabled ? 'On' : 'Off'}</span><label className={`switch ${enabled ? 'on' : ''}`}><input type="checkbox" checked={enabled} disabled={busy} onChange={e => toggle(e.target.checked)} aria-label="Enable Cursor SDK" /><span /></label></div>
     </div>
-    {busy && setup?.status === 'preparing' && <p className="row-meta" role="status">{setup.message}</p>}
-    {result?.error && <p className="error" role="alert">{result.error.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')}</p>}
-    {result?.models && <div className="cursor-model-list"><p>{result.models.length} models available</p>{result.models.map(model => <div key={model.id}>{model.name} <span className="muted">{model.id}</span></div>)}</div>}
-    <p className="row-meta">Create a new conversation, choose Cursor CLI, then select a model normally. Existing Pi conversations are unchanged. Cursor owns compaction and tool approvals; Pi goals, history editing, fork and Pi subagent controls are not available. Unreported token usage stays unavailable.</p>
+
+    <div className="cursor-card">
+      <div className="cursor-row">
+        <div className="cursor-key">
+          <label className="field"><span>API Key</span><input type="password" aria-label="Cursor API Key" autoComplete="new-password" value={apiKey} disabled={busy} onChange={e => setApiKey(e.target.value)} placeholder={settings?.hasKey ? 'Saved' : 'Paste Cursor API Key'} spellCheck={false} /></label>
+          <button className="button primary small" disabled={busy} onClick={() => save()}>{busy ? <Spinner /> : 'Save'}</button>
+        </div>
+        <div className="cursor-links">
+          {settings?.hasKey ? <button className="link-button" disabled={busy} onClick={() => save({ key: 'remove' })}>Remove key</button> : <button className="link-button" onClick={() => api('openExternal', 'https://cursor.com/docs/cli/reference/authentication')}>Get a key</button>}
+        </div>
+      </div>
+
+      <div className="cursor-row">
+        <span className="cursor-label">Models</span>
+        <span className="cursor-summary">{favorites.length ? `${favorites.length} selected` : settings?.models?.length ? `${settings.models.length} available` : 'Not loaded'}</span>
+        <button className="button small" disabled={busy || !enabled} onClick={async () => { if (await save()) setPicker({ refresh: false }); }}>{favorites.length ? 'Choose' : 'Load models'}</button>
+      </div>
+
+      <div className="cursor-row">
+        <label className="field cursor-env"><span>Machine</span><select value={environmentId} disabled={busy} onChange={e => setEnvironment(e.target.value)}>{environments.filter(e => e.kind === 'local' || (e.added && e.enabled)).map(e => <option key={e.id} value={e.id}>{e.label}</option>)}</select></label>
+        <button className="button small" disabled={busy || !enabled} onClick={async () => { const saved = await save(); if (saved) setPicker({ refresh: true }); }}>Check connection</button>
+      </div>
+      {favorites.length > 0 && <div className="cursor-chips">{favorites.map(model => <span key={model.id} className="cursor-chip">{model.name}</span>)}</div>}
+      {error && <p className="error" role="alert">{error}</p>}
+      {busy && setup?.status === 'preparing' && <p className="cursor-progress" role="status">{setup.message}</p>}
+    </div>
+
+    <details className="cursor-advanced"><summary>Advanced</summary>
+      <label className="field"><span>Cursor CLI</span><input aria-label="Cursor CLI executable" value={command} disabled={busy} onChange={e => setCommand(e.target.value)} placeholder="Installed by Pi Desktop" spellCheck={false} /></label>
+      <p className="row-meta">Leave blank for the verified automatic installation. A custom path must be the official Cursor runtime.</p>
+    </details>
+    {picker && <CursorModelPicker environmentId={environmentId} refreshOnOpen={picker.refresh} selected={settings?.favorites ?? []} onSave={saveFavourites} onClose={() => setPicker(null)} />}
   </section>;
 }
 
-export function CursorModelMenu({ environmentId, sessionId, value, onChange, close }) {
-  const [state, setState] = useState(null);
+export function CursorModelPicker({ environmentId, selected, onSave, onClose, refreshOnOpen = false }) {
+  const models = useCursorModels(environmentId, { refreshOnOpen });
   const [query, setQuery] = useState('');
-  const [version, setVersion] = useState(0);
-  useEffect(() => {
-    let alive = true; setState(null);
-    api('cursorModels', environmentId, sessionId).then(result => { if (alive) setState(result); }, error => { if (alive) setState({ error: error.message }); });
-    return () => { alive = false; };
-  }, [environmentId, sessionId, version]);
-  return <div className="model-menu cursor-model-menu">
-    <input className="menu-search" autoFocus placeholder="Search Cursor models…" value={query} onChange={e => setQuery(e.target.value)} />
-    <div className="menu-scroll">
-      {!state && <div className="menu-empty"><Spinner /> Loading Cursor models…</div>}
-      {state?.error && <div className="menu-empty error">{state.error}</div>}
-      {state?.models && <MenuSection title="Cursor CLI">{state.models.filter(m => `${m.name} ${m.id}`.toLowerCase().includes(query.toLowerCase())).map(m => <MenuItem key={m.id} label={m.name} detail={m.name !== m.id ? m.id : null} checked={(value?.id ?? state.currentModelId) === m.id} onClick={() => { onChange({ provider: 'cursor', id: m.id, name: m.name }); close(); }} />)}</MenuSection>}
-      {state?.models?.length === 0 && <div className="menu-empty">This Cursor CLI did not advertise models. Update the CLI and check your login.</div>}
+  const [picked, setPicked] = useState(() => new Set(selected));
+  const list = (models.state?.models ?? []).filter(model => `${model.name} ${model.id}`.toLowerCase().includes(query.toLowerCase()));
+  const toggle = id => setPicked(current => { const next = new Set(current); if (next.has(id)) next.delete(id); else next.add(id); return next; });
+  const close = async () => { if (await onSave([...picked]) !== false) onClose(); };
+  return <Modal title="Choose Cursor models" onClose={onClose} width={560} footer={<>
+    <span className="cursor-picked">{picked.size} selected</span>
+    <button className="button" onClick={() => setPicked(new Set())}>Clear</button>
+    <button className="button primary" disabled={!models.state} onClick={close}>Done</button>
+  </>}>
+    <div className="cursor-picker">
+      <div className="search-field"><Icon name="search" size={15} /><input autoFocus placeholder="Search models" value={query} onChange={e => setQuery(e.target.value)} aria-label="Search Cursor models" /></div>
+      <div className="pick-list compact cursor-pick-list">
+        {!models.state && !models.error && <div className="browse-empty"><Spinner /> Loading models…</div>}
+        {models.error && <div className="browse-empty error">{models.error} <button className="link-button" onClick={() => models.load({ refresh: true })}>Retry</button></div>}
+        {models.state && list.map(model => <label key={model.id} className="pick-row"><input type="checkbox" checked={picked.has(model.id)} onChange={() => toggle(model.id)} /><span className="pick-text"><span>{model.name}</span>{model.name !== model.id && <span className="row-meta">{model.id}</span>}</span></label>)}
+        {models.state && !list.length && <div className="browse-empty">No matching models</div>}
+      </div>
     </div>
-    <div className="menu-foot"><MenuItem icon="refresh" label="Refresh models" onClick={() => setVersion(v => v + 1)} /><MenuItem icon="settings" label="Cursor SDK settings…" onClick={() => { close(); openSettings(true, 'cursor'); }} /></div>
+    <div className="cursor-picker-foot"><button className="link-button" onClick={() => models.load({ refresh: true })} disabled={models.loading}>{models.loading ? 'Refreshing…' : 'Refresh from Cursor'}</button>{models.state?.durationMs != null && <span className="row-meta">{models.state.source === 'cache' ? 'Cached' : `${(models.state.durationMs / 1000).toFixed(1)}s`}</span>}</div>
+  </Modal>;
+}
+
+export function CursorModelMenu({ environmentId, sessionId, value, onChange, close }) {
+  const settings = useStore(s => s.settings.cursor);
+  const favorites = useMemo(() => favouriteModels(settings), [settings]);
+  const current = value?.id ?? settings?.currentModelId;
+  const shown = useMemo(() => {
+    const list = favorites.length ? [...favorites] : [];
+    if (current && !list.some(model => model.id === current)) list.unshift({ id: current, name: value?.name ?? current });
+    return list;
+  }, [favorites, current, value?.name]);
+  const choose = () => { close(); openSettings(true, 'cursor'); };
+  return <div className="model-menu cursor-model-menu">
+    <div className="menu-scroll">
+      {shown.length ? <MenuSection title="Cursor">{shown.map(model => <MenuItem key={model.id} label={model.name} detail={model.name !== model.id ? model.id : null} checked={current === model.id} onClick={() => { onChange({ provider: 'cursor', id: model.id, name: model.name }); close(); }} />)}</MenuSection>
+        : <div className="menu-empty">No models selected for Cursor.</div>}
+    </div>
+    <div className="menu-foot"><MenuItem icon="settings" label="Choose models…" onClick={choose} /></div>
   </div>;
 }

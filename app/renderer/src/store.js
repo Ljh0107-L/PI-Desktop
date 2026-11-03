@@ -2,6 +2,7 @@
 import { relativeSessionPath } from './file-paths.js';
 import { useRef, useSyncExternalStore } from 'react';
 import { applyEvent, emptyTranscript, fromHistory, rewindTo } from './transcript.js';
+import { favouriteModels } from './file-paths.js';
 import { isSubagentFinished, subagentBatches, subagentHistoryId, visibleSubagentBatches } from './subagent-state.js';
 
 // Generation timing per reply (Pi's history keeps token counts but not timing), so tok/s survives reloads.
@@ -292,7 +293,7 @@ export async function startSession(text, attachments = []) {
   const pendingId = 'pending';
   set({ view: 'session', activeId: pendingId, transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: [{ role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] } } });
   try {
-    const session = await api('createSession', { environmentId: draft.environmentId, cwd: draft.cwd, engine: draft.engine ?? 'pi', model: cursor ? draft.cursorModel : draft.model, thinkingLevel: cursor ? 'off' : draft.thinkingLevel, prompt: text });
+    const session = await api('createSession', { environmentId: draft.environmentId, cwd: draft.cwd, engine: draft.engine ?? 'pi', model: cursor ? draft.cursorModel ?? favouriteModels(state.settings.cursor)[0] ?? null : draft.model, thinkingLevel: cursor ? 'off' : draft.thinkingLevel, prompt: text });
     set(s => ({ activeId: session.id, transcripts: { ...s.transcripts, [session.id]: { ...emptyTranscript(), loaded: true }, [pendingId]: undefined }, sessions: s.sessions.some(x => x.id === session.id) ? s.sessions : [session, ...s.sessions] }));
     if (!cursor) warnIfNoImages(draft.model, attachments);
     await api('prompt', session.id, text, attachments);

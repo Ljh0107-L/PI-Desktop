@@ -35,6 +35,7 @@ if (process.env.PIDESK_USER_DATA) app.setPath('userData', process.env.PIDESK_USE
 app.setName('Pi Desktop');
 
 let store, manager, window, usage;
+const cursorModelCache = new Map();
 // Hosts set up before Connections existed count as added.
 const migrateConnections = () => { for (const v of Object.values(store?.settings.environments ?? {})) if (v.root && v.added === undefined) v.added = true; };
 const environments = () => (migrateConnections(), listEnvironments({ sshConfig: process.env.PIDESK_SSH_CONFIG, customHosts: store?.settings.customHosts ?? [], state: store?.settings.environments ?? {} }));
@@ -109,7 +110,7 @@ function syncCompactionReserves() {
 
 function publicSettings() {
   const s = store.settings;
-  return { ...s, cursor: { enabled: !!s.cursor?.enabled, command: managedCursor(s.cursor?.command) ? '' : s.cursor.command, hasKey: store.hasKey(CURSOR_KEY_ID) }, providers: s.providers.map(p => ({ ...p, hasKey: store.hasKey(p.id) })), builtinProviders: BUILTIN_PROVIDERS };
+  return { ...s, cursor: { enabled: !!s.cursor?.enabled, command: managedCursor(s.cursor?.command) ? '' : s.cursor.command, favorites: Array.isArray(s.cursor?.favorites) ? s.cursor.favorites : [], models: Array.isArray(s.cursor?.models) ? s.cursor.models : [], modelsAt: Number(s.cursor?.modelsAt) || 0, currentModelId: s.cursor?.currentModelId, hasKey: store.hasKey(CURSOR_KEY_ID) }, providers: s.providers.map(p => ({ ...p, hasKey: store.hasKey(p.id) })), builtinProviders: BUILTIN_PROVIDERS };
 }
 
 const send = (channel, payload) => { if (window && !window.isDestroyed()) window.webContents.send('pidesk:event', { channel, payload }); };
@@ -160,19 +161,34 @@ const api = {
     const result = await dialog.showOpenDialog(window, { properties: ['openDirectory', 'createDirectory'] });
     return result.canceled ? null : result.filePaths[0];
   },
-  saveCursorSettings({ enabled, command = '', apiKey, clearKey }) {
+  saveCursorSettings({ enabled, command = '', apiKey, clearKey, favorites }) {
     if (!managedCursor(command)) cursorCommand(command);
+    const previousCursor = store.settings.cursor;
+    const invalidateModels = !!apiKey || !!clearKey || (previousCursor?.command ?? '') !== (managedCursor(command) ? '' : command.trim());
+    if (favorites !== undefined) {
+      if (!Array.isArray(favorites) || favorites.length > 30 || favorites.some(id => typeof id !== 'string' || !id || id.length > 300)) throw new Error('Invalid Cursor model selection');
+      const before = store.settings.cursor;
+      store.settings.cursor = { ...before, favorites: [...new Set(favorites)] };
+      try { store.saveSettings(); } catch (error) { store.settings.cursor = before; throw error; }
+    }
     store.saveCursorSettings({ enabled, command: managedCursor(command) ? '' : command.trim(), apiKey, clearKey });
+    if (invalidateModels) store.clearCursorModels();
     manager.prepared.clear();
+    if (invalidateModels) cursorModelCache.clear();
     return publicSettings();
   },
-  async cursorModels(environmentId = 'local', sessionId) {
+  async cursorModels(environmentId = 'local', sessionId, { refresh = false } = {}) {
     if (!store.settings.cursor?.enabled) throw new Error('Enable Cursor SDK in Settings first.');
+    const started = Date.now();
     if (sessionId) {
       const record = manager.record(sessionId);
       if (record.engine !== 'cursor') throw new Error('Not a Cursor session');
       const session = await manager.cursorSession(sessionId);
-      return { models: await session.availableModels(), currentModelId: (await session.state()).model?.id };
+      return { models: await session.availableModels(), currentModelId: (await session.state()).model?.id, source: 'session', durationMs: Date.now() - started };
+    }
+    if (!refresh) {
+      const cached = cursorModelCache.get(environmentId);
+      if (cached && Date.now() - cached.at < 10 * 60 * 1000) return { ...cached.result, source: 'cache', durationMs: Date.now() - started };
     }
     const env = manager.env(environmentId);
     const command = await manager.cursorCommand(environmentId);
@@ -182,16 +198,19 @@ const api = {
     if (env.kind === 'local') {
       const args = [join(root, 'agent/pidesk-cursor.mjs'), '--catalog', '--boot-stdin', '--cwd', app.getPath('home'), '--command', command];
       output = await new Promise((resolve, reject) => {
-        const child = execFile(nodeBinary(), args, { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PIDESK_BOOT: '' }, timeout: 90000, maxBuffer: 2 << 20 }, (error, stdout, stderr) => error ? reject(new Error(stderr.trim() || error.message)) : resolve(stdout));
+        const child = execFile(nodeBinary(), args, { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PIDESK_BOOT: '' }, timeout: 45000, maxBuffer: 2 << 20 }, (error, stdout, stderr) => error ? reject(new Error(stderr.trim() || error.message)) : resolve(stdout));
         child.stdin.on('error', () => {});
         child.stdin.end(input);
       });
     } else {
       const facts = await manager.prepare(env.id);
       const args = [facts.node, `${dirname(facts.bridge)}/pidesk-cursor.mjs`, '--catalog', '--boot-stdin', '--cwd', facts.home, '--command', command];
-      output = await runSsh(env, args.map(shellQuote).join(' '), { input, timeout: 90000 });
+      output = await runSsh(env, args.map(shellQuote).join(' '), { input, timeout: 45000 });
     }
-    return JSON.parse(output.trim());
+    const result = { ...JSON.parse(output.trim()), source: 'fresh', durationMs: Date.now() - started };
+    cursorModelCache.set(environmentId, { at: Date.now(), result });
+    store.saveCursorModels(result);
+    return result;
   },
   catalog: () => manager.catalog(),
   // Models a provider offers: Pi's catalog for built-in providers, GET /models for custom endpoints.
