@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { promisify } from 'node:util';
 import { EventEmitter } from 'node:events';
 import { PassThrough } from 'node:stream';
@@ -33,6 +33,17 @@ test('Cursor environment excludes Pi boot credentials and Electron Node mode', (
   assert.equal(cursorCommand('/path with spaces/agent'), '/path with spaces/agent');
   assert.throws(() => cursorCommand('bad\npath'));
   assert.deepEqual(cursorModels({}), []);
+});
+
+test('Cursor ACP launches with official YOLO mode before the subcommand', { timeout: 15000 }, async t => {
+  const f = fixture(t);
+  const launches = [];
+  f.client.spawnProcess = (command, args, options) => {
+    launches.push(args);
+    return spawn(command, args, options);
+  };
+  await f.desktop.start();
+  assert.deepEqual(launches, [['--disable-auto-update', '--force', 'acp']]);
 });
 
 test('official ACP initializes, advertises models, switches and streams exactly once', { timeout: 15000 }, async t => {

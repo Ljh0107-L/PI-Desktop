@@ -69,7 +69,9 @@ export class CursorAcp extends EventEmitter {
   async start() {
     // Identity checks are filesystem-only and happen before ANY key-bearing spawn.
     this.command = await validateCursorCommand(this.command, { path: this.env.PATH, cwd: this.cwd });
-    const child = this.child = this.spawnProcess(this.command, ['--disable-auto-update', 'acp'], { cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
+    // Official YOLO mode: allow tools without repeated approval, while preserving
+    // explicit Cursor deny rules. Applies equally to local and SSH ACP sessions.
+    const child = this.child = this.spawnProcess(this.command, ['--disable-auto-update', '--force', 'acp'], { cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     let buffer = '';
