@@ -8,10 +8,12 @@ export function cursorCommand(value = '~/.local/bin/agent', home = homedir()) {
   if (typeof value !== 'string' || !value.trim() || /[\0\r\n]/.test(value)) throw new Error('Enter a Cursor CLI executable path');
   return value.startsWith('~/') ? join(home, value.slice(2)) : value;
 }
-export function cursorEnvironment(source = process.env) {
+export function cursorEnvironment(source = process.env, apiKey) {
   // In particular never forward Pi provider keys, PIDESK_BOOT or ELECTRON_RUN_AS_NODE.
   const keep = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM', 'CURSOR_API_KEY', 'CURSOR_AUTH_TOKEN'];
-  return Object.fromEntries(keep.filter(key => source[key] !== undefined).map(key => [key, source[key]]));
+  const env = Object.fromEntries(keep.filter(key => source[key] !== undefined).map(key => [key, source[key]]));
+  if (apiKey) { env.CURSOR_API_KEY = apiKey; delete env.CURSOR_AUTH_TOKEN; }
+  return env;
 }
 export const cursorModelConfig = result => result?.configOptions?.find(option => option.type === 'select' && (option.category === 'model' || option.id === 'model'));
 export const cursorCurrentModel = result => cursorModelConfig(result)?.currentValue ?? result?.models?.currentModelId;
@@ -22,17 +24,20 @@ export function cursorModels(result) {
 }
 
 export class CursorAcp extends EventEmitter {
-  constructor({ command, cwd, spawnProcess = spawn, env = process.env }) {
+  constructor({ command, cwd, spawnProcess = spawn, env = process.env, apiKey }) {
     super();
     this.command = cursorCommand(command);
     this.cwd = cwd;
     this.spawnProcess = spawnProcess;
-    this.env = cursorEnvironment(env);
+    this.env = cursorEnvironment(env, apiKey);
+    const secrets = [this.env.CURSOR_API_KEY, this.env.CURSOR_AUTH_TOKEN].filter(Boolean);
+    this.redact = text => secrets.reduce((value, secret) => value.split(secret).join('[redacted]'), String(text));
     this.pending = new Map();
     this.nextId = 0;
-    this.stderr = '';
+    this._stderr = '';
     this.closed = false;
   }
+  get stderr() { return this._stderr.slice(-4000); }
   async start() {
     const child = this.child = this.spawnProcess(this.command, ['acp'], { cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
     child.stdout.setEncoding('utf8');
@@ -49,9 +54,9 @@ export class CursorAcp extends EventEmitter {
         catch { this.fail(new Error('Invalid JSON from Cursor CLI')); this.close(); return; }
       }
     });
-    child.stderr.on('data', chunk => { this.stderr = (this.stderr + chunk).slice(-4000); });
+    child.stderr.on('data', chunk => { this._stderr = this.redact(this._stderr + chunk).slice(-32768); });
     child.stdin.on('error', error => this.fail(error));
-    child.once('error', error => this.fail(new Error(`Could not start Cursor CLI (${this.command}): ${error.message}. Install Cursor CLI and run agent login on this machine.`)));
+    child.once('error', error => this.fail(new Error(`Could not start Cursor CLI (${this.command}): ${error.message}. Install Cursor CLI, then enter a Cursor API Key in Settings → Cursor SDK (or use agent login).`)));
     this.exit = new Promise(resolve => child.once('close', (code, signal) => {
       const error = new Error(`Cursor CLI closed (${signal ?? code})${this.stderr ? ': ' + this.stderr : ''}`);
       this.fail(error);
@@ -95,7 +100,7 @@ export class CursorAcp extends EventEmitter {
       if (!pending) return;
       clearTimeout(pending.timer);
       this.pending.delete(message.id);
-      if (message.error) pending.reject(new Error(message.error.message || 'Cursor request failed'));
+      if (message.error) pending.reject(new Error(this.redact(message.error.message || 'Cursor request failed')));
       else pending.resolve(message.result);
     }
   }

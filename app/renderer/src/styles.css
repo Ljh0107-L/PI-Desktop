@@ -643,6 +643,9 @@ a[href], .markdown a { cursor: pointer; }
 .turn-foot:hover { opacity: 1; }
 
 .cursor-settings .row-meta { white-space: normal; overflow: visible; line-height: 1.6; }
+.cursor-advanced { margin: 16px 0; }
+.cursor-advanced summary { color: var(--muted); font-size: 13px; cursor: pointer; }
+.cursor-settings .link-button + .link-button { margin-left: 16px; }
 .cursor-model-list { margin: 20px 0; font-size: 13.5px; line-height: 1.7; }
 
 /* ------------------------------------------------------------ file preview (Claude-style) */

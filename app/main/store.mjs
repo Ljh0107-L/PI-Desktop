@@ -7,6 +7,8 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+export const CURSOR_KEY_ID = 'sdk:cursor';
+
 const DEFAULT_SETTINGS = {
   providers: [],
   defaults: { model: null, thinkingLevel: 'medium', environmentId: 'local' },
@@ -85,14 +87,40 @@ export class Store {
   get #keychain() { return process.platform === 'darwin' && !this.insecure; }
 
   setKey(providerId, key) {
-    if (!key) { delete this.secrets[providerId]; }
-    else if (this.insecure) { this.secrets[providerId] = { insecure: Buffer.from(key).toString('base64') }; }
-    else if (this.#keychain) { this.secrets[providerId] = this.#seal(key); }
+    const next = { ...this.secrets };
+    if (!key) { delete next[providerId]; }
+    else if (this.insecure) { next[providerId] = { insecure: Buffer.from(key).toString('base64') }; }
+    else if (this.#keychain) { next[providerId] = this.#seal(key); }
     else {
       if (!this.safeStorage.isEncryptionAvailable()) throw new Error('System encryption is unavailable; cannot store API keys safely.');
-      this.secrets[providerId] = { enc: this.safeStorage.encryptString(key).toString('base64') };
+      next[providerId] = { enc: this.safeStorage.encryptString(key).toString('base64') };
     }
-    this.#write('secrets.json', this.secrets);
+    this.#write('secrets.json', next);
+    this.secrets = next;
+  }
+  saveCursorSettings({ enabled, command, apiKey, clearKey = false }) {
+    if (apiKey !== undefined && typeof apiKey !== 'string') throw new Error('Cursor API Key must be text');
+    const key = apiKey?.trim();
+    if (key && (key.length > 16384 || /[\s\x00-\x1f\x7f]/.test(key))) throw new Error('Invalid Cursor API Key');
+    if (key && clearKey) throw new Error('Cannot save and remove the Cursor API Key together');
+    const previous = this.settings.cursor;
+    const previousSecrets = this.secrets;
+    const changed = !!key || (clearKey && this.hasKey(CURSOR_KEY_ID));
+    const version = Number.isSafeInteger(previous?.credentialVersion) ? previous.credentialVersion : 0;
+    let wroteKey = false;
+    try {
+      if (changed) { this.setKey(CURSOR_KEY_ID, key || null); wroteKey = true; }
+      // Whitelist settings: plaintext keys and renderer hasKey flags never reach settings.json.
+      this.settings.cursor = { enabled: !!enabled, command, credentialVersion: version + (changed ? 1 : 0) };
+      this.saveSettings();
+    } catch (error) {
+      if (previous === undefined) delete this.settings.cursor; else this.settings.cursor = previous;
+      if (wroteKey) {
+        try { this.#write('secrets.json', previousSecrets); this.secrets = previousSecrets; }
+        catch { throw new Error('Could not save Cursor settings or restore the previous key. Check storage permissions and save the key again.'); }
+      }
+      throw error;
+    }
   }
   getKey(providerId) {
     const entry = this.secrets[providerId];

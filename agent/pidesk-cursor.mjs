@@ -8,7 +8,8 @@ import { CursorAcp, cursorCurrentModel, cursorModelConfig, cursorModels } from '
 
 const textOf = content => (content ?? []).map(c => c.type === 'text' ? c.text : c.type === 'resource_link' ? c.uri : JSON.stringify(c)).join('\n');
 export class CursorDesktopSession {
-  constructor({ client, file, cwd, send }) {
+  constructor({ client, file, cwd, send, credentialVersion = 0 }) {
+    this.cursorCredentialVersion = credentialVersion;
     this.client = client; this.file = file; this.cwd = cwd; this.send = send;
     this.entries = []; this.dialogs = new Map(); this.streaming = false;
     if (existsSync(file)) {
@@ -62,7 +63,7 @@ export class CursorDesktopSession {
     }
     this.saveState();
   }
-  state() { return { sessionId: this.sessionId, sessionFile: this.file, isStreaming: this.streaming, model: this.model, thinkingLevel: 'off' }; }
+  state() { return { sessionId: this.sessionId, sessionFile: this.file, cursorCredentialVersion: this.cursorCredentialVersion, isStreaming: this.streaming, model: this.model, thinkingLevel: 'off' }; }
   messages() { return this.entries.filter(e => e.type === 'message').map(e => e.message); }
   endMessage(message) { this.append({ type: 'message', message }); this.send({ type: 'message_end', message }); }
   notification({ method, params }) {
@@ -213,18 +214,33 @@ export class CursorDesktopSession {
 }
 
 async function main() {
+  let bootText = process.env.PIDESK_BOOT || '{}';
   delete process.env.PIDESK_BOOT;
   const args = process.argv.slice(2);
+  if (args.includes('--boot-stdin')) {
+    bootText = '';
+    process.stdin.setEncoding('utf8');
+    for await (const chunk of process.stdin) {
+      bootText += chunk;
+      if (Buffer.byteLength(bootText) > 65536) throw new Error('Cursor startup configuration is too large');
+    }
+  }
+  let boot;
+  try { boot = JSON.parse(bootText); } catch { throw new Error('Invalid Cursor startup configuration'); }
+  if (!boot || (boot.cursorApiKey !== undefined && typeof boot.cursorApiKey !== 'string')) throw new Error('Invalid Cursor credentials');
+  bootText = '';
   const value = name => { const index = args.indexOf(name); return index >= 0 ? args[index + 1] : undefined; };
   const cwd = value('--cwd') || process.cwd();
-  const client = new CursorAcp({ command: value('--command'), cwd });
+  const client = new CursorAcp({ command: value('--command'), cwd, apiKey: boot.cursorApiKey });
+  const credentialVersion = boot.cursorCredentialVersion ?? 0;
+  delete boot.cursorApiKey;
   if (args.includes('--catalog')) {
     // Discovery is also cancellable when its parent process enforces a deadline.
     // Cursor has its own process group, so killing only this adapter would leak it.
     const stop = () => { void client.close().finally(() => process.exit(0)); };
     process.once('SIGTERM', stop); process.once('SIGINT', stop);
     // Opening an empty ACP session advertises account models; it sends no model prompt.
-    client.on('request', message => client.reject(message.id, 'Model discovery is non-interactive. Run agent login first.'));
+    client.on('request', message => client.reject(message.id, 'Model discovery is non-interactive. Enter a Cursor API Key in Settings or use agent login.'));
     try { await client.start(); const session = await client.openSession(); process.stdout.write(JSON.stringify({ models: cursorModels(session), currentModelId: cursorCurrentModel(session) }) + '\n'); }
     finally { await client.close(); process.off('SIGTERM', stop); process.off('SIGINT', stop); }
     return;
@@ -232,7 +248,7 @@ async function main() {
   const send = message => process.stdout.write(JSON.stringify(message) + '\n');
   const file = value('--session-file');
   if (!file) throw new Error('Missing Cursor desktop history path');
-  const desktop = new CursorDesktopSession({ client, file, cwd, send });
+  const desktop = new CursorDesktopSession({ client, file, cwd, send, credentialVersion });
   const ready = desktop.start(value('--model'));
   ready.catch(error => { console.error(error.message); });
   let buffer = '';

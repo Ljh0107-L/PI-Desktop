@@ -1,16 +1,17 @@
 // Dedicated offline Cursor UI coverage. Run only by GitHub CI after the normal E2E suite.
 import assert from 'node:assert/strict';
-import { chmodSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { launch, root, shot } from './harness.mjs';
 import { shellQuote } from '../core/transports.mjs';
 
+const KEY = 'cursor-fixture-key-one', NEXT_KEY = 'cursor-fixture-key-two';
 const work = '/tmp/pidesk-e2e/cursor';
 rmSync(work, { recursive: true, force: true });
 const profile = join(work, 'profile'), project = join(work, 'project');
 mkdirSync(profile, { recursive: true }); mkdirSync(project, { recursive: true });
 const command = join(work, 'mock cursor');
-writeFileSync(command, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(join(root, 'test/fixtures/cursor-peer.mjs'))} --config-models "$@"\n`);
+writeFileSync(command, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(join(root, 'test/fixtures/cursor-peer.mjs'))} --config-models --require-key "$@"\n`);
 chmodSync(command, 0o700);
 // Reuse only the isolated test-host install; never ~/.pidesk.
 writeFileSync(join(profile, 'settings.json'), JSON.stringify({ environments: { 'ssh:pidesk-test': { root: '/tmp/pidesk-e2e/remote-install', added: true, enabled: true } } }));
@@ -23,9 +24,16 @@ try {
   await page.click('.settings-button');
   await page.getByRole('button', { name: 'Cursor SDK', exact: true }).click();
   await page.getByLabel('Enable Cursor SDK').check();
+  await page.getByLabel('Cursor API Key', { exact: true }).fill(KEY);
+  await page.locator('.cursor-advanced summary').click();
   await page.getByLabel('Cursor CLI executable').fill(command);
   await page.getByRole('button', { name: 'Check connection and models', exact: true }).click();
   await page.locator('.cursor-model-list', { hasText: '2 models available' }).waitFor({ timeout: 90000 });
+  assert.equal(await page.getByLabel('Cursor API Key', { exact: true }).getAttribute('type'), 'password');
+  assert.equal(await page.getByLabel('Cursor API Key', { exact: true }).inputValue(), '');
+  assert.equal(await page.evaluate(() => window.__pideskState().settings.cursor.hasKey), true);
+  for (const file of ['settings.json', 'secrets.json']) assert.ok(!readFileSync(join(profile, file), 'utf8').includes(KEY), 'plaintext key must not be written to desktop settings/secrets');
+  assert.ok(!JSON.stringify(await page.evaluate(() => window.__pideskState().settings)).includes(KEY), 'bootstrap/settings expose only key presence');
   assert.ok(await page.locator('.cursor-settings .row-meta').evaluateAll(nodes => nodes.every(node => getComputedStyle(node).whiteSpace === 'normal' && node.scrollWidth <= node.clientWidth + 1)), 'Cursor setup instructions must wrap instead of being clipped');
   await shot(page, '/tmp/pidesk-e2e/shots', 'cursor-sdk-settings');
   await page.getByRole('button', { name: 'Back to app', exact: true }).click();
@@ -89,7 +97,32 @@ try {
   await page.locator('.session-main .markdown', { hasText: '回复 after reload ssh:pidesk-test' }).waitFor({ timeout: 90000 });
   await send('after desktop restart');
   await page.locator('.session-main .markdown', { hasText: '回复 after desktop restart' }).waitFor(); await idle();
-  console.log('PASS Cursor SDK settings, model discovery/switching, local/SSH chat, tools, files, approvals, cancel and restart');
+  // Rotate without changing the desktop/native conversation identity or losing history.
+  const beforeRotation = await page.evaluate(async () => {
+    const id = window.__pideskState().activeId;
+    return (await window.pidesk.invoke('listSessions')).find(s => s.id === id);
+  });
+  await page.click('.settings-button');
+  await page.getByRole('button', { name: 'Cursor SDK', exact: true }).click();
+  assert.match(await page.getByLabel('Cursor API Key', { exact: true }).getAttribute('placeholder'), /Key saved/);
+  await page.getByLabel('Cursor API Key', { exact: true }).fill(NEXT_KEY);
+  await page.getByRole('button', { name: 'Save', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.cursor-settings input[type="password"]')?.value === '');
+  await page.getByRole('button', { name: 'Back to app', exact: true }).click();
+  await send('auth-status');
+  await page.locator('.session-main .markdown', { hasText: 'Credential: rotated' }).waitFor({ timeout: 90000 }); await idle();
+  const afterRotation = await page.evaluate(async id => (await window.pidesk.invoke('listSessions')).find(s => s.id === id), beforeRotation.id);
+  assert.equal(afterRotation.piSessionId, beforeRotation.piSessionId);
+  assert.equal(afterRotation.piSessionFile, beforeRotation.piSessionFile);
+  assert.ok(!readFileSync(afterRotation.piSessionFile, 'utf8').includes(NEXT_KEY), 'SSH transcript must never store credentials');
+  await page.click('.settings-button');
+  await page.getByRole('button', { name: 'Cursor SDK', exact: true }).click();
+  await page.getByRole('button', { name: 'Remove saved key', exact: true }).click();
+  await page.getByRole('button', { name: 'Remove saved key', exact: true }).waitFor({ state: 'detached' });
+  assert.equal(await page.evaluate(() => window.__pideskState().settings.cursor.hasKey), false);
+  await page.getByRole('button', { name: 'Check connection and models', exact: true }).click();
+  await page.locator('.cursor-settings .error', { hasText: 'Cursor API Key is missing or invalid' }).waitFor({ timeout: 90000 });
+  console.log('PASS Cursor API-key entry, encrypted storage, local/SSH auth, rotation/removal, SDK models, tools, approvals, cancel and restart');
 } catch (error) {
   await shot(page, '/tmp/pidesk-e2e/shots', 'zz-cursor-failure').catch(() => {});
   console.error(error);

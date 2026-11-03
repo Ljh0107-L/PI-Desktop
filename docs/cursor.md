@@ -4,12 +4,14 @@ Pi Desktop's **Settings → Cursor SDK** is a client for the official [Cursor CL
 
 ## Setup
 
-1. Install the [official Cursor CLI](https://cursor.com/docs/cli/installation) on the machine where the conversation will run. Run `agent login` there in a terminal.
-2. Enable **Cursor SDK** in Settings. Set the executable path, normally `~/.local/bin/agent`. This is an executable, not a shell command or argument list. `~` expands on the target machine.
+1. Install the [official Cursor CLI](https://cursor.com/docs/cli/installation) on each machine where conversations will run. A saved API key replaces the manual `agent login` step; the CLI executable itself is still required.
+2. Enable **Cursor SDK** in Settings and paste a user API key from **Cursor Dashboard → API Keys**. The password field clears after a successful save; leaving it blank preserves the saved key. Use **Remove saved key** to clear it explicitly. The executable path is under **Advanced**, normally `~/.local/bin/agent`; it is an executable, not a shell command or argument list, and `~` expands on the target machine.
 3. Choose a machine and click **Check connection and models**. Discovery opens an empty ACP session to read the account's advertised model list; it sends no inference prompt.
-4. Start a new conversation, choose **Cursor CLI** in the agent selector, and use the normal model menu. Local and SSH conversations run Cursor on their respective machines. Each machine needs its own working CLI/login; Pi Desktop does not silently copy credentials or install the CLI.
+4. Start a new conversation, choose **Cursor CLI** in the agent selector, and use the normal model menu. Local and SSH conversations run Cursor on their respective machines using the saved key. Without a saved key, an existing CLI login remains supported.
 
-Cursor credentials stay with its CLI. Pi API-provider credentials and Electron's `ELECTRON_RUN_AS_NODE` are not passed into Cursor. No VMISS service or reverse-engineered provider endpoint is required.
+The key is encrypted in the desktop's existing Keychain-backed secret store, separately from settings. Only key presence is returned to the renderer. Model discovery sends it on stdin; sessions use the relay's private boot record. The adapter removes the boot variable and supplies `CURSOR_API_KEY` to Cursor, never a command-line flag or a file on the SSH host. Pi provider keys and Electron's `ELECTRON_RUN_AS_NODE` are not passed into Cursor. Known API keys are redacted from CLI error diagnostics. Cursor controls its own child tools and credential handling.
+
+Saving/replacing/removing a key does not interrupt active work. The next idle model lookup or prompt restarts the Cursor adapter with the updated credential and resumes the same native session/history. An attempt to refresh credentials while a turn or question is active asks you to finish or stop it first. No VMISS service or reverse-engineered provider endpoint is required.
 
 ## Conversation behavior
 

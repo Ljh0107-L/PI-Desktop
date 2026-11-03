@@ -10,7 +10,7 @@ import { shellQuote } from '../../core/transports.mjs';
 import { SessionManager } from './session-manager.mjs';
 import { Terminals } from './terminals.mjs';
 import { Updater } from './updater.mjs';
-import { Store } from './store.mjs';
+import { CURSOR_KEY_ID, Store } from './store.mjs';
 import { UsageLedger } from './usage.mjs';
 import { cursorCommand } from '../../agent/cursor-acp.mjs';
 
@@ -107,7 +107,7 @@ function syncCompactionReserves() {
 
 function publicSettings() {
   const s = store.settings;
-  return { ...s, providers: s.providers.map(p => ({ ...p, hasKey: store.hasKey(p.id) })), builtinProviders: BUILTIN_PROVIDERS };
+  return { ...s, cursor: { enabled: !!s.cursor?.enabled, command: s.cursor?.command || '~/.local/bin/agent', hasKey: store.hasKey(CURSOR_KEY_ID) }, providers: s.providers.map(p => ({ ...p, hasKey: store.hasKey(p.id) })), builtinProviders: BUILTIN_PROVIDERS };
 }
 
 const send = (channel, payload) => { if (window && !window.isDestroyed()) window.webContents.send('pidesk:event', { channel, payload }); };
@@ -158,11 +158,9 @@ const api = {
     const result = await dialog.showOpenDialog(window, { properties: ['openDirectory', 'createDirectory'] });
     return result.canceled ? null : result.filePaths[0];
   },
-  saveCursorSettings({ enabled, command }) {
+  saveCursorSettings({ enabled, command = '~/.local/bin/agent', apiKey, clearKey }) {
     cursorCommand(command);
-    const previous = store.settings.cursor;
-    store.settings.cursor = { enabled: !!enabled, command: command.trim() };
-    try { store.saveSettings(); } catch (error) { store.settings.cursor = previous; throw error; }
+    store.saveCursorSettings({ enabled, command: command.trim(), apiKey, clearKey });
     return publicSettings();
   },
   async cursorModels(environmentId = 'local', sessionId) {
@@ -170,19 +168,25 @@ const api = {
     if (sessionId) {
       const record = manager.record(sessionId);
       if (record.engine !== 'cursor') throw new Error('Not a Cursor session');
-      const session = await manager.ensureStarted(sessionId);
+      const session = await manager.cursorSession(sessionId);
       return { models: await session.availableModels(), currentModelId: (await session.state()).model?.id };
     }
     const env = manager.env(environmentId);
     const command = store.settings.cursor.command || '~/.local/bin/agent';
+    // Credentials travel on stdin, never in the process command or remote shell script.
+    const input = JSON.stringify({ cursorApiKey: store.getKey(CURSOR_KEY_ID) || '', cursorCredentialVersion: store.settings.cursor.credentialVersion ?? 0 }) + '\n';
     let output;
     if (env.kind === 'local') {
-      const args = [join(root, 'agent/pidesk-cursor.mjs'), '--catalog', '--cwd', app.getPath('home'), '--command', command];
-      output = await new Promise((resolve, reject) => execFile(nodeBinary(), args, { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PIDESK_BOOT: '' }, timeout: 90000, maxBuffer: 2 << 20 }, (error, stdout, stderr) => error ? reject(new Error(stderr.trim() || error.message)) : resolve(stdout)));
+      const args = [join(root, 'agent/pidesk-cursor.mjs'), '--catalog', '--boot-stdin', '--cwd', app.getPath('home'), '--command', command];
+      output = await new Promise((resolve, reject) => {
+        const child = execFile(nodeBinary(), args, { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PIDESK_BOOT: '' }, timeout: 90000, maxBuffer: 2 << 20 }, (error, stdout, stderr) => error ? reject(new Error(stderr.trim() || error.message)) : resolve(stdout));
+        child.stdin.on('error', () => {});
+        child.stdin.end(input);
+      });
     } else {
       const facts = await manager.prepare(env.id);
-      const args = [facts.node, `${dirname(facts.bridge)}/pidesk-cursor.mjs`, '--catalog', '--cwd', facts.home, '--command', command];
-      output = await runSsh(env, args.map(shellQuote).join(' '), { timeout: 90000 });
+      const args = [facts.node, `${dirname(facts.bridge)}/pidesk-cursor.mjs`, '--catalog', '--boot-stdin', '--cwd', facts.home, '--command', command];
+      output = await runSsh(env, args.map(shellQuote).join(' '), { input, timeout: 90000 });
     }
     return JSON.parse(output.trim());
   },

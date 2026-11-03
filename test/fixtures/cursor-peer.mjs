@@ -6,6 +6,8 @@ const send = message => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ..
 const result = (id, value) => send({ id, result: value });
 const models = [{ modelId: 'cursor-test-a', name: 'Cursor Test A' }, { modelId: 'cursor-test-b', name: 'Cursor Test B' }];
 let sessionId = 'cursor-fixture-session', modelId = models[0].modelId, turn, requestId = 10000;
+const requiresKey = process.argv.includes('--require-key');
+const validKeys = ['cursor-fixture-key-one', 'cursor-fixture-key-two'];
 const configModels = process.argv.includes('--config-models');
 const modelState = () => configModels ? { configOptions: [{ id: 'model-choice', category: 'model', type: 'select', name: 'Model', currentValue: modelId, options: [{ group: 'fixture', name: 'Fixture', options: models.map(model => ({ value: model.modelId, name: model.name })) }] }] } : { models: { availableModels: models, currentModelId: modelId } };
 const pending = new Map();
@@ -17,7 +19,11 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   const p = JSON.parse(line);
   if (!p.method) { const done = pending.get(p.id); pending.delete(p.id); done?.(p.result); return; }
   switch (p.method) {
-    case 'initialize': result(p.id, { protocolVersion: 1, agentCapabilities: { loadSession: true, promptCapabilities: { image: true } }, authMethods: [{ id: 'cursor_login', name: 'Cursor login' }] }); break;
+    case 'initialize':
+      if (requiresKey && (!validKeys.includes(process.env.CURSOR_API_KEY) || process.env.CURSOR_AUTH_TOKEN)) {
+        send({ id: p.id, error: { code: -32000, message: 'Cursor API Key is missing or invalid' } }); break;
+      }
+      result(p.id, { protocolVersion: 1, agentCapabilities: { loadSession: true, promptCapabilities: { image: true } }, authMethods: [{ id: 'cursor_login', name: 'Cursor login' }] }); break;
     case 'authenticate': result(p.id, {}); break;
     case 'session/new': case 'session/load':
       sessionId = p.params.sessionId || sessionId;
@@ -31,6 +37,13 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     case 'session/prompt': {
       turn = p.id;
       const prompt = p.params.prompt.map(c => c.text || '').join('');
+      if (prompt === 'auth-status') { text(`Credential: ${process.env.CURSOR_API_KEY === validKeys[1] ? 'rotated' : process.env.CURSOR_API_KEY === validKeys[0] ? 'primary' : 'login'}`); finish(); break; }
+      if (prompt === 'auth-error') {
+        const secret = process.env.CURSOR_API_KEY || 'no-key';
+        process.stderr.write('Bad credential ' + secret.slice(0, 8));
+        setTimeout(() => { process.stderr.write(secret.slice(8), () => process.exit(1)); }, 10);
+        break;
+      }
       if (prompt === 'crash') { process.stderr.write('offline cursor crash'); process.exit(1); }
       if (prompt === 'hold') { text('Waiting for cancellation'); break; }
       if (prompt === 'permission') {

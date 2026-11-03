@@ -6,6 +6,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { CURSOR_KEY_ID } from './store.mjs';
 import { PiSession } from '../../core/pi-session.mjs';
 import { egressEnv, localRelayTransport, localTransport, relaySpawnSpec, shellQuote, sshRelayTransport } from '../../core/transports.mjs';
 import { startEgressProxy, hostPortOf } from '../../core/egress-proxy.mjs';
@@ -73,6 +74,7 @@ const SWEEP_MS = 60 * 1000;
 export class SessionManager extends EventEmitter {
   runtimes = new Map();   // session id -> { session, status, streaming, questions: Map, starting, lastSeq }
   prepared = new Map();   // environment id -> Promise<remote facts>
+  cursorRestarts = new Map(); // serialize credential refreshes shared by prompts/model menus
   preparing = new Map();  // in-flight setup; force/provider changes must not race deployments
   catalogCache = null;
   providersVersion = 0;   // bumped whenever providers/keys change in Settings
@@ -525,7 +527,7 @@ export class SessionManager extends EventEmitter {
     const bootVersion = this.providersVersion;
     const cursor = record.engine === 'cursor';
     runtime.engine = record.engine;
-    const boot = cursor ? {} : { providers: this.bootProviders() };
+    const boot = cursor ? { cursorApiKey: this.store.getKey(CURSOR_KEY_ID) || '', cursorCredentialVersion: this.store.settings.cursor?.credentialVersion ?? 0 } : { providers: this.bootProviders() };
     const piArgs = record.piSessionFile ? ['--session', record.piSessionFile] : [];
     let session;
     if (cursor) {
@@ -603,6 +605,7 @@ export class SessionManager extends EventEmitter {
     const state = session.initialState ?? await session.state();
     runtime.streaming = !!state.isStreaming;
     if (record.engine === 'cursor') {
+      runtime.cursorCredentialVersion = state.cursorCredentialVersion ?? 0;
       this.#assertCurrent(record, runtime);
       this.#save(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId, model: state.model, thinkingLevel: 'off' });
       return session;
@@ -692,6 +695,26 @@ export class SessionManager extends EventEmitter {
   }
 
 
+  // Refresh saved credentials between turns, never by interrupting active Cursor work.
+  cursorSession(id) {
+    if (this.cursorRestarts.has(id)) return this.cursorRestarts.get(id);
+    const pending = (async () => {
+      const record = this.record(id);
+      const session = await this.ensureStarted(id);
+      if (record.engine !== 'cursor') return session;
+      const runtime = this.runtimes.get(id);
+      if (runtime.cursorCredentialVersion === (this.store.settings.cursor?.credentialVersion ?? 0)) return session;
+      if (runtime.streaming || runtime.questions.size) throw new Error('Cursor API Key changed. Let the current turn finish or stop it before applying the new key.');
+      await this.close(id);
+      await this.stopRelay(this.env(record.environmentId), id);
+      return this.ensureStarted(id);
+    })();
+    this.cursorRestarts.set(id, pending);
+    const clear = () => { if (this.cursorRestarts.get(id) === pending) this.cursorRestarts.delete(id); };
+    pending.then(clear, clear);
+    return pending;
+  }
+
   // attachments: [{ kind: 'image', name, mimeType, data (base64) } | { kind: 'file', name, path?, data? }]
   // interrupt: a message sent while Pi works replaces the active run (as in Codex/ChatGPT), instead of
   // waiting for the current assistant turn and its tool calls to finish like a steering message does.
@@ -703,6 +726,10 @@ export class SessionManager extends EventEmitter {
     if (interrupt && runtime?.streaming) {
       ({ session, runtime } = await this.#interruptForPrompt(id, session, runtime));
       interrupted = true;
+    }
+    if (record.engine === 'cursor') {
+      session = await this.cursorSession(id);
+      runtime = this.runtimes.get(id);
     }
     await this.#syncProviders(this.runtimes.get(id));
     // The first message names the conversation at once (its first line), and the model then suggests a
