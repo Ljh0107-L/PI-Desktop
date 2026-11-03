@@ -33,7 +33,11 @@ export function cursorEnvironment(source = process.env, apiKey) {
   const keep = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM', 'CURSOR_API_KEY', 'CURSOR_AUTH_TOKEN'];
   const env = Object.fromEntries(keep.filter(key => source[key] !== undefined).map(key => [key, source[key]]));
   env.NO_OPEN_BROWSER = '1';
+  if (['memory', 'file'].includes(source.AGENT_CLI_CREDENTIAL_STORE)) env.AGENT_CLI_CREDENTIAL_STORE = source.AGENT_CLI_CREDENTIAL_STORE;
   if (apiKey) { env.CURSOR_API_KEY = apiKey; delete env.CURSOR_AUTH_TOKEN; }
+  // Cursor otherwise probes the macOS login keychain even over SSH. Supplied
+  // credentials are already encrypted by the desktop: keep CLI auth ephemeral.
+  if (env.CURSOR_API_KEY || env.CURSOR_AUTH_TOKEN) env.AGENT_CLI_CREDENTIAL_STORE = 'memory';
   return env;
 }
 export const cursorModelConfig = result => result?.configOptions?.find(option => option.type === 'select' && (option.category === 'model' || option.id === 'model'));

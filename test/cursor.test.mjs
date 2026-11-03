@@ -26,7 +26,7 @@ function fixture(t, { configModels = false } = {}) {
 // These execute only in GitHub CI; the peer and models are offline fixtures.
 test('Cursor environment excludes Pi boot credentials and Electron Node mode', () => {
   const env = cursorEnvironment({ PATH: '/bin', HOME: '/home/user', PIDESK_BOOT: 'secret', ANTHROPIC_API_KEY: 'secret', ELECTRON_RUN_AS_NODE: '1', CURSOR_AUTH_TOKEN: 'cursor-login' });
-  assert.deepEqual(env, { PATH: '/bin', HOME: '/home/user', CURSOR_AUTH_TOKEN: 'cursor-login', NO_OPEN_BROWSER: '1' });
+  assert.deepEqual(env, { PATH: '/bin', HOME: '/home/user', CURSOR_AUTH_TOKEN: 'cursor-login', NO_OPEN_BROWSER: '1', AGENT_CLI_CREDENTIAL_STORE: 'memory' });
   assert.equal(cursorCommand('~/.local/bin/agent', '/remote/home'), '/remote/home/.local/bin/agent');
   assert.equal(cursorCommand('/path with spaces/agent'), '/path with spaces/agent');
   assert.throws(() => cursorCommand('bad\npath'));

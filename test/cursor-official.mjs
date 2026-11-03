@@ -22,7 +22,7 @@ if (process.env.CI) {
   const runtime = new CursorRuntime({ cacheDir: join(root, 'cache'), localRoot: join(root, 'managed') });
   const command = await runtime.ensure({ id: 'local', kind: 'local' }, {}, message => console.log(message));
   assert.equal(await readlink(alias), grok, 'installing Cursor must not replace the Grok alias');
-  const client = new CursorAcp({ command, cwd: home, env: { HOME: home, PATH: process.env.PATH, TMPDIR: root, LANG: 'en_US.UTF-8' } });
+  const client = new CursorAcp({ command, cwd: home, env: { HOME: home, PATH: process.env.PATH, TMPDIR: root, LANG: 'en_US.UTF-8', AGENT_CLI_CREDENTIAL_STORE: 'memory' } });
   const methods = [];
   const send = client.send.bind(client);
   client.send = message => { if (message.method) methods.push(message.method); return send(message); };
@@ -40,9 +40,9 @@ if (process.env.CI) {
   // check, while installation and program execution go through SSH.
   const remote = { id: 'ssh:cursor-official', kind: 'ssh', host: 'pidesk-test', sshArgs: ['-F', '/tmp/pidesk-e2e/ssh_config'] };
   const remoteCommand = await runtime.ensure(remote, { root: join(root, 'remote'), node: process.execPath }, message => console.log(message));
-  const sshClient = new CursorAcp({ command: remoteCommand, cwd: home, env: { HOME: home, PATH: process.env.PATH },
+  const sshClient = new CursorAcp({ command: remoteCommand, cwd: home, env: { HOME: home, PATH: process.env.PATH, AGENT_CLI_CREDENTIAL_STORE: 'memory' },
     spawnProcess: (command, args, options) => {
-      const script = `cd ${shellQuote(home)} && exec ${['env', '-u', 'CURSOR_API_KEY', '-u', 'CURSOR_AUTH_TOKEN', `HOME=${home}`, 'NO_OPEN_BROWSER=1', command, ...args].map(shellQuote).join(' ')}`;
+      const script = `cd ${shellQuote(home)} && exec ${['env', '-u', 'CURSOR_API_KEY', '-u', 'CURSOR_AUTH_TOKEN', `HOME=${home}`, 'NO_OPEN_BROWSER=1', 'AGENT_CLI_CREDENTIAL_STORE=memory', command, ...args].map(shellQuote).join(' ')}`;
       return spawn('ssh', [...sshBaseArgs(remote), remote.host, script], options);
     },
   });

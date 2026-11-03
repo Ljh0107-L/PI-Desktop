@@ -68,7 +68,9 @@ function cli(t) {
 
 test('saved Cursor key overrides inherited auth without copying Pi credentials', () => {
   const env = cursorEnvironment({ HOME: '/tmp', CURSOR_AUTH_TOKEN: 'old-login', CURSOR_API_KEY: 'old-key', PIDESK_BOOT: 'pi-secret', ANTHROPIC_API_KEY: 'pi-key' }, KEY);
-  assert.deepEqual(env, { HOME: '/tmp', CURSOR_API_KEY: KEY, NO_OPEN_BROWSER: '1' });
+  assert.deepEqual(env, { HOME: '/tmp', CURSOR_API_KEY: KEY, NO_OPEN_BROWSER: '1', AGENT_CLI_CREDENTIAL_STORE: 'memory' });
+  assert.equal(cursorEnvironment({ AGENT_CLI_CREDENTIAL_STORE: 'file' }, KEY).AGENT_CLI_CREDENTIAL_STORE, 'memory', 'supplied API keys must never enable plaintext CLI credential persistence');
+  assert.equal(cursorEnvironment({}).AGENT_CLI_CREDENTIAL_STORE, undefined, 'existing login fallback keeps its normal store when no key is supplied');
 });
 
 test('catalog reads API key from stdin, never argv or output', { timeout: 15000 }, async t => {
