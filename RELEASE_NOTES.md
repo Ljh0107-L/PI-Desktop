@@ -2,7 +2,17 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## 0.1.26 — Generation-only TPS
+## 0.1.27 — Reliable file previews
+
+- **Markdown images on the right machine.** Resolve SVG/PNG and other supported images relative to the document and read them through the session's local/SSH file API. Encoded spaces and Chinese paths work; large images fit the pane, refresh reloads image bytes, and missing/corrupt images show readable errors. SVG stays in an image element, never injected as active inline markup.
+- **File browsing review fixes.** Switching tabs/sessions no longer shows stale content. Markdown links resolve from their document; heading anchors scroll the preview. Literal `%`/`#` filenames survive opening, normalized paths do not create duplicate tabs, and unknown-extension source no longer silently loses everything after 200K characters.
+- **Safer local and SSH reads.** Remote home expansion and directory symlinks work; JSON/base64 transport preserves Unicode and newline filenames. Bounded reads respect short reads, reject non-regular files, preserve read errors, and avoid introducing malformed UTF-8 at the preview limit.
+- **Less automatic delegation.** The main agent defaults to completing work directly. Subagents are for clearly bounded, substantial independent tasks with a concrete benefit, not routine discovery or small fixes.
+- **Verified in GitHub CI only.** Local/SSH Electron regression fixtures and file-reading/path unit tests pass alongside the existing protocol, relay and backend suites. No tests, builds, installs or app launches were run on the user's workstation.
+
+Cursor CLI integration is being developed separately; it is not included in this file-preview release.
+
+## Included from 0.1.26 — Generation-only TPS
 
 - **No request-average fallback.** Usage measures only source-observed first→last generation time, excluding TTFT, tool execution and completion trailers. The first chunk's estimated share of output is excluded too, rather than dividing already-arrived tokens by the remaining window.
 - **Reasoning and answer windows match their tokens.** Fully streamed reasoning counts once. Hidden, summarized or redacted reasoning uses a separate **Answer generation** window and excludes reasoning tokens; unknown answer counts are explicitly estimated. An answer window spanning interleaved thinking is unavailable rather than mixing reasoning time with answer tokens.
