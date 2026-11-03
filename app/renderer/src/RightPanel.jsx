@@ -69,18 +69,22 @@ export function RightPanel({ session }) {
   const batch = batches.find(b => b.callId === selection?.callId);
   const task = Number.isInteger(selection?.taskIndex) ? batch?.tasks.find(task => task.index === selection.taskIndex) : null;
   const [detailWidth, detailHandle] = useResizable('subagent-inspector', 480, 300, 680, 'left');
-  const percent = stats?.contextUsage?.percent ?? null;
+  const context = stats?.contextUsage;
+  const percent = Number.isFinite(context?.percent) ? context.percent : null;
+  const contextLabel = Number.isFinite(context?.tokens)
+    ? `${formatTokens(context.tokens)} / ${Number.isFinite(context?.contextWindow) ? formatTokens(context.contextWindow) : '—'}`
+    : percent != null ? `${Math.round(percent)}%` : 'Not reported';
   if (task) return <aside className="right-panel subagent-inspector" style={{ width: detailWidth }}>
     {detailHandle}<SubagentDetail key={`${session.id}:${task.key}`} sessionId={session.id} task={task} />
   </aside>;
   return (
     <aside className="right-panel">
       <Card title="Context" aside={<>
-        <span className="muted">{stats?.contextUsage?.tokens != null ? `${formatTokens(stats.contextUsage.tokens)} / ${formatTokens(stats.contextUsage.contextWindow)}` : '—'}</span>
-        <span className="meter" title={percent == null ? undefined : `${Math.round(percent)}% of the context window`}><span style={{ width: `${percent > 0 ? Math.max(6, Math.min(100, percent)) : 0}%` }} /></span>
+        <span className="muted" title="Context usage reported by the agent">{contextLabel}</span>
+        {percent != null && <span className="meter" title={`${Math.round(percent)}% of the context window`}><span style={{ width: `${Math.max(0, Math.min(100, percent))}%` }} /></span>}
       </>} />
       <UsageCard transcript={transcript} />
-      {session.engine === 'cursor' ? <Card title="Cursor CLI"><p>Tools, context and authentication are managed by Cursor. Token usage is unavailable unless reported by the CLI.</p></Card> : <SubagentList sessionId={session.id} batches={batches} selectedCallId={selection?.callId} />}
+      {session.engine !== 'cursor' && <SubagentList sessionId={session.id} batches={batches} selectedCallId={selection?.callId} />}
     </aside>
   );
 }

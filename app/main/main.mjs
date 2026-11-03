@@ -282,6 +282,7 @@ const api = {
   abort: id => manager.abort(id),
   setModel: (id, provider, modelId) => manager.setModel(id, provider, modelId),
   setThinking: (id, level) => manager.setThinking(id, level),
+  setCursorConfig: (id, configId, value) => manager.setCursorConfig(id, configId, value),
   messages: id => manager.messages(id),
   clearSubagentHistory: (id, ids) => manager.clearSubagentHistory(id, ids),
   stats: id => manager.stats(id),

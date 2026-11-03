@@ -56,6 +56,53 @@ function fakeSessions(t, { onStart, onRequest } = {}) {
   return calls;
 }
 
+test('Cursor interrupt retries an explicit busy rejection when streaming events lag', async t => {
+  const { manager, store } = managerFixture(t);
+  store.sessions.push({ id: 'cursor', engine: 'cursor', environmentId: 'local', title: 'Existing' });
+  const session = new PiSession({ id: 'cursor', transport: {} });
+  const runtime = { session, engine: 'cursor', streaming: false, questions: new Map(), cursorCredentialVersion: 0 };
+  manager.runtimes.set('cursor', runtime);
+  manager.ensureStarted = async () => session;
+  const calls = [];
+  let prompts = 0;
+  t.mock.method(session, 'request', async (type, payload) => {
+    calls.push({ type, payload });
+    if (type === 'prompt' && ++prompts === 1) throw new Error('Cursor is still working; stop the current turn first');
+    // No settled event: the old turn already ended before abort was received.
+    return type === 'prompt' ? { disposition: 'started' } : {};
+  });
+  const result = await manager.prompt('cursor', 'replacement', [{ kind: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }], { interrupt: true });
+  assert.equal(result.interrupted, true);
+  assert.deepEqual(calls.map(call => call.type), ['prompt', 'abort_bash', 'clear_queue', 'abort', 'prompt']);
+  assert.deepEqual(calls[0].payload, calls.at(-1).payload, 'retry preserves text and image content');
+  assert.equal(session.listenerCount('event'), 0, 'successful idle abort cleans up the settled waiter');
+});
+
+test('Cursor prompt failures other than busy are not retried', async t => {
+  const { manager, store } = managerFixture(t);
+  store.sessions.push({ id: 'cursor', engine: 'cursor', environmentId: 'local', title: 'Existing' });
+  const session = new PiSession({ id: 'cursor', transport: {} });
+  manager.runtimes.set('cursor', { session, engine: 'cursor', streaming: false, questions: new Map(), cursorCredentialVersion: 0 });
+  manager.ensureStarted = async () => session;
+  let calls = 0;
+  t.mock.method(session, 'request', async () => { calls++; throw new Error('connection closed'); });
+  await assert.rejects(manager.prompt('cursor', 'replacement', [], { interrupt: true }), /connection closed/);
+  assert.equal(calls, 1, 'ambiguous failure must not duplicate a user prompt');
+});
+
+test('settled waiters can be cancelled without leaving listeners or timers', async () => {
+  const session = new PiSession({ id: 'fixture', transport: {} });
+  const controller = new AbortController();
+  const pending = session.nextSettled(60000, { signal: controller.signal });
+  controller.abort();
+  await assert.rejects(pending, /cancelled/);
+  assert.equal(session.listenerCount('event'), 0);
+  const settled = session.nextSettled();
+  session.emit('event', { type: 'agent_settled' });
+  await settled;
+  assert.equal(session.listenerCount('event'), 0);
+});
+
 // Exercise the actual shell guard rather than asserting source text: no npm/curl on an intact install.
 test('current remote Pi never probes npm or the registry; upgrades still do', async t => {
   const dir = temporary(t), bin = join(dir, 'bin'), root = join(dir, "install with 'quotes");

@@ -72,7 +72,31 @@ try {
     const id = await page.evaluate(() => window.__pideskState().activeId); ids.push(id);
     const record = await page.evaluate(async id => (await window.pidesk.invoke('listSessions')).find(s => s.id === id), id);
     assert.equal(record.engine, 'cursor'); assert.equal(record.environmentId, environmentId);
+    assert.equal(await page.getByRole('button', { name: 'Model', exact: true }).innerText(), 'Cursor Test B', 'selected model uses the catalogue display name after session creation');
+    assert.equal(await page.locator('.right-panel .panel-card', { hasText: 'Tools, context and authentication' }).count(), 0, 'redundant Cursor information card is removed');
     assert.equal(await page.locator('.effort-trigger').count(), 0);
+    if (environmentId === 'local') {
+      // Renderer contract regression: use explicit advertised values, never a hard-coded effort list.
+      const sessions = await page.evaluate(() => window.__pideskState().sessions);
+      const advertised = sessions.map(item => item.id !== id ? item : { ...item, cursorConfigOptions: [
+        { id: 'fixture-thought', name: 'Reasoning', category: 'thought_level', type: 'select', currentValue: 'deep', options: [{ value: 'deep', name: 'Deep' }, { value: 'brief', name: 'Brief' }] },
+        { id: 'fixture-fast', name: 'Fast', type: 'boolean', currentValue: true },
+      ] });
+      const publish = payload => app.evaluate(({ BrowserWindow }, payload) => BrowserWindow.getAllWindows()[0].webContents.send('pidesk:event', { channel: 'sessions', payload }), payload);
+      try {
+        await publish(advertised);
+        await page.getByRole('combobox', { name: 'Reasoning', exact: true }).waitFor();
+        assert.equal(await page.getByRole('combobox', { name: 'Reasoning', exact: true }).inputValue(), 'deep');
+        assert.deepEqual(await page.getByRole('combobox', { name: 'Reasoning', exact: true }).locator('option').allTextContents(), ['Deep', 'Brief']);
+        assert.equal(await page.getByRole('button', { name: 'Fast', exact: true }).getAttribute('aria-pressed'), 'true');
+        await publish(advertised.map(item => item.id === id ? { ...item, streaming: true } : item));
+        await page.waitForFunction(() => document.querySelector('.cursor-config-control select')?.disabled);
+        assert.equal(await page.getByRole('button', { name: 'Fast', exact: true }).isDisabled(), true);
+        await publish(advertised.map(item => item.id === id ? { ...item, cursorConfigOptions: [] } : item));
+        await page.locator('.cursor-config-control').waitFor({ state: 'detached' });
+        assert.equal(await page.locator('.cursor-config-trigger').count(), 0, 'unsupported controls disappear on model capability change');
+      } finally { await publish(sessions); }
+    }
     assert.equal(await page.getByRole('button', { name: 'Edit message', exact: true }).count(), 0);
     assert.equal(await page.locator('.usage-table').count(), 0, 'unreported usage must not be fabricated');
     await page.getByRole('button', { name: 'Model', exact: true }).click();

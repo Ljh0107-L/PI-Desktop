@@ -74,6 +74,69 @@ test('Cursor model config options support grouped models and the standard setter
   assert.match(f.desktop.messages().at(-1).content[0].text, /cursor-test-a/);
 });
 
+test('advertised reasoning and boolean Fast controls use exact ACP config IDs and values', { timeout: 15000 }, async t => {
+  const f = fixture(t, { configModels: true }); await f.desktop.start();
+  assert.equal(f.desktop.state().thinkingLevel, 'medium');
+  assert.equal(f.desktop.state().cursorConfigOptions.find(option => option.id === 'speed').currentValue, false);
+  await f.desktop.request('set_thinking_level', { level: 'high' });
+  await f.desktop.request('set_config_option', { configId: 'speed', value: true });
+  assert.equal(f.desktop.state().thinkingLevel, 'high');
+  assert.equal(f.desktop.state().cursorConfigOptions.find(option => option.id === 'speed').currentValue, true);
+  await assert.rejects(f.desktop.request('set_config_option', { configId: 'speed', value: 'true' }), /not available/);
+  await assert.rejects(f.desktop.request('set_thinking_level', { level: 'invented' }), /not available/);
+  await f.desktop.setModel('cursor-test-c');
+  assert.deepEqual(f.desktop.state().cursorConfigOptions.map(option => option.id), ['model-choice']);
+  await assert.rejects(f.desktop.request('set_thinking_level', { level: 'high' }), /does not advertise/);
+  await assert.rejects(f.desktop.request('set_config_option', { configId: 'speed', value: true }), /not available/);
+  assert.ok(f.events.some(event => event.type === 'cursor_model_changed' && event.cursorConfigOptions));
+});
+
+test('context reflects only real ACP usage, including idle updates and history restore', { timeout: 15000 }, async t => {
+  const f = fixture(t); await f.desktop.start();
+  assert.equal((await f.desktop.request('get_session_stats')).contextUsage, null);
+  f.desktop.prompt('usage'); await f.desktop.turn;
+  assert.deepEqual((await f.desktop.request('get_session_stats')).contextUsage, { tokens: 53000, contextWindow: 200000, percent: 26.5 });
+  const update = value => f.desktop.notification({ method: 'session/update', params: { sessionId: f.desktop.sessionId, update: { sessionUpdate: 'usage_update', ...value } } });
+  update({ used: -1, size: 100 });
+  assert.equal(f.desktop.state().contextUsage.tokens, 53000);
+  update({ used: 0, size: 100000 });
+  assert.equal(f.desktop.state().contextUsage.percent, 0);
+  const restored = new CursorDesktopSession({ client: new EventEmitter(), file: f.file, cwd: f.cwd, send: () => {} });
+  assert.deepEqual(restored.state().contextUsage, { tokens: 0, contextWindow: 100000, percent: 0 });
+});
+
+test('Always Allow is passed unchanged and persisted by the native agent across restore', { timeout: 15000 }, async t => {
+  const f = fixture(t); await f.desktop.start();
+  let questions = 0;
+  f.desktop.send = event => {
+    if (event.type !== 'extension_ui_request') return;
+    questions++;
+    assert.equal(event.permissionOptions[0].kind, 'allow_always');
+    assert.equal(event.toolCall.locations[0].path, '/fixture/file');
+    setImmediate(() => f.desktop.answer(event.id, { optionId: event.permissionOptions[0].optionId }));
+  };
+  f.desktop.prompt('permission-always'); await f.desktop.turn;
+  await f.client.close();
+  const client = new CursorAcp({ command: f.command, cwd: f.cwd }); t.after(() => client.close());
+  const restored = new CursorDesktopSession({ client, file: f.file, cwd: f.cwd, send: f.desktop.send });
+  await restored.start(); restored.prompt('permission-always'); await restored.turn;
+  assert.equal(questions, 1);
+  assert.equal(restored.messages().at(-1).content[0].text, 'Native remembered approval');
+});
+
+test('late permissions during cancellation receive cancelled without reopening dialogs', { timeout: 15000 }, async t => {
+  const f = fixture(t); await f.desktop.start();
+  f.desktop.prompt('hold'); f.desktop.cancelling = true;
+  const replies = [];
+  const respond = f.client.respond.bind(f.client);
+  f.client.respond = (id, result) => replies.push({ id, result });
+  await f.desktop.clientRequest({ id: 999, method: 'session/request_permission', params: { sessionId: f.desktop.sessionId, options: [] } });
+  assert.deepEqual(replies, [{ id: 999, result: { outcome: { outcome: 'cancelled' } } }]);
+  assert.equal(f.desktop.dialogs.size, 0);
+  f.client.respond = respond;
+  await f.desktop.abort();
+});
+
 test('Cursor history resumes the same native session and ignores session/load replay', { timeout: 15000 }, async t => {
   const f = fixture(t);
   await f.desktop.start(); f.desktop.prompt('first'); await f.desktop.turn;

@@ -24,7 +24,28 @@ export async function checkSessionEngineIsolation({ app, page, session }) {
     await page.getByRole('button', { name: 'Agent', exact: true }).click();
     await page.locator('.popover .menu-item', { hasText: /^Cursor CLI$/ }).click();
     assert.equal(await page.locator('.engine-trigger').innerText(), 'Cursor CLI');
+    await page.locator('.composer textarea').fill('Unsent new conversation');
     await selectExisting();
+    await page.locator('.composer textarea').fill('Unsent existing conversation');
+    await page.locator('.composer').evaluate(element => {
+      const transfer = new DataTransfer();
+      const bytes = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='), c => c.charCodeAt(0));
+      transfer.items.add(new File([bytes], 'draft.png', { type: 'image/png' }));
+      element.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: transfer }));
+    });
+    await page.locator('.attachment.image img').waitFor();
+    await page.click('.nav-item.new');
+    assert.equal(await page.locator('.composer textarea').inputValue(), 'Unsent new conversation');
+    assert.equal(await page.locator('.attachment').count(), 0, 'attachments must not leak between sessions');
+    await page.locator('.composer textarea').fill('');
+    await selectExisting();
+    assert.equal(await page.locator('.composer textarea').inputValue(), 'Unsent existing conversation');
+    assert.equal(await page.locator('.attachment.image img').count(), 1, 'image draft survives composer unmount');
+    await page.click('.settings-button');
+    await page.getByRole('button', { name: 'Back to app', exact: true }).click();
+    assert.equal(await page.locator('.composer textarea').inputValue(), 'Unsent existing conversation');
+    await page.getByRole('button', { name: 'Remove draft.png', exact: true }).click();
+    await page.locator('.composer textarea').fill('');
     // Simulate an older renderer/session payload without engine metadata. Backend
     // normalization alone must not hide a bad renderer fallback.
     await publish(originalSessions.map(record => {

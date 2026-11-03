@@ -40,12 +40,15 @@ export function cursorEnvironment(source = process.env, apiKey) {
   if (env.CURSOR_API_KEY || env.CURSOR_AUTH_TOKEN) env.AGENT_CLI_CREDENTIAL_STORE = 'memory';
   return env;
 }
-export const cursorModelConfig = result => result?.configOptions?.find(option => option.type === 'select' && (option.category === 'model' || option.id === 'model'));
+export const cursorConfigOptions = result => (result?.configOptions ?? []).filter(option => option && typeof option.id === 'string' && (option.type === 'select' || option.type === 'boolean'));
+export const cursorSelectValues = option => (option?.options ?? []).flatMap(value => value.options ?? [value]);
+export const cursorModelConfig = result => cursorConfigOptions(result).find(option => option.type === 'select' && (option.category === 'model' || option.id === 'model'));
 export const cursorCurrentModel = result => cursorModelConfig(result)?.currentValue ?? result?.models?.currentModelId;
-export function cursorModels(result) {
+export function cursorModels(result, capabilities = {}) {
   const config = cursorModelConfig(result);
-  const options = config ? (config.options ?? []).flatMap(option => option.options ?? [option]).map(option => ({ modelId: option.value, name: option.name })) : result?.models?.availableModels ?? [];
-  return options.map(m => ({ provider: 'cursor', id: m.modelId, name: m.name || m.modelId, reasoning: false, input: ['text', 'image'] })).filter(m => typeof m.id === 'string' && m.id);
+  const options = config ? cursorSelectValues(config).map(option => ({ modelId: option.value, name: option.name })) : result?.models?.availableModels ?? [];
+  const thought = cursorConfigOptions(result).some(option => option.category === 'thought_level');
+  return options.map(m => ({ provider: 'cursor', id: m.modelId, name: m.name || m.modelId, reasoning: thought && m.modelId === cursorCurrentModel(result), input: capabilities.promptCapabilities?.image ? ['text', 'image'] : ['text'] })).filter(m => typeof m.id === 'string' && m.id);
 }
 
 export class CursorAcp extends EventEmitter {
@@ -93,7 +96,7 @@ export class CursorAcp extends EventEmitter {
     }));
     // Ask for the official parameterized model picker. Without this meta hint the
     // CLI collapses variants into one long list and needs extra model lookups.
-    const init = await this.request('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false, _meta: { parameterizedModelPicker: true } }, clientInfo: { name: 'pi-desktop', version: '0.1' } });
+    const init = await this.request('initialize', { protocolVersion: 1, clientCapabilities: { session: { configOptions: { boolean: {} } }, fs: { readTextFile: false, writeTextFile: false }, terminal: false, _meta: { parameterizedModelPicker: true } }, clientInfo: { name: 'pi-desktop', version: '0.1' } });
     if (init.protocolVersion !== 1) throw new Error(`Unsupported Cursor ACP protocol: ${init.protocolVersion}`);
     this.capabilities = init.agentCapabilities ?? {};
     // The official CLI marks env API keys/auth tokens and an existing CLI login

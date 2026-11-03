@@ -233,15 +233,8 @@ export class SessionManager extends EventEmitter {
           onProgress: message => this.emit('environment', { id: envId, status: 'preparing', message }),
         });
         await providerHosts;
-        if (this.cursorRuntime && this.store.settings.cursor?.enabled && managedCursor(this.store.settings.cursor.command)) {
-          try {
-            facts.cursorCommand = await this.cursorRuntime.ensure(env, facts, message => this.emit('environment', { id: envId, status: 'preparing', message }));
-          } catch (error) {
-            // Optional SDK setup must not break an otherwise working Pi connection.
-            facts.cursorSetupError = error.message;
-            this.emit('notice', { level: 'warning', message: `${env.label}: Cursor SDK setup failed: ${error.message}` });
-          }
-        }
+        // Cursor is prepared on demand by cursorCommand(). Its large optional download
+        // must not hold every SSH connection (including ordinary Pi sessions) in Connecting.
         // Merge the latest settings, not a snapshot from before a potentially long install.
         const current = this.store.settings.environments[envId] ?? {};
         if (current.root !== facts.root || !current.added) { this.store.settings.environments[envId] = { ...current, added: true, root: facts.root }; this.store.saveSettings(); this.emit('environments-changed'); }
@@ -631,7 +624,7 @@ export class SessionManager extends EventEmitter {
     if (record.engine === 'cursor') {
       runtime.cursorCredentialVersion = state.cursorCredentialVersion ?? 0;
       this.#assertCurrent(record, runtime);
-      this.#save(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId, model: state.model, thinkingLevel: 'off' });
+      this.#save(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId, model: state.model, thinkingLevel: state.thinkingLevel ?? 'off', cursorConfigOptions: state.cursorConfigOptions ?? [] });
       return session;
     }
     const info = session.attachInfo;
@@ -687,7 +680,7 @@ export class SessionManager extends EventEmitter {
     runtime.lastUsed = Date.now();
     if (event.type === 'agent_start') { runtime.streaming = true; this.emit('status', { id: record.id, status: runtime.status, streaming: true }); }
     if (event.type === 'agent_settled') { runtime.streaming = false; this.#save(record, { lastActiveAt: Date.now() }); this.emit('status', { id: record.id, status: runtime.status, streaming: false }); }
-    if (record.engine === 'cursor' && event.type === 'cursor_model_changed' && event.model?.provider === 'cursor') this.#save(record, { model: event.model });
+    if (record.engine === 'cursor' && event.type === 'cursor_model_changed' && event.model?.provider === 'cursor') this.#save(record, { model: event.model, thinkingLevel: event.thinkingLevel ?? 'off', cursorConfigOptions: event.cursorConfigOptions ?? [] });
     if (record.engine === 'cursor' && event.type === 'cursor_questions_cleared') {
       runtime.questions.clear(); this.emit('questions-cleared', { id: record.id });
     }
@@ -776,7 +769,17 @@ export class SessionManager extends EventEmitter {
     // next call, as in Claude Code, instead of waiting for the whole run to finish ('followUp'). Not keyed on
     // runtime.streaming, which can lag a moment behind Pi and then made the prompt fail.
     const send = target => target.prompt(message, { ...(images.length ? { images } : {}), streamingBehavior: 'steer' });
-    let sent = await send(session);
+    let sent;
+    try { sent = await send(session); }
+    catch (error) {
+      // Cursor rejects busy prompts instead of returning Pi's queued disposition.
+      // Its agent_start event can still be in flight when the renderer sends again.
+      // Retry only this explicit pre-acceptance rejection, never an ambiguous RPC failure.
+      if (!interrupt || record.engine !== 'cursor' || !/Cursor is still working; stop the current turn first/.test(error.message)) throw error;
+      ({ session, runtime } = await this.#interruptForPrompt(id, session, runtime));
+      interrupted = true;
+      sent = await send(session);
+    }
     // The renderer can be a moment behind Pi. If the prompt was queued instead of starting a fresh
     // turn, abort the run that accepted it and send it again; otherwise a stale flag brings back the
     // old "new message waits for the current reply" behaviour.
@@ -794,10 +797,13 @@ export class SessionManager extends EventEmitter {
   async #interruptForPrompt(id, session, runtime) {
     session.abortBash().catch(() => {});
     session.clearQueue().catch(() => {});
-    const settled = session.nextSettled(4000).then(() => true, () => false);
-    // abort's response waits for idle; do not await it ahead of the deadline.
-    session.abort().catch(() => {});
-    const finished = await settled;
+    const controller = new AbortController();
+    const settled = session.nextSettled(4000, { signal: controller.signal }).then(() => true, () => false);
+    // A turn may have ended just before we subscribed: successful abort also proves
+    // idle. Rejected aborts do not prove it and must still wait for the bounded fallback.
+    const aborted = session.abort().then(() => true, () => settled);
+    const finished = await Promise.race([settled, aborted]);
+    controller.abort();
     if (finished) return { session, runtime: this.runtimes.get(id) ?? runtime };
     // A tool that ignores the abort signal must not make the new message wait for it.
     const record = this.record(id);
@@ -876,7 +882,8 @@ export class SessionManager extends EventEmitter {
       if (provider !== 'cursor') throw new Error('Select a Cursor model for this session');
       const session = await this.ensureStarted(id);
       await session.setModel(provider, modelId);
-      this.#save(record, { model: (await session.state()).model });
+      const state = await session.state();
+      this.#save(record, { model: state.model, thinkingLevel: state.thinkingLevel ?? 'off', cursorConfigOptions: state.cursorConfigOptions ?? [] });
       return;
     }
     let runtime = this.runtimes.get(id);
@@ -905,6 +912,15 @@ export class SessionManager extends EventEmitter {
       await runtime.session.setModel(provider, modelId);
     }
     this.#save(record, { model: { provider, id: modelId } });
+  }
+
+  async setCursorConfig(id, configId, value) {
+    const record = this.record(id);
+    if (record.engine !== 'cursor') throw new Error('Cursor configuration requires a Cursor session');
+    const session = await this.cursorSession(id);
+    await session.request('set_config_option', { configId, value });
+    const state = await session.state();
+    this.#save(record, { model: state.model, thinkingLevel: state.thinkingLevel ?? 'off', cursorConfigOptions: state.cursorConfigOptions ?? [] });
   }
 
   async setThinking(id, level) {

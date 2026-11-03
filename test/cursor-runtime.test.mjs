@@ -111,17 +111,22 @@ test('remote installer quotes private paths and reuses a healthy install', async
   assert.equal(uploads, 1);
 });
 
-test('server preparation installs an enabled managed SDK without breaking Pi on download failure', async t => {
+test('server preparation leaves optional Cursor setup on demand and retries download failures', async t => {
   const env = { id: 'ssh:fixture', kind: 'ssh', label: 'Fixture' };
   let calls = 0, fail = false;
   const store = { settings: { providers: [], environments: {}, cursor: { enabled: true, command: '' } }, sessions: [], saveSettings() {} };
   const runtime = { ensure: async () => { calls++; if (fail) throw new Error('download unavailable'); return '/private/cursor-agent'; } };
   const manager = new SessionManager({ store, environments: () => [env], local: {}, cursorRuntime: runtime, remoteSetup: async () => ({ root: '/fixture', node: '/node' }) });
   t.after(() => clearInterval(manager.sweeper));
-  assert.equal((await manager.prepare(env.id)).cursorCommand, '/private/cursor-agent');
+  assert.equal((await manager.prepare(env.id)).root, '/fixture');
+  assert.equal(calls, 0, 'enabling Cursor must not put downloads on the Pi connection critical path');
+  assert.equal(await manager.cursorCommand(env.id), '/private/cursor-agent');
   assert.equal(calls, 1);
   fail = true;
   const facts = await manager.prepare(env.id, { force: true });
   assert.equal(facts.root, '/fixture');
-  assert.equal(facts.cursorSetupError, 'download unavailable');
+  assert.equal(calls, 1, 'reconnecting must not revalidate Cursor twice');
+  await assert.rejects(manager.cursorCommand(env.id), /download unavailable/);
+  fail = false;
+  assert.equal(await manager.cursorCommand(env.id), '/private/cursor-agent');
 });

@@ -5,7 +5,7 @@ Pi Desktop's **Settings → Cursor SDK** is a client for the official [Cursor CL
 ## Setup
 
 1. Enable **Cursor SDK** in Settings and paste a user API key from **Cursor Dashboard → API Keys**. No manual CLI installation or `agent login` is needed for key authentication.
-2. Leave **Advanced → Cursor CLI executable** blank. Pi Desktop downloads a pinned official package, verifies its size/SHA-256 and installs it under its own `cursor-sdk` directory. Local installation lives under the app's user-data directory; SSH installation lives under that connection's Pi install root. Enabled managed SDKs are prepared alongside server connections, or on the first model check/session that needs them.
+2. Leave **Advanced → Cursor CLI executable** blank. Pi Desktop downloads a pinned official package, verifies its size/SHA-256 and installs it under its own `cursor-sdk` directory. Local installation lives under the app's user-data directory; SSH installation lives under that connection's Pi install root. Managed SDKs are prepared on the first Cursor model check/session that needs them, without blocking ordinary Pi server connections.
 3. Choose a machine and click **Check connection**. Download/upload progress is shown. The model picker opens with the account's advertised models; choose the few you want to see in conversations and press **Done**. No inference prompt is sent. A healthy installation is reused without downloading again. Allow at least 1 GB free for setup.
 4. Start a **new** conversation, choose **Cursor CLI**, and use the normal model menu, which lists only your chosen models. Existing Pi conversations stay Pi even if the new-conversation draft selects Cursor. The password field clears after a successful save; blank saves preserve the key and **Remove key** clears it. Without a saved key, an existing CLI login remains supported.
 
@@ -21,9 +21,11 @@ Saving/replacing/removing a key does not interrupt active work. The next idle mo
 
 - Cursor marks supplied API keys/auth tokens or an existing CLI login authenticated during startup. Pi does **not** call ACP `authenticate(cursor_login)` automatically: that method is interactive browser login, not API-key validation. Actual account/key validity is checked by Cursor when services/models are requested. Protocol failures now identify the method, error code and safe detail instead of hiding everything behind “Invalid params”.
 - Replies and tool activity use the normal conversation display; generated files use the same local/SSH file pane and terminal.
-- Tool permission requests, questions and plan approvals appear in the conversation. They are not silently approved. Unknown blocking client methods fail explicitly rather than hanging indefinitely.
+- Tool permission requests, questions and plan approvals appear in the conversation. They are not silently approved. Always Allow forwards the exact advertised option ID; Cursor owns its scope and persistence, rather than the desktop guessing a broad approval policy. Unknown blocking client methods fail explicitly rather than hanging indefinitely.
 - Stop sends ACP `session/cancel`; an unresponsive CLI is terminated after a bounded grace period. A new message interrupts the previous turn through the normal desktop mechanism.
 - The existing relay owns the adapter and Cursor process, so detaching or quitting the desktop does not itself stop the conversation. Transcript projection and the native Cursor session ID are saved separately under `agent/cursor-sessions`. Reopening uses `session/load`, never a new session disguised as the old one.
+- Reasoning, Fast and other configuration controls appear only when advertised by the live Cursor ACP session; model changes refresh dependent options. Context displays reported ACP usage, or `Not reported` when unavailable.
+- Composer text and image drafts are retained per conversation while switching sessions or opening settings. Drafts remain in memory, not across app restarts.
 - The conversation model menu lists only the models chosen in Settings, so a large Cursor catalogue does not flood the picker. The full list is loaded once, cached on disk and shown immediately next time; **Refresh** replaces it explicitly. Model changes during a running turn are rejected.
 
 ## Limits

@@ -123,15 +123,39 @@ export function CursorModelPicker({ environmentId, selected, onSave, onClose, re
   </Modal>;
 }
 
+// Only render capabilities explicitly advertised by this live Cursor session. Never infer
+// reasoning/Fast from a model name or recycle another model's available values.
+export function CursorConfigControls({ session }) {
+  const [busy, setBusy] = useState(false);
+  const options = (session?.cursorConfigOptions ?? []).filter(option => option.id !== 'model' && option.category !== 'model' && ['select', 'boolean'].includes(option.type));
+  const change = async (id, value) => {
+    setBusy(true);
+    try { await api('setCursorConfig', session.id, id, value); }
+    catch (reason) { notify(reason.message, 'error'); }
+    finally { setBusy(false); }
+  };
+  return options.map(option => {
+    const name = option.name || option.id;
+    const disabled = busy || session.streaming;
+    if (option.type === 'boolean') return <button key={option.id} type="button" className="trigger cursor-config-trigger" aria-label={name} aria-pressed={option.currentValue === true} title={option.description || name} disabled={disabled} onClick={() => change(option.id, !option.currentValue)}>{name}<span className="muted">{option.currentValue === true ? 'On' : 'Off'}</span></button>;
+    const values = (option.options ?? []).flatMap(value => value.options ?? [value]);
+    if (!values.length) return null;
+    return <label key={option.id} className="cursor-config-control" title={option.description || name}><span className="muted">{name}</span><select aria-label={name} value={option.currentValue ?? ''} disabled={disabled} onChange={event => change(option.id, event.target.value)}>
+      {!values.some(value => value.value === option.currentValue) && <option value="" disabled>Not reported</option>}
+      {values.map(value => <option key={value.value} value={value.value}>{value.name || value.value}</option>)}
+    </select></label>;
+  });
+}
+
 export function CursorModelMenu({ environmentId, sessionId, value, onChange, close }) {
   const settings = useStore(s => s.settings.cursor);
   const favorites = useMemo(() => favouriteModels(settings), [settings]);
-  const current = value?.id ?? settings?.currentModelId;
+  const current = value?.id ?? (sessionId ? null : settings?.currentModelId);
   const shown = useMemo(() => {
     const list = favorites.length ? [...favorites] : [];
-    if (current && !list.some(model => model.id === current)) list.unshift({ id: current, name: value?.name ?? current });
+    if (current && !list.some(model => model.id === current)) list.unshift({ id: current, name: settings?.models?.find(model => model.id === current)?.name ?? value?.name ?? current });
     return list;
-  }, [favorites, current, value?.name]);
+  }, [favorites, current, value?.name, settings?.models]);
   const choose = () => { close(); openSettings(true, 'cursor'); };
   return <div className="model-menu cursor-model-menu">
     <div className="menu-scroll">

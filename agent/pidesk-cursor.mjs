@@ -4,7 +4,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } fro
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { CursorAcp, cursorCurrentModel, cursorModelConfig, cursorModels } from './cursor-acp.mjs';
+import { CursorAcp, cursorConfigOptions, cursorCurrentModel, cursorModelConfig, cursorModels, cursorSelectValues } from './cursor-acp.mjs';
 
 const textOf = content => (content ?? []).map(c => c.type === 'text' ? c.text : c.type === 'resource_link' ? c.uri : JSON.stringify(c)).join('\n');
 export class CursorDesktopSession {
@@ -26,6 +26,7 @@ export class CursorDesktopSession {
     this.cursorState = [...this.entries].reverse().find(e => e.type === 'cursor_state');
     this.sessionId = this.cursorState?.sessionId;
     this.model = this.cursorState?.model;
+    this.contextUsage = this.cursorState?.contextUsage ?? null;
     client.on('notification', message => this.notification(message));
     client.on('request', message => { this.clientRequest(message).catch(() => client.reject(message.id)); });
   }
@@ -34,7 +35,7 @@ export class CursorDesktopSession {
     appendFileSync(this.file, JSON.stringify(value) + '\n', { mode: 0o600 });
     this.entries.push(value);
   }
-  saveState() { this.append({ type: 'cursor_state', sessionId: this.sessionId, model: this.model }); }
+  saveState() { this.append({ type: 'cursor_state', sessionId: this.sessionId, model: this.model, contextUsage: this.contextUsage }); }
   async start(modelId) {
     await this.client.start();
     const session = await this.client.openSession(this.sessionId);
@@ -45,8 +46,9 @@ export class CursorDesktopSession {
     if (modelId && modelId !== this.model.id) await this.setModel(modelId);
   }
   applyModelState(state) {
+    this.configOptions = cursorConfigOptions(state);
     this.modelConfig = cursorModelConfig(state);
-    this.models = cursorModels(state);
+    this.models = cursorModels(state, this.client.capabilities);
     this.modelOptions = this.modelConfig ? (this.modelConfig.options ?? []).flatMap(option => option.options ?? [option]).map(option => ({ id: option.value, name: option.name })) : this.models;
     const id = cursorCurrentModel(state) ?? this.model?.id;
     if (id) this.model = { provider: 'cursor', id, name: this.models.find(model => model.id === id)?.name ?? id };
@@ -55,8 +57,7 @@ export class CursorDesktopSession {
     if (this.streaming) throw new Error('Wait for Cursor to finish before switching models');
     if (!this.models.some(model => model.id === modelId)) throw new Error('This model is not available from Cursor CLI');
     if (this.modelConfig) {
-      const result = await this.client.request('session/set_config_option', { sessionId: this.sessionId, configId: this.modelConfig.id, value: modelId });
-      this.applyModelState(result);
+      await this.setConfigOption(this.modelConfig.id, modelId);
       if (this.model?.id !== modelId) throw new Error('Cursor did not apply the requested model');
     } else {
       await this.client.request('session/set_model', { sessionId: this.sessionId, modelId });
@@ -64,7 +65,19 @@ export class CursorDesktopSession {
     }
     this.saveState();
   }
-  state() { return { sessionId: this.sessionId, sessionFile: this.file, cursorCredentialVersion: this.cursorCredentialVersion, isStreaming: this.streaming, model: this.model, thinkingLevel: 'off' }; }
+  async setConfigOption(configId, value) {
+    if (this.streaming) throw new Error('Wait for Cursor to finish before changing configuration');
+    const option = this.configOptions?.find(option => option.id === configId);
+    if (!option) throw new Error('This configuration option is not available from Cursor CLI');
+    if (option.type === 'boolean' ? typeof value !== 'boolean' : !cursorSelectValues(option).some(item => item.value === value)) throw new Error('This configuration value is not available from Cursor CLI');
+    const result = await this.client.request('session/set_config_option', { sessionId: this.sessionId, configId, value, ...(option.type === 'boolean' ? { type: 'boolean' } : {}) });
+    this.applyModelState(result);
+    this.saveState();
+    this.send({ type: 'cursor_model_changed', ...this.state() });
+    if (this.configOptions.find(option => option.id === configId)?.currentValue !== value) throw new Error('Cursor did not apply the requested configuration');
+    return this.state();
+  }
+  state() { return { sessionId: this.sessionId, sessionFile: this.file, cursorCredentialVersion: this.cursorCredentialVersion, isStreaming: this.streaming, model: this.model, thinkingLevel: this.configOptions?.find(option => option.category === 'thought_level')?.currentValue ?? 'off', cursorConfigOptions: this.configOptions ?? [], contextUsage: this.contextUsage }; }
   messages() { return this.entries.filter(e => e.type === 'message').map(e => e.message); }
   endMessage(message) { this.append({ type: 'message', message }); this.send({ type: 'message_end', message }); }
   notification({ method, params }) {
@@ -73,7 +86,15 @@ export class CursorDesktopSession {
     if (!u) return;
     if (u.sessionUpdate === 'config_option_update') {
       this.applyModelState(u); this.saveState();
-      this.send({ type: 'cursor_model_changed', model: this.model });
+      this.send({ type: 'cursor_model_changed', ...this.state() });
+      return;
+    }
+    if (u.sessionUpdate === 'usage_update') {
+      if (Number.isSafeInteger(u.used) && u.used >= 0 && Number.isSafeInteger(u.size) && u.size > 0) {
+        this.contextUsage = { tokens: u.used, contextWindow: u.size, percent: u.used / u.size * 100 };
+        this.saveState();
+        this.send({ type: 'cursor_usage_changed', contextUsage: this.contextUsage });
+      }
       return;
     }
     if (!this.streaming) return;
@@ -127,13 +148,19 @@ export class CursorDesktopSession {
   }
   answer(id, payload) { const resolve = this.dialogs.get(id); this.dialogs.delete(id); resolve?.(payload); }
   async clientRequest({ id, method, params }) {
-    if (!this.streaming) { this.client.reject(id, 'No active Cursor turn'); return; }
+    if (method === 'session/request_permission' && (this.cancelling || !this.streaming)) {
+      this.client.respond(id, { outcome: { outcome: 'cancelled' } }); return;
+    }
+    if (!this.streaming || this.cancelling) { this.client.reject(id, 'No active Cursor turn'); return; }
+    if (params?.sessionId && params.sessionId !== this.sessionId) { this.client.reject(id, 'Wrong Cursor session'); return; }
     if (method === 'session/request_permission') {
       const options = params.options ?? [];
       const labels = options.map((option, i) => `${i + 1}. ${option.name || option.optionId}`);
-      const answer = await this.dialog('select', params.toolCall?.title || 'Cursor requests permission', { options: labels });
-      const option = options[labels.indexOf(answer.value)];
-      this.client.respond(id, { outcome: option && !answer.cancelled ? { outcome: 'selected', optionId: option.optionId } : { outcome: 'cancelled' } });
+      // ACP assigns remembered-decision scope and persistence to the agent. Pass
+      // the exact advertised ID; never broaden an approval by caching UI labels.
+      const answer = await this.dialog('select', params.toolCall?.title || 'Cursor requests permission', { options: labels, permissionOptions: options, toolCall: params.toolCall });
+      const option = options.find(option => option.optionId === answer.optionId) ?? options[labels.indexOf(answer.value)];
+      this.client.respond(id, { outcome: option && !answer.cancelled && !this.cancelling ? { outcome: 'selected', optionId: option.optionId } : { outcome: 'cancelled' } });
     } else if (method === 'cursor/ask_question') {
       const answers = [];
       for (const question of params.questions ?? []) {
@@ -161,6 +188,7 @@ export class CursorDesktopSession {
   prompt(message, images = []) {
     if (this.streaming) throw new Error('Cursor is still working; stop the current turn first');
     if (/^\/(goal|compact|fork)(\s|$)/.test(message)) throw new Error('This Pi command is not available in Cursor sessions');
+    if (images.length && !this.client.capabilities?.promptCapabilities?.image) throw new Error('This Cursor CLI does not advertise image prompts');
     this.streaming = true; this.tools = new Map();
     this.endMessage({ role: 'user', content: [{ type: 'text', text: message }, ...images], timestamp: Date.now() });
     this.assistant = { role: 'assistant', provider: 'cursor', model: this.model?.id, content: [], timestamp: Date.now() };
@@ -199,13 +227,20 @@ export class CursorDesktopSession {
   async request(type, p = {}) {
     switch (type) {
       case 'get_state': return this.state();
-      case 'get_available_models': return { models: this.models, currentModelId: this.model?.id };
+      case 'get_available_models': return { models: this.models, currentModelId: this.model?.id, configOptions: this.configOptions ?? [] };
       case 'get_messages': return { messages: this.messages() };
       case 'get_entries': return { entries: this.entries, leafId: this.entries.at(-1)?.id };
-      case 'get_session_stats': return { contextUsage: null };
+      case 'get_session_stats': return { contextUsage: this.contextUsage };
+      case 'get_config_options': return { configOptions: this.configOptions ?? [] };
+      case 'set_config_option': case 'cursor_set_config_option': return this.setConfigOption(p.configId, p.value);
+      case 'set_thinking_level': {
+        const thought = this.configOptions?.find(option => option.category === 'thought_level');
+        if (!thought) throw new Error('Cursor CLI does not advertise reasoning controls for this model');
+        return this.setConfigOption(thought.id, p.level);
+      }
       case 'get_commands': return { commands: [] };
       case 'set_session_name': return {};
-      case 'set_model': if (p.provider !== 'cursor') throw new Error('Use a Cursor model for this session'); await this.setModel(p.modelId); return { model: this.model };
+      case 'set_model': if (p.provider !== 'cursor') throw new Error('Use a Cursor model for this session'); await this.setModel(p.modelId); return this.state();
       case 'prompt': return this.prompt(p.message, p.images);
       case 'abort': await this.abort(); return {};
       case 'abort_bash': case 'clear_queue': return {};
@@ -243,7 +278,7 @@ async function main() {
     process.once('SIGTERM', stop); process.once('SIGINT', stop);
     // Opening an empty ACP session advertises account models; it sends no model prompt.
     client.on('request', message => client.reject(message.id, 'Model discovery is non-interactive. Enter a Cursor API Key in Settings or use agent login.'));
-    try { await client.start(); const session = await client.openSession(); process.stdout.write(JSON.stringify({ models: cursorModels(session), currentModelId: cursorCurrentModel(session) }) + '\n'); }
+    try { await client.start(); const session = await client.openSession(); process.stdout.write(JSON.stringify({ models: cursorModels(session, client.capabilities), currentModelId: cursorCurrentModel(session), configOptions: cursorConfigOptions(session) }) + '\n'); }
     finally { await client.close(); process.off('SIGTERM', stop); process.off('SIGINT', stop); }
     return;
   }

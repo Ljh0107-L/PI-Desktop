@@ -97,11 +97,15 @@ export class PiSession extends EventEmitter {
   clearQueue() { return this.request('clear_queue'); }
 
   // Resolves on the next agent_settled event (subscribe before prompting).
-  nextSettled(timeout = 60000) {
+  nextSettled(timeout = 60000, { signal } = {}) {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.off('event', listener); reject(new Error(`${this.id}: timeout waiting for agent_settled`)); }, timeout);
-      const listener = event => { if (event.type === 'agent_settled') { clearTimeout(timer); this.off('event', listener); resolve(); } };
+      const cleanup = () => { clearTimeout(timer); this.off('event', listener); signal?.removeEventListener('abort', aborted); };
+      const listener = event => { if (event.type === 'agent_settled') { cleanup(); resolve(); } };
+      const aborted = () => { cleanup(); reject(new Error(`${this.id}: waiting for agent_settled cancelled`)); };
+      const timer = setTimeout(() => { cleanup(); reject(new Error(`${this.id}: timeout waiting for agent_settled`)); }, timeout);
       this.on('event', listener);
+      signal?.addEventListener('abort', aborted, { once: true });
+      if (signal?.aborted) aborted();
     });
   }
 

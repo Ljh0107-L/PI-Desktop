@@ -1,10 +1,10 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { MenuItem, MenuSection, Modal, Popover, Spinner, baseName, envIcon, shortPath } from './ui.jsx';
-import { api, clearQueued, getState, notify, openSettings, setDraft, setEnvironments, useStore } from './store.js';
+import { api, clearQueued, getState, notify, openSettings, setComposerDraft, setDraft, setEnvironments, useStore } from './store.js';
 import { composerEngine } from './session-engine.js';
 import { favouriteModels } from './file-paths.js';
-import { CursorModelMenu } from './Cursor.jsx';
+import { CursorConfigControls, CursorModelMenu } from './Cursor.jsx';
 import { cachedDir, listDir, prefetchDir } from './dirs.js';
 
 const EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -277,8 +277,15 @@ function SlashMenu({ items, index, onPick }) {
 }
 
 export function Composer({ session, onSubmit, autoFocus, placeholder, initialText = '', onCancel, compact }) {
-  const [text, setText] = useState(initialText);
-  const [attachments, setAttachments] = useState([]);
+  // History editors are ephemeral; the main composer survives remounts/settings/navigation.
+  const draftKey = session?.id ?? 'new';
+  const savedDraft = useStore(s => s.composerDrafts[draftKey]);
+  const [editText, setEditText] = useState(initialText);
+  const [editAttachments, setEditAttachments] = useState([]);
+  const text = onCancel ? editText : savedDraft?.text ?? '';
+  const attachments = onCancel ? editAttachments : savedDraft?.attachments ?? [];
+  const setText = update => onCancel ? setEditText(update) : setComposerDraft(draftKey, 'text', update);
+  const setAttachments = update => onCancel ? setEditAttachments(update) : setComposerDraft(draftKey, 'attachments', update);
   const [dragging, setDragging] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
   const [pi, setPi] = useState([]);
@@ -403,6 +410,7 @@ export function ComposerBar({ session }) {
   const effort = isNew ? draft.thinkingLevel : session.thinkingLevel;
   const cwd = isNew ? draft.cwd : session.cwd;
   const modelInfo = catalog.find(m => m.provider === model?.provider && m.id === model?.id);
+  const cursorModelName = settingsCursor?.models?.find(m => m.id === model?.id)?.name ?? model?.name ?? model?.id ?? 'Cursor default';
   const modelTitle = model ? `${model.provider}/${model.id}` : 'Choose a Cursor model';
   const prep = envStatus[environmentId];
 
@@ -434,11 +442,12 @@ export function ComposerBar({ session }) {
         {(cursorEnabled || cursor) && (isNew
           ? <Trigger width={220} label="Agent" className="engine-trigger" menu={close => <><MenuItem label="Pi" checked={!cursor} onClick={() => { setDraft({ engine: 'pi' }); close(); }} /><MenuItem label="Cursor CLI" checked={cursor} disabled={!cursorEnabled} onClick={() => { setDraft({ engine: 'cursor', cursorModel: draft.cursorModel ?? favourite(settingsCursor) }); close(); }} /></>}><span>{cursor ? 'Cursor CLI' : 'Pi'}</span></Trigger>
           : <span className="muted engine-label" title="Conversation engine — choose a different engine when starting a new conversation">{cursor ? 'Cursor CLI' : 'Pi'}</span>)}
-        {cursor ? <Trigger width={340} label="Model" title={modelTitle} className="model-trigger" menu={close => <CursorModelMenu environmentId={environmentId} sessionId={session?.id} value={model} onChange={changeModel} close={close} />}><span className="strong">{model?.name ?? model?.id ?? 'Cursor default'}</span></Trigger> : catalog.length || model
+        {cursor ? <Trigger width={340} label="Model" title={modelTitle} className="model-trigger" menu={close => <CursorModelMenu environmentId={environmentId} sessionId={session?.id} value={model} onChange={changeModel} close={close} />}><span className="strong">{cursorModelName}</span></Trigger> : catalog.length || model
           ? <Trigger width={320} label="Model" title={modelTitle} className="model-trigger" menu={close => <ModelMenu value={model} onChange={changeModel} close={close} />}>
               <span className="strong">{modelLabel(model, catalog)}</span>
             </Trigger>
           : <button type="button" className="trigger attention" onClick={() => openSettings(true, 'providers')}><Icon name="key" size={15} /><span>Add a model</span></button>}
+        {cursor && session && <CursorConfigControls key={session.id} session={session} />}
         {!cursor && modelInfo?.reasoning !== false && <Trigger width={210} label="Effort" className="effort-trigger" menu={close => <MenuSection title="Reasoning effort">{effortsFor(modelInfo).map(l => <MenuItem key={l} label={effortLabel(l)} checked={effort === l} onClick={() => { changeEffort(l); close(); }} />)}</MenuSection>}>
           <span className="muted">{effortLabel(effort)}</span>
         </Trigger>}

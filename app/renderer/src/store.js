@@ -38,6 +38,7 @@ let state = {
   settingsOpen: false, settingsTab: 'providers', addConnectionOpen: false,
   paletteOpen: false,
   history: [], future: [],                  // back / forward navigation
+  composerDrafts: {},                       // in-memory text/images per conversation; never written to settings
   draft: { environmentId: 'local', cwd: null, model: null, thinkingLevel: 'medium' },
 };
 
@@ -79,6 +80,7 @@ export function notify(message, level = 'info') {
 window.pidesk.subscribe(({ channel, payload }) => {
   switch (channel) {
     case 'event': {
+      if (payload.event.type === 'cursor_usage_changed') scheduleStats(payload.id);
       if (transcriptOf(payload.id).rewinding) break; // old branch, superseded by an edit
       { const next = applyEvent(transcriptOf(payload.id), payload.event);
         setTranscript(payload.id, next);
@@ -179,6 +181,15 @@ export async function loadCatalog() {
 }
 
 export const setDraft = patch => set(s => ({ draft: { ...s.draft, ...patch } }));
+// Update by captured conversation key, including late file reads and failed sends after navigation.
+export const setComposerDraft = (key, field, update) => set(s => {
+  const previous = s.composerDrafts[key] ?? { text: '', attachments: [] };
+  const next = { ...previous, [field]: typeof update === 'function' ? update(previous[field]) : update };
+  const composerDrafts = { ...s.composerDrafts };
+  if (!next.text && !next.attachments.length) delete composerDrafts[key];
+  else composerDrafts[key] = next;
+  return { composerDrafts };
+});
 export const setView = patch => set(patch);
 // Inspect child activity in the existing right panel, only after an explicit click.
 // Keep file tabs/selection intact so closing a preview returns to the same child.
@@ -360,7 +371,7 @@ export async function deleteSession(id) {
   try {
     await api('deleteSession', id);
     const without = object => Object.fromEntries(Object.entries(object).filter(([key]) => key !== id));
-    set(s => ({ transcripts: without(s.transcripts), questions: without(s.questions), stats: without(s.stats), files: without(s.files), subagentSelection: without(s.subagentSelection),
+    set(s => ({ composerDrafts: without(s.composerDrafts), transcripts: without(s.transcripts), questions: without(s.questions), stats: without(s.stats), files: without(s.files), subagentSelection: without(s.subagentSelection),
       history: s.history.filter(v => v.activeId !== id), future: s.future.filter(v => v.activeId !== id) }));
   } catch (error) {
     // Don't silently lose the conversation or navigate away from whatever the user opened meanwhile.
