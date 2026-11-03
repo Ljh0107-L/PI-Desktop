@@ -46,15 +46,15 @@ function NewSessionView() {
   const draft = useStore(s => s.draft);
   // Start a Pi in the chosen place ahead of time, so the first message doesn't wait for it.
   useEffect(() => {
-    if (!draft.model) return;
+    if (!draft.model || draft.engine === 'cursor') return;
     const t = setTimeout(() => api('prewarm', { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel }).catch(() => {}), 400);
     return () => clearTimeout(t);
-  }, [draft.environmentId, draft.cwd, draft.model?.provider, draft.model?.id]);
+  }, [draft.engine, draft.environmentId, draft.cwd, draft.model?.provider, draft.model?.id]);
   return (
     <div className="new-session">
       <div className="new-session-center" />
       <div className="dock">
-        <Composer autoFocus placeholder="What should Pi work on?" onSubmit={startSession} />
+        <Composer autoFocus placeholder={draft.engine === 'cursor' ? 'What should Cursor work on?' : 'What should Pi work on?'} onSubmit={startSession} />
         <ComposerBar />
       </div>
     </div>
@@ -63,7 +63,7 @@ function NewSessionView() {
 
 function ConnectionBanner({ session }) {
   if (session.status === 'reconnecting') {
-    return <div className="conn-banner"><Spinner size={13} /> <span className="conn-text">Reconnecting to <b>{session.environmentLabel}</b>… Pi keeps working on the server.</span></div>;
+    return <div className="conn-banner"><Spinner size={13} /> <span className="conn-text">Reconnecting to <b>{session.environmentLabel}</b>… {session.engine === 'cursor' ? 'Cursor' : 'Pi'} keeps working on the server.</span></div>;
   }
   if (session.status === 'disconnected' || session.status === 'error') {
     return <div className="conn-banner error"><Icon name="unplug" size={15} /> <span className="conn-text">{session.statusMessage || 'Disconnected from this session.'}</span>
@@ -98,7 +98,7 @@ function SessionView({ session }) {
         <div className="dock">
           <ConnectionBanner session={session} />
           <GoalBanner session={session} />
-          <Composer session={session} autoFocus placeholder={questions.length ? 'Answer Pi’s question…' : session.streaming ? 'Send to interrupt…' : 'Reply to Pi…'} onSubmit={(text, attachments) => sendPrompt(session.id, text, attachments)} />
+          <Composer session={session} autoFocus placeholder={questions.length ? 'Answer the agent’s question…' : session.streaming ? 'Send to interrupt…' : session.engine === 'cursor' ? 'Reply to Cursor…' : 'Reply to Pi…'} onSubmit={(text, attachments) => sendPrompt(session.id, text, attachments)} />
           <ComposerBar session={session} />
         </div>
         {terminalOpen && <TerminalPanel session={session} />}

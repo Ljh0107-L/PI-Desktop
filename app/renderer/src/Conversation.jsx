@@ -366,7 +366,7 @@ function WorkingRow({ session, transcript }) {
   const [, tick] = useState(0);
   useEffect(() => { const t = setInterval(() => tick(n => n + 1), 1000); return () => clearInterval(t); }, []);
   if (session?.status === 'connecting') {
-    const phase = { preparing: 'Preparing remote environment…', starting: 'Starting Pi…', configuring: 'Restoring session…' }[session.phase] ?? 'Connecting…';
+    const phase = { preparing: 'Preparing remote environment…', starting: session.engine === 'cursor' ? 'Starting Cursor…' : 'Starting Pi…', configuring: 'Restoring session…' }[session.phase] ?? 'Connecting…';
     return <div className="working"><span className="working-dot" /><span className="shimmer">{phase}</span></div>;
   }
   const messages = transcript.messages;
@@ -456,7 +456,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
           : <div className="block-error"><Icon name="alert" size={15} /> {transcript.error}</div>)}
         {blocks.map(block => {
           switch (block.kind) {
-            case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!readOnly && !!session && session.id !== 'pending' && session.status === 'connected' && !session.streaming && !block.text.startsWith('/')} />;
+            case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!readOnly && session?.engine !== 'cursor' && !!session && session.id !== 'pending' && session.status === 'connected' && !session.streaming && !block.text.startsWith('/')} />;
             case 'goal': return <GoalMarker key={block.key} objective={block.objective} />;
             case 'text': return <Markdown key={block.key} text={block.text} streaming={block.streaming} />;
             case 'usage': return <TurnFooter key={block.key} text={block.text} changes={readOnly ? [] : block.changes} sessionId={session?.id} last={block === lastUsage} />;

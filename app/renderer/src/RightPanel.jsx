@@ -80,7 +80,7 @@ export function RightPanel({ session }) {
         <span className="meter" title={percent == null ? undefined : `${Math.round(percent)}% of the context window`}><span style={{ width: `${percent > 0 ? Math.max(6, Math.min(100, percent)) : 0}%` }} /></span>
       </>} />
       <UsageCard transcript={transcript} />
-      <SubagentList sessionId={session.id} batches={batches} selectedCallId={selection?.callId} />
+      {session.engine === 'cursor' ? <Card title="Cursor CLI"><p>Tools, context and authentication are managed by Cursor. Token usage is unavailable unless reported by the CLI.</p></Card> : <SubagentList sessionId={session.id} batches={batches} selectedCallId={selection?.callId} />}
     </aside>
   );
 }

@@ -1,4 +1,5 @@
 // Full-window Settings, modelled on DSH's settings sections and Codex's Connections page.
+import { CursorSettings } from './Cursor.jsx';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { MenuItem, Modal, Popover, Spinner } from './ui.jsx';
@@ -484,6 +485,7 @@ export function SettingsPage() {
   const tab = useStore(s => s.settingsTab);
   const pages = [
     { id: 'providers', label: 'Models', icon: 'sparkle', title: 'Models' },
+    { id: 'cursor', label: 'Cursor SDK', icon: 'terminal', title: 'Cursor SDK' },
     { id: 'connections', label: 'Connections', icon: 'server', title: 'Connections' },
     { id: 'usage', label: 'Usage', icon: 'gauge', title: 'Usage' },
   ];
@@ -501,7 +503,7 @@ export function SettingsPage() {
         <div className="settings-drag drag" />
         <div className="settings-content">
           <h1 className="settings-title">{page.title}</h1>
-          {page.id === 'providers' ? <ModelsPage /> : page.id === 'usage' ? <UsagePage /> : <ConnectionsPage />}
+          {page.id === 'providers' ? <ModelsPage /> : page.id === 'cursor' ? <CursorSettings /> : page.id === 'usage' ? <UsagePage /> : <ConnectionsPage />}
         </div>
       </main>
     </div>

@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { MenuItem, MenuSection, Modal, Popover, Spinner, baseName, envIcon, shortPath } from './ui.jsx';
 import { api, clearQueued, getState, notify, openSettings, setDraft, setEnvironments, useStore } from './store.js';
+import { CursorModelMenu } from './Cursor.jsx';
 import { cachedDir, listDir, prefetchDir } from './dirs.js';
 
 const EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -280,6 +281,8 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   const [slashIndex, setSlashIndex] = useState(0);
   const [pi, setPi] = useState([]);
   const ref = useRef(null);
+  const draftEngine = useStore(s => s.draft.engine);
+  const cursor = (session?.engine ?? draftEngine) === 'cursor';
   const streaming = session?.streaming;
   useEffect(() => { if (autoFocus) ref.current?.focus(); }, [autoFocus, session?.id]);
   useEffect(() => {
@@ -290,7 +293,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   // Slash commands: shown while the message is a single "/word" being typed.
   const slashQuery = /^\/[\w:.-]*$/.test(text) ? text.slice(1).toLowerCase() : null;
   useEffect(() => { if (slashQuery !== null && session?.id) api('commands', session.id).then(setPi).catch(() => {}); }, [slashQuery !== null, session?.id]);
-  const commands = slashQuery === null ? [] : [...BUILTIN_COMMANDS.filter(c => session || c.name === 'goal'), ...pi].filter(c => c.name.toLowerCase().includes(slashQuery)).slice(0, 12);
+  const commands = slashQuery === null ? [] : [...BUILTIN_COMMANDS.filter(c => cursor ? c.name === 'new' : session || c.name === 'goal'), ...pi].filter(c => c.name.toLowerCase().includes(slashQuery)).slice(0, 12);
   useEffect(() => setSlashIndex(0), [slashQuery]);
   const pickCommand = c => { setText(`/${c.name} `); ref.current?.focus(); };
 
@@ -385,7 +388,10 @@ export function ComposerBar({ session }) {
   const isNew = !session;
   const environmentId = isNew ? draft.environmentId : session.environmentId;
   const env = environments.find(e => e.id === environmentId) ?? { id: environmentId, label: session?.environmentLabel ?? 'This computer', kind: environmentId?.startsWith('ssh:') ? 'ssh' : 'local' };
-  const model = isNew ? draft.model : session.model;
+  const cursorEnabled = useStore(s => !!s.settings.cursor?.enabled);
+  const engine = session?.engine ?? draft.engine ?? 'pi';
+  const cursor = engine === 'cursor';
+  const model = isNew ? cursor ? draft.cursorModel : draft.model : session.model;
   const effort = isNew ? draft.thinkingLevel : session.thinkingLevel;
   const cwd = isNew ? draft.cwd : session.cwd;
   const modelInfo = catalog.find(m => m.provider === model?.provider && m.id === model?.id);
@@ -393,10 +399,10 @@ export function ComposerBar({ session }) {
 
   const changeEnv = id => {
     const recents = getState().settings?.recentFolders?.[id] ?? [];
-    setDraft({ environmentId: id, cwd: recents[0] ?? null });
+    setDraft({ environmentId: id, cwd: recents[0] ?? null, cursorModel: null });
     if (id !== 'local') api('prepareEnvironment', id);
   };
-  const changeModel = m => isNew ? setDraft({ model: m }) : api('setModel', session.id, m.provider, m.id).catch(e => notify(e.message, 'error'));
+  const changeModel = m => isNew ? setDraft(cursor ? { cursorModel: m } : { model: m }) : api('setModel', session.id, m.provider, m.id).catch(e => notify(e.message, 'error'));
   const changeEffort = l => isNew ? setDraft({ thinkingLevel: l }) : api('setThinking', session.id, l).catch(e => notify(e.message, 'error'));
 
   return (
@@ -416,12 +422,15 @@ export function ComposerBar({ session }) {
         </>}
       </div>
       <div className="composer-bar-right">
-        {catalog.length || model
+        {(cursorEnabled || cursor) && (isNew
+          ? <Trigger width={220} label="Agent" className="engine-trigger" menu={close => <><MenuItem label="Pi" checked={!cursor} onClick={() => { setDraft({ engine: 'pi' }); close(); }} /><MenuItem label="Cursor CLI" checked={cursor} disabled={!cursorEnabled} onClick={() => { setDraft({ engine: 'cursor' }); close(); }} /></>}><span>{cursor ? 'Cursor CLI' : 'Pi'}</span></Trigger>
+          : <span className="muted engine-label">{cursor ? 'Cursor CLI' : 'Pi'}</span>)}
+        {cursor ? <Trigger width={340} label="Model" className="model-trigger" menu={close => <CursorModelMenu environmentId={environmentId} sessionId={session?.id} value={model} onChange={changeModel} close={close} />}><span className="strong">{model?.id ?? 'Cursor default'}</span></Trigger> : catalog.length || model
           ? <Trigger width={320} label="Model" className="model-trigger" menu={close => <ModelMenu value={model} onChange={changeModel} close={close} />}>
               <span className="strong">{modelLabel(model, catalog)}</span>
             </Trigger>
           : <button type="button" className="trigger attention" onClick={() => openSettings(true, 'providers')}><Icon name="key" size={15} /><span>Add a model</span></button>}
-        {modelInfo?.reasoning !== false && <Trigger width={210} label="Effort" className="effort-trigger" menu={close => <MenuSection title="Reasoning effort">{effortsFor(modelInfo).map(l => <MenuItem key={l} label={effortLabel(l)} checked={effort === l} onClick={() => { changeEffort(l); close(); }} />)}</MenuSection>}>
+        {!cursor && modelInfo?.reasoning !== false && <Trigger width={210} label="Effort" className="effort-trigger" menu={close => <MenuSection title="Reasoning effort">{effortsFor(modelInfo).map(l => <MenuItem key={l} label={effortLabel(l)} checked={effort === l} onClick={() => { changeEffort(l); close(); }} />)}</MenuSection>}>
           <span className="muted">{effortLabel(effort)}</span>
         </Trigger>}
       </div>

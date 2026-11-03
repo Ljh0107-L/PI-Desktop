@@ -12,6 +12,7 @@ import { Terminals } from './terminals.mjs';
 import { Updater } from './updater.mjs';
 import { Store } from './store.mjs';
 import { UsageLedger } from './usage.mjs';
+import { cursorCommand } from '../../agent/cursor-acp.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const piPackage = join(root, 'node_modules/@earendil-works/pi-coding-agent');
@@ -156,6 +157,34 @@ const api = {
     if (process.env.PIDESK_TEST_PICK_FOLDER) return process.env.PIDESK_TEST_PICK_FOLDER;
     const result = await dialog.showOpenDialog(window, { properties: ['openDirectory', 'createDirectory'] });
     return result.canceled ? null : result.filePaths[0];
+  },
+  saveCursorSettings({ enabled, command }) {
+    cursorCommand(command);
+    const previous = store.settings.cursor;
+    store.settings.cursor = { enabled: !!enabled, command: command.trim() };
+    try { store.saveSettings(); } catch (error) { store.settings.cursor = previous; throw error; }
+    return publicSettings();
+  },
+  async cursorModels(environmentId = 'local', sessionId) {
+    if (!store.settings.cursor?.enabled) throw new Error('Enable Cursor SDK in Settings first.');
+    if (sessionId) {
+      const record = manager.record(sessionId);
+      if (record.engine !== 'cursor') throw new Error('Not a Cursor session');
+      const session = await manager.ensureStarted(sessionId);
+      return { models: await session.availableModels(), currentModelId: (await session.state()).model?.id };
+    }
+    const env = manager.env(environmentId);
+    const command = store.settings.cursor.command || '~/.local/bin/agent';
+    let output;
+    if (env.kind === 'local') {
+      const args = [join(root, 'agent/pidesk-cursor.mjs'), '--catalog', '--cwd', app.getPath('home'), '--command', command];
+      output = await new Promise((resolve, reject) => execFile(nodeBinary(), args, { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', PIDESK_BOOT: '' }, timeout: 90000, maxBuffer: 2 << 20 }, (error, stdout, stderr) => error ? reject(new Error(stderr.trim() || error.message)) : resolve(stdout)));
+    } else {
+      const facts = await manager.prepare(env.id);
+      const args = [facts.node, `${dirname(facts.bridge)}/pidesk-cursor.mjs`, '--catalog', '--cwd', facts.home, '--command', command];
+      output = await runSsh(env, args.map(shellQuote).join(' '), { timeout: 90000 });
+    }
+    return JSON.parse(output.trim());
   },
   catalog: () => manager.catalog(),
   // Models a provider offers: Pi's catalog for built-in providers, GET /models for custom endpoints.

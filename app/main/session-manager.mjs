@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { execFile } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { PiSession } from '../../core/pi-session.mjs';
 import { egressEnv, localRelayTransport, localTransport, relaySpawnSpec, shellQuote, sshRelayTransport } from '../../core/transports.mjs';
@@ -154,7 +154,7 @@ export class SessionManager extends EventEmitter {
   }
   async #syncProviders(runtime) {
     const session = runtime?.session;
-    if (!session) return;
+    if (!session || runtime.engine === 'cursor') return;
     while (runtime.session === session && runtime.providersVersion !== this.providersVersion) {
       // Settings updates and the first prompt can arrive together. Send one update at a time,
       // then re-check the version so an older acknowledgement cannot mark newer keys as synced.
@@ -320,7 +320,8 @@ export class SessionManager extends EventEmitter {
   // run; the first message then adopts it instead of waiting for SSH + Pi start-up. With No folder the
   // spare runs in the root and moves into the conversation's own directory when the first message names it.
   spares = new Map(); // `${environmentId}\n${cwd}` (or projectlessSpareKey) -> { id, record, timer }
-  async prewarm({ environmentId, cwd: chosen, model, thinkingLevel, noFolder }) {
+  async prewarm({ environmentId, cwd: chosen, model, thinkingLevel, noFolder, engine }) {
+    if (engine === 'cursor') return false;
     if (!environmentId) return false;
     const env = this.environments().find(e => e.id === environmentId);
     if (!env || (env.kind === 'ssh' && !env.enabled)) return false;
@@ -413,16 +414,18 @@ export class SessionManager extends EventEmitter {
     if (result?.cancelled) throw new Error('Moving the pre-warmed Pi was cancelled.');
   }
 
-  async create({ environmentId, cwd: chosen, model, thinkingLevel, prompt }) {
+  async create({ environmentId, cwd: chosen, model, thinkingLevel, prompt, engine = 'pi' }) {
+    if (!['pi', 'cursor'].includes(engine)) throw new Error('Unknown session engine');
+    if (engine === 'cursor' && !this.store.settings.cursor?.enabled) throw new Error('Enable Cursor SDK in Settings first.');
     const env = this.env(environmentId);
     const noFolder = !chosen;
     const cwd = noFolder ? await this.#projectlessDir(env, prompt) : chosen;
     const fields = {
-      title: 'New session', environmentId, environmentLabel: env.label, cwd, noFolder: noFolder || undefined,
+      title: 'New session', engine, environmentId, environmentLabel: env.label, cwd, noFolder: noFolder || undefined,
       project: noFolder ? 'No folder' : env.kind === 'local' ? basename(cwd) : remoteBase(cwd),
     };
     const spareKey = noFolder ? projectlessSpareKey(environmentId) : `${environmentId}\n${cwd}`;
-    const spare = this.spares.get(spareKey);
+    const spare = engine === 'cursor' ? null : this.spares.get(spareKey);
     if (spare) {
       this.spares.delete(spareKey);
       clearTimeout(spare.timer);
@@ -520,10 +523,23 @@ export class SessionManager extends EventEmitter {
   async #start(record, runtime) {
     const env = this.env(record.environmentId);
     const bootVersion = this.providersVersion;
-    const boot = { providers: this.bootProviders() };
+    const cursor = record.engine === 'cursor';
+    runtime.engine = record.engine;
+    const boot = cursor ? {} : { providers: this.bootProviders() };
     const piArgs = record.piSessionFile ? ['--session', record.piSessionFile] : [];
     let session;
-    if (env.kind === 'local') {
+    if (cursor) {
+      const facts = env.kind === 'local' ? { node: this.local.node, agentDir: this.local.agentDir, runDir: this.local.runDir, relay: this.relayPath, bridge: this.bridgePath } : await this.prepare(env.id);
+      this.#assertCurrent(record, runtime);
+      const file = record.piSessionFile || `${facts.agentDir}/cursor-sessions/${record.id}.jsonl`;
+      const command = this.store.settings.cursor?.command || '~/.local/bin/agent';
+      const adapter = `${dirname(facts.bridge)}/pidesk-cursor.mjs`;
+      const spawn = { cwd: record.cwd, env: env.kind === 'local' ? { ...this.local.extraEnv } : {}, argv: [facts.node, adapter, '--cwd', record.cwd, '--command', command, '--session-file', file, ...(record.model?.id ? ['--model', record.model.id] : [])] };
+      const transport = env.kind === 'local'
+        ? localRelayTransport({ node: facts.node, relayPath: facts.relay, runDir: facts.runDir, extraEnv: this.local.extraEnv })
+        : sshRelayTransport({ host: env.host, sshOptions: env.sshArgs ?? [], node: facts.node, relayPath: facts.relay, runDir: facts.runDir });
+      session = new PiSession({ id: record.id, boot, transport, relay: { sinceSeq: runtime.lastSeq, spawn } });
+    } else if (env.kind === 'local') {
       mkdirSync(this.local.agentDir, { recursive: true });
       const spawn = relaySpawnSpec({ cwd: record.cwd, node: this.local.node, piCli: this.local.piCli, agentDir: this.local.agentDir, extensions: [this.bridgePath], piArgs, extraEnv: { ...this.local.extraEnv, ...this.piEnv(record) } });
       const transport = localRelayTransport({ node: this.local.node, relayPath: this.relayPath, runDir: this.local.runDir, extraEnv: this.local.extraEnv });
@@ -586,6 +602,11 @@ export class SessionManager extends EventEmitter {
     runtime.autoReconnect = true;
     const state = session.initialState ?? await session.state();
     runtime.streaming = !!state.isStreaming;
+    if (record.engine === 'cursor') {
+      this.#assertCurrent(record, runtime);
+      this.#save(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId, model: state.model, thinkingLevel: 'off' });
+      return session;
+    }
     const info = session.attachInfo;
     const processKey = info?.pid && info?.startedAt ? `${info.pid}:${info.startedAt}` : null;
     const sameProcess = processKey && runtime.providerProcess === processKey;
@@ -639,6 +660,9 @@ export class SessionManager extends EventEmitter {
     runtime.lastUsed = Date.now();
     if (event.type === 'agent_start') { runtime.streaming = true; this.emit('status', { id: record.id, status: runtime.status, streaming: true }); }
     if (event.type === 'agent_settled') { runtime.streaming = false; this.#save(record, { lastActiveAt: Date.now() }); this.emit('status', { id: record.id, status: runtime.status, streaming: false }); }
+    if (record.engine === 'cursor' && event.type === 'cursor_questions_cleared') {
+      runtime.questions.clear(); this.emit('questions-cleared', { id: record.id });
+    }
     this.emit('event', { id: record.id, event });
   }
 
@@ -709,7 +733,7 @@ export class SessionManager extends EventEmitter {
       interrupted = true;
       sent = await send(session);
     }
-    if (nameIt && !nameIt.startsWith('/')) session.prompt(`/pidesk-title ${Buffer.from(nameIt).toString('base64')}`).catch(() => {});
+    if (record.engine !== 'cursor' && nameIt && !nameIt.startsWith('/')) session.prompt(`/pidesk-title ${Buffer.from(nameIt).toString('base64')}`).catch(() => {});
     return { ...(sent && typeof sent === 'object' ? sent : {}), interrupted };
   }
 
@@ -796,6 +820,13 @@ export class SessionManager extends EventEmitter {
 
   async setModel(id, provider, modelId) {
     const record = this.record(id);
+    if (record.engine === 'cursor') {
+      if (provider !== 'cursor') throw new Error('Select a Cursor model for this session');
+      const session = await this.ensureStarted(id);
+      await session.setModel(provider, modelId);
+      this.#save(record, { model: { provider, id: modelId } });
+      return;
+    }
     let runtime = this.runtimes.get(id);
     // A host that can't reach this model's endpoint needs its traffic relayed through this Mac, which is
     // wired up when Pi starts. A session started without it is restarted (same session file, history kept).
@@ -895,7 +926,7 @@ export class SessionManager extends EventEmitter {
   // A spare Pi in the open conversation's folder, so Fork (and a new session there) adopts a running Pi.
   async warmFolder(id) {
     const record = this.store.sessions.find(s => s.id === id);
-    if (!record || record.archived) return false;
+    if (!record || record.archived || record.engine === 'cursor') return false;
     return this.prewarm({ environmentId: record.environmentId, cwd: record.cwd, model: record.model, thinkingLevel: record.thinkingLevel, noFolder: record.noFolder });
   }
   #idle(runtime) {
@@ -966,6 +997,7 @@ export class SessionManager extends EventEmitter {
   // clone it, with no Pi to start. Without one, a fresh Pi does the same.
   async fork(id) {
     const source = this.record(id);
+    if (source.engine === 'cursor') throw new Error('Fork is not supported by Cursor ACP; start a new Cursor conversation instead.');
     if (!source.piSessionFile) throw new Error('Send a message before forking this conversation.');
     const env = this.env(source.environmentId);
     const fields = {
@@ -1012,6 +1044,7 @@ export class SessionManager extends EventEmitter {
   // Edit an earlier user message: branch the conversation just before it and send the new text there.
   async editMessage(id, ordinal, originalText, text, attachments = []) {
     const record = this.record(id);
+    if (record.engine === 'cursor') throw new Error('Rewriting Cursor history is not supported by ACP.');
     const session = await this.ensureStarted(id);
     const runtime = this.runtimes.get(id);
     if (runtime.streaming) {

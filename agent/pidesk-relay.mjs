@@ -66,6 +66,7 @@ function runDaemon() {
       while (session.logBytes > LOG_LIMIT_BYTES && session.log.length > 1) session.logBytes -= session.log.shift().length;
       try {
         const record = JSON.parse(line);
+        if (record.type === 'cursor_questions_cleared') session.pendingUi.clear();
         if (record.type === 'extension_ui_request' && DIALOGS.has(record.method)) session.pendingUi.set(record.id, numbered);
       } catch { /* non-JSON output is still forwarded */ }
       for (const client of session.clients) if (!client.destroyed) client.write(numbered + '\n');

@@ -85,7 +85,7 @@ function remoteFixture(t) {
   const dir = temporary(t), cacheDir = join(dir, 'cache');
   const env = { host: 'fixture.invalid', sshArgs: ['-p', '2222'] };
   const options = { piVersion: '1.2.3', root: '/fixture/install', cacheDir, bridgePath: join(dir, 'pidesk-bridge.js'), relayPath: join(dir, 'pidesk-relay.mjs') };
-  const contents = Object.fromEntries(['pidesk-subagent.mjs', 'pidesk-bridge.js', 'pidesk-relay.mjs'].map(name => {
+  const contents = Object.fromEntries(['cursor-acp.mjs', 'pidesk-cursor.mjs', 'pidesk-subagent.mjs', 'pidesk-bridge.js', 'pidesk-relay.mjs'].map(name => {
     const content = `// fixture ${name}\n`; writeFileSync(join(dir, name), content); return [name, content];
   }));
   const inspection = ({ nodeVersion = 'v22.19.0', hashes = true } = {}) =>
@@ -128,7 +128,7 @@ test('bridge updates send only changed files together over stdin', async t => {
     uploads.push({ script, files: JSON.parse(options.input) }); return '';
   } });
   assert.equal(uploads.length, 1);
-  assert.equal(uploads[0].files.length, 3);
+  assert.equal(uploads[0].files.length, 5);
   for (const file of uploads[0].files) {
     assert.equal(Buffer.from(file.content, 'base64').toString(), f.contents[file.name]);
     assert.ok(!uploads[0].script.includes(file.content), 'file contents must not appear in argv');

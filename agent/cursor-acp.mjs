@@ -1,0 +1,117 @@
+// Official Cursor ACP (JSON-RPC over stdio). No private HTTP protocol or API shim.
+import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+
+export function cursorCommand(value = '~/.local/bin/agent', home = homedir()) {
+  if (typeof value !== 'string' || !value.trim() || /[\0\r\n]/.test(value)) throw new Error('Enter a Cursor CLI executable path');
+  return value.startsWith('~/') ? join(home, value.slice(2)) : value;
+}
+export function cursorEnvironment(source = process.env) {
+  // In particular never forward Pi provider keys, PIDESK_BOOT or ELECTRON_RUN_AS_NODE.
+  const keep = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM', 'CURSOR_API_KEY', 'CURSOR_AUTH_TOKEN'];
+  return Object.fromEntries(keep.filter(key => source[key] !== undefined).map(key => [key, source[key]]));
+}
+export const cursorModels = result => (result?.models?.availableModels ?? []).map(m => ({ provider: 'cursor', id: m.modelId, name: m.name || m.modelId, reasoning: false, input: ['text', 'image'] })).filter(m => typeof m.id === 'string' && m.id);
+
+export class CursorAcp extends EventEmitter {
+  constructor({ command, cwd, spawnProcess = spawn, env = process.env }) {
+    super();
+    this.command = cursorCommand(command);
+    this.cwd = cwd;
+    this.spawnProcess = spawnProcess;
+    this.env = cursorEnvironment(env);
+    this.pending = new Map();
+    this.nextId = 0;
+    this.stderr = '';
+    this.closed = false;
+  }
+  async start() {
+    const child = this.child = this.spawnProcess(this.command, ['acp'], { cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    let buffer = '';
+    child.stdout.on('data', chunk => {
+      buffer += chunk;
+      if (Buffer.byteLength(buffer) > 16 << 20) { this.fail(new Error('Cursor ACP message exceeds 16 MB')); this.close(); return; }
+      let nl;
+      while ((nl = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, nl); buffer = buffer.slice(nl + 1);
+        if (!line.trim()) continue;
+        try { this.receive(JSON.parse(line)); }
+        catch { this.fail(new Error('Invalid JSON from Cursor CLI')); this.close(); return; }
+      }
+    });
+    child.stderr.on('data', chunk => { this.stderr = (this.stderr + chunk).slice(-4000); });
+    child.stdin.on('error', error => this.fail(error));
+    child.once('error', error => this.fail(new Error(`Could not start Cursor CLI (${this.command}): ${error.message}. Install Cursor CLI and run agent login on this machine.`)));
+    this.exit = new Promise(resolve => child.once('close', (code, signal) => {
+      const error = new Error(`Cursor CLI closed (${signal ?? code})${this.stderr ? ': ' + this.stderr : ''}`);
+      this.fail(error);
+      this.closed = true;
+      this.emit('closed', error);
+      resolve();
+    }));
+    const init = await this.request('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 'pi-desktop', version: '0.1' } });
+    if (init.protocolVersion !== 1) throw new Error(`Unsupported Cursor ACP protocol: ${init.protocolVersion}`);
+    this.capabilities = init.agentCapabilities ?? {};
+    if (init.authMethods?.some(method => method.id === 'cursor_login')) await this.request('authenticate', { methodId: 'cursor_login' });
+    return init;
+  }
+  send(message) {
+    if (this.failure || this.closed) throw this.failure ?? new Error('Cursor CLI is closed');
+    this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', ...message }) + '\n');
+  }
+  request(method, params, { timeout = 60000 } = {}) {
+    if (this.failure) return Promise.reject(this.failure);
+    const id = ++this.nextId;
+    return new Promise((resolve, reject) => {
+      const timer = timeout ? setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`Cursor CLI timed out during ${method}`));
+      }, timeout) : null;
+      this.pending.set(id, { resolve, reject, timer });
+      try { this.send({ id, method, params }); }
+      catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }
+    });
+  }
+  notify(method, params) { this.send({ method, params }); }
+  respond(id, result) { if (!this.failure && !this.closed) this.send({ id, result }); }
+  reject(id, message = 'Unsupported client request') { if (!this.failure && !this.closed) this.send({ id, error: { code: -32601, message } }); }
+  receive(message) {
+    if (message.jsonrpc !== '2.0') throw new Error('Invalid RPC envelope');
+    if (message.method) {
+      if (message.id !== undefined) this.emit('request', message);
+      else this.emit('notification', message);
+    } else if (message.id !== undefined) {
+      const pending = this.pending.get(message.id);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      this.pending.delete(message.id);
+      if (message.error) pending.reject(new Error(message.error.message || 'Cursor request failed'));
+      else pending.resolve(message.result);
+    }
+  }
+  fail(error) {
+    if (this.failure) return;
+    this.failure = error;
+    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
+    this.pending.clear();
+  }
+  async openSession(sessionId) {
+    if (sessionId && !this.capabilities?.loadSession) throw new Error('This Cursor CLI cannot resume sessions. Update Cursor CLI; the existing history has not been replaced.');
+    const result = await this.request(sessionId ? 'session/load' : 'session/new', { ...(sessionId ? { sessionId } : {}), cwd: this.cwd, mcpServers: [] });
+    this.sessionId = sessionId || result.sessionId;
+    if (!this.sessionId) throw new Error('Cursor CLI did not return a session ID');
+    return result;
+  }
+  async close() {
+    if (!this.child || this.closed) return;
+    this.fail(new Error('Cursor connection closed'));
+    this.child.stdin.end();
+    this.child.kill('SIGTERM');
+    const timer = setTimeout(() => this.child.kill('SIGKILL'), 2000);
+    try { await this.exit; } finally { clearTimeout(timer); }
+  }
+}
