@@ -518,7 +518,7 @@ kbd + kbd { margin-left: 3px; }
 
 .switch { position: relative; width: 36px; height: 20px; padding: 2px; border-radius: 999px; background: rgba(255, 255, 255, .16); flex: none; transition: background .15s; }
 .switch input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
-.switch span { display: block; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .3); transition: transform .18s var(--ease); }
+.switch span { display: block; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, .3); transition: transform .18s var(--ease); pointer-events: none; }
 .switch.on { background: #2f7bf6; }
 .switch.on span { transform: translateX(16px); }
 .connection .row-head { gap: 14px; }

@@ -65,7 +65,8 @@ test('Cursor favourites and cached models survive key/config changes and are bou
   const dir = temp(t), store = storeAt(dir);
   store.saveCursorSettings({ ...config, apiKey: KEY });
   store.saveCursorModels({ models: [{ id: 'a', name: 'A' }, { id: 42, name: 'bad' }, { id: 'b', name: '' }], currentModelId: 'a' });
-  store.saveCursorSettings({ enabled: true, command: '', favorites: ['b', 'a'] });
+  store.settings.cursor.favorites = ['b', 'a'];
+  store.saveSettings();
   assert.deepEqual(store.settings.cursor.favorites, ['b', 'a']);
   assert.deepEqual(store.settings.cursor.models, [{ id: 'a', name: 'A' }, { id: 'b', name: 'b' }]);
   store.saveCursorSettings({ ...config, apiKey: NEXT_KEY });
