@@ -2,7 +2,17 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## 0.1.31 — Cursor authentication without a remote keychain
+## 0.1.32 — Correct Cursor API-key routing and legacy Pi controls
+
+- **Do not invoke browser login for API keys.** The official Cursor CLI recognizes supplied API keys/auth tokens and existing CLI credentials during startup. Pi no longer unconditionally calls ACP `authenticate(cursor_login)`: that method checks browser-login credentials and could enter an interactive login flow even when an API key was already supplied, producing a generic `Invalid params` error.
+- **Legacy Pi sessions stay Pi.** Conversations without an engine field now explicitly display as Pi. Their model menu, reasoning controls and slash commands never inherit a Cursor selection from the unrelated new-conversation draft. Selecting Cursor for a new chat does not convert an existing Pi conversation.
+- **Readable composer controls.** Long model identifiers shrink/ellipsis within narrow panes, leave the engine/effort controls visible, and expose the full identifier in a tooltip.
+- **Errors identify their stage.** RPC errors retain the method, numeric code and safe error detail while redacting the supplied key, rather than discarding the useful part of `Invalid params`.
+- **Targeted CI coverage.** The mock peer rejects inappropriate browser-login calls for API-key sessions. The real pinned CLI verifies the pre-authenticated route with a synthetic invalid key using only `initialize` and local session listing, on this computer and over SSH. No real account/key validation, model session creation or inference is part of that probe. Electron regressions switch a Cursor draft back to a legacy Pi conversation and verify the correct menus and narrow-pane layout.
+
+Existing saved keys and conversations are retained. Start a new conversation and select Cursor CLI to use Cursor; existing Pi chats are not migrated. Tests, app launches and packaging run only in GitHub CI.
+
+## Included from 0.1.31 — Cursor authentication without a remote keychain
 
 - **API-key auth stays in memory inside Cursor.** Supplied API keys/auth tokens select the official CLI's `memory` credential store. This avoids macOS login-keychain access in SSH sessions and avoids enabling plaintext CLI credential persistence. The desktop's saved key remains encrypted and is supplied again when a Cursor process restarts.
 - **Actual SSH verification.** GitHub CI now uploads the real pinned Cursor package through the actual SSH installer and initializes its ACP server over SSH without a TTY, credentials or an inference request. This caught the keychain requirement that mock-only tests could not expose. Local official CLI startup, alias preservation, checksum checks and normal local/SSH UI flows remain covered.
