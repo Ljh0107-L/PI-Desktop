@@ -1,7 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { MenuItem, MenuSection, Modal, Popover, Spinner, baseName, envIcon, shortPath } from './ui.jsx';
-import { api, clearQueued, getState, notify, openSettings, setComposerDraft, setDraft, setEnvironments, useStore } from './store.js';
+import { api, captureComposerDraft, clearQueued, getState, notify, openSettings, recoverComposerDraft, restoreComposerDraft, setComposerDraft, setDraft, setEnvironments, takeComposerDraft, useStore } from './store.js';
+import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerDraft as takeDraft, restoreComposerDraft as restoreDraft, recoverComposerDraft as recoverDraft } from './composer-draft.js';
 import { composerEngine } from './session-engine.js';
 import { favouriteModels } from './file-paths.js';
 import { CursorConfigControls, CursorModelMenu } from './Cursor.jsx';
@@ -280,12 +281,19 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   // History editors are ephemeral; the main composer survives remounts/settings/navigation.
   const draftKey = session?.id ?? 'new';
   const savedDraft = useStore(s => s.composerDrafts[draftKey]);
-  const [editText, setEditText] = useState(initialText);
-  const [editAttachments, setEditAttachments] = useState([]);
-  const text = onCancel ? editText : savedDraft?.text ?? '';
-  const attachments = onCancel ? editAttachments : savedDraft?.attachments ?? [];
-  const setText = update => onCancel ? setEditText(update) : setComposerDraft(draftKey, 'text', update);
-  const setAttachments = update => onCancel ? setEditAttachments(update) : setComposerDraft(draftKey, 'attachments', update);
+  const [editor, setEditor] = useState(() => createComposerDraft(initialText));
+  const editorRef = useRef(editor);
+  const changeEditor = transform => {
+    const next = transform(editorRef.current);
+    editorRef.current = next;
+    setEditor(next);
+    return next;
+  };
+  const currentDraft = onCancel ? editor : savedDraft;
+  const text = currentDraft?.text ?? '';
+  const attachments = currentDraft?.attachments ?? [];
+  const setText = update => onCancel ? changeEditor(draft => updateComposerDraft(draft, 'text', update)) : setComposerDraft(draftKey, 'text', update);
+  const setAttachments = (update, token) => onCancel ? changeEditor(draft => updateComposerDraft(draft, 'attachments', update, token)) : setComposerDraft(draftKey, 'attachments', update, token);
   const [dragging, setDragging] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
   const [pi, setPi] = useState([]);
@@ -307,22 +315,28 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   const pickCommand = c => { setText(`/${c.name} `); ref.current?.focus(); };
 
   const add = async files => {
+    // Capture once for the whole batch, before any read. Navigation preserves this
+    // token; sending, recovering, or deleting the originating draft invalidates it.
+    const token = onCancel ? draftReadToken(changeEditor(draft => updateComposerDraft(draft, 'attachments', list => list))) : captureComposerDraft(draftKey);
     for (const file of files) {
-      try { const att = await attachmentFromFile(file); setAttachments(list => [...list, { ...att, key: Math.random().toString(36).slice(2) }]); }
+      try { const att = await attachmentFromFile(file); setAttachments(list => [...list, { ...att, key: Math.random().toString(36).slice(2) }], token); }
       catch (e) { notify(e.message, 'error'); }
     }
   };
   // Clear at once and let the backend work in the background: a slow command (e.g. /goal starting a
   // run) must not block the next message. The draft comes back if sending fails.
   const submit = async () => {
-    const value = text.trim();
-    if (!value && !attachments.length) return; // the box is cleared at once, so a repeat Enter is a no-op
-    const sent = attachments;
-    setText(''); setAttachments([]);
-    try { await onSubmit(value, sent.map(({ preview, key, ...a }) => a)); }
+    let receipt;
+    if (onCancel) {
+      const taken = takeDraft(editorRef.current);
+      if (taken) { receipt = taken.receipt; changeEditor(() => taken.next); }
+    } else receipt = takeComposerDraft(draftKey);
+    if (!receipt) return; // read and consume atomically, even before React rerenders
+    try { await onSubmit(receipt.text.trim(), receipt.attachments.map(({ preview, key, ...a }) => a)); }
     catch (e) {
       notify(e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), 'error');
-      setText(t => t || value); setAttachments(list => list.length ? list : sent);
+      if (onCancel) changeEditor(draft => restoreDraft(draft, receipt));
+      else restoreComposerDraft(draftKey, receipt);
     }
   };
   const canSend = !!(text.trim() || attachments.length);
@@ -339,6 +353,11 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
       onDragOver={e => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); setDragging(true); } }}
       onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setDragging(false); }}
       onDrop={e => { e.preventDefault(); setDragging(false); add([...e.dataTransfer.files]); }}>
+      {!!currentDraft?.recoveries.length && <button type="button" className="button ghost small"
+        title="Restore a saved message; your current message is kept separately"
+        onClick={() => onCancel ? changeEditor(recoverDraft) : recoverComposerDraft(draftKey)}>
+        Recover saved message ({currentDraft.recoveries.length})
+      </button>}
       {commands.length > 0 && <SlashMenu items={commands} index={slashIndex} onPick={pickCommand} />}
       {attachments.length > 0 && (
         <div className="attachments">

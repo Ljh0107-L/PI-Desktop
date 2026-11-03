@@ -53,11 +53,22 @@ export class CursorDesktopSession {
     const id = cursorCurrentModel(state) ?? this.model?.id;
     if (id) this.model = { provider: 'cursor', id, name: this.models.find(model => model.id === id)?.name ?? id };
   }
+  async changeConfiguration(operation, busyMessage) {
+    if (this.streaming) throw new Error(busyMessage);
+    // RPC handlers run concurrently. Reserve the session before the first await,
+    // and reject overlaps explicitly rather than acknowledge a lost change/turn.
+    if (this.configuring) throw new Error('Cursor configuration is changing; wait for it to finish and retry');
+    this.configuring = true;
+    try { return await operation(); }
+    finally { this.configuring = false; }
+  }
   async setModel(modelId) {
-    if (this.streaming) throw new Error('Wait for Cursor to finish before switching models');
+    return this.changeConfiguration(() => this.applyModel(modelId), 'Wait for Cursor to finish before switching models');
+  }
+  async applyModel(modelId) {
     if (!this.models.some(model => model.id === modelId)) throw new Error('This model is not available from Cursor CLI');
     if (this.modelConfig) {
-      await this.setConfigOption(this.modelConfig.id, modelId);
+      await this.applyConfigOption(this.modelConfig.id, modelId);
       if (this.model?.id !== modelId) throw new Error('Cursor did not apply the requested model');
     } else {
       await this.client.request('session/set_model', { sessionId: this.sessionId, modelId });
@@ -66,7 +77,9 @@ export class CursorDesktopSession {
     this.saveState();
   }
   async setConfigOption(configId, value) {
-    if (this.streaming) throw new Error('Wait for Cursor to finish before changing configuration');
+    return this.changeConfiguration(() => this.applyConfigOption(configId, value), 'Wait for Cursor to finish before changing configuration');
+  }
+  async applyConfigOption(configId, value) {
     const option = this.configOptions?.find(option => option.id === configId);
     if (!option) throw new Error('This configuration option is not available from Cursor CLI');
     if (option.type === 'boolean' ? typeof value !== 'boolean' : !cursorSelectValues(option).some(item => item.value === value)) throw new Error('This configuration value is not available from Cursor CLI');
@@ -187,6 +200,7 @@ export class CursorDesktopSession {
   }
   prompt(message, images = []) {
     if (this.streaming) throw new Error('Cursor is still working; stop the current turn first');
+    if (this.configuring) throw new Error('Cursor configuration is changing; wait for it to finish and retry');
     if (/^\/(goal|compact|fork)(\s|$)/.test(message)) throw new Error('This Pi command is not available in Cursor sessions');
     if (images.length && !this.client.capabilities?.promptCapabilities?.image) throw new Error('This Cursor CLI does not advertise image prompts');
     this.streaming = true; this.tools = new Map();

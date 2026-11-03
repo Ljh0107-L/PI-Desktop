@@ -2,6 +2,15 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.1.34 — Reliable drafts and Cursor controls
+
+- **Session drafts stay separate.** Text and images survive navigation. Late image reads cannot leak into the next new conversation or resurrect a deleted draft. Drafts remain in memory, not across app restarts.
+- **Safe failed-send recovery.** Text and attachments restore as one message. If you have already edited the next draft, a Recover saved message button keeps both messages separate instead of mixing new text with old images.
+- **Cursor configuration is real and race-safe.** Reasoning, Fast and other controls use only advertised ACP options. Overlapping configuration changes or prompts are explicitly rejected while a configuration change is pending; the draft is retained for retry. Model labels and reported context usage are corrected, with unknown usage shown honestly.
+- **Official YOLO mode.** Desktop-launched local and SSH Cursor processes use `--force` (`--yolo`), respecting Cursor's explicit deny rules. Standalone CLI settings and MCP approval policy are unchanged. Existing running Cursor processes must restart to adopt the launch flag.
+- **Cleaner UI and more reliable interruption.** Removes the redundant Cursor information card, prevents optional Cursor installation from blocking ordinary Pi connections, and fixes busy/settled races when sending a replacement prompt.
+- **CI regressions.** Added draft lifetime, atomic recovery, delayed configuration and prompt overlap coverage. Tests, app builds and packaging run only in GitHub CI, never on the user's workstation. Official CLI startup probes do not validate real-account tool approval behavior.
+
 ## 0.1.33 — A compact Cursor setup and your own model shortlist
 
 - **Less setup text.** Cursor settings are now one card: On/Off, API key, selected models, machine, and one collapsed Advanced row. The long explanatory paragraphs are gone; required information appears only when it matters.

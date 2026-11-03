@@ -1,4 +1,5 @@
 // Client-side state for the renderer: one immutable snapshot, updated from IPC events.
+import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerDraft as takeDraft, restoreComposerDraft as restoreDraft, recoverComposerDraft as recoverDraft } from './composer-draft.js';
 import { relativeSessionPath } from './file-paths.js';
 import { useRef, useSyncExternalStore } from 'react';
 import { applyEvent, emptyTranscript, fromHistory, rewindTo } from './transcript.js';
@@ -181,15 +182,33 @@ export async function loadCatalog() {
 }
 
 export const setDraft = patch => set(s => ({ draft: { ...s.draft, ...patch } }));
-// Update by captured conversation key, including late file reads and failed sends after navigation.
-export const setComposerDraft = (key, field, update) => set(s => {
-  const previous = s.composerDrafts[key] ?? { text: '', attachments: [] };
-  const next = { ...previous, [field]: typeof update === 'function' ? update(previous[field]) : update };
-  const composerDrafts = { ...s.composerDrafts };
-  if (!next.text && !next.attachments.length) delete composerDrafts[key];
-  else composerDrafts[key] = next;
-  return { composerDrafts };
-});
+// Retain empty entries as lifetime/revision guards. Only session deletion removes them.
+const changeComposerDraft = (key, transform) => {
+  let result;
+  set(s => {
+    const previous = s.composerDrafts[key];
+    result = transform(previous);
+    return result === previous ? {} : { composerDrafts: { ...s.composerDrafts, [key]: result } };
+  });
+  return result;
+};
+// Beginning a read counts as an edit for failure recovery, but keeps the generation
+// so parallel reads (and reads across navigation) can still complete together.
+export const captureComposerDraft = key => draftReadToken(changeComposerDraft(key, draft =>
+  updateComposerDraft(draft ?? createComposerDraft(), 'attachments', list => list)));
+export const setComposerDraft = (key, field, update, token) => changeComposerDraft(key, draft =>
+  updateComposerDraft(token ? draft : draft ?? createComposerDraft(), field, update, token));
+export const takeComposerDraft = key => {
+  let receipt;
+  changeComposerDraft(key, draft => {
+    const taken = takeDraft(draft);
+    receipt = taken?.receipt;
+    return taken?.next ?? draft;
+  });
+  return receipt;
+};
+export const restoreComposerDraft = (key, receipt) => changeComposerDraft(key, draft => restoreDraft(draft, receipt));
+export const recoverComposerDraft = key => changeComposerDraft(key, recoverDraft);
 export const setView = patch => set(patch);
 // Inspect child activity in the existing right panel, only after an explicit click.
 // Keep file tabs/selection intact so closing a preview returns to the same child.

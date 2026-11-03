@@ -30,11 +30,20 @@ export async function checkSessionEngineIsolation({ app, page, session }) {
     await page.locator('.composer').evaluate(element => {
       const transfer = new DataTransfer();
       const bytes = Uint8Array.from(atob('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII='), c => c.charCodeAt(0));
-      transfer.items.add(new File([bytes], 'draft.png', { type: 'image/png' }));
+      const file = new File([bytes], 'draft.png', { type: 'image/png' });
+      // Hold the file read across a real composer unmount/navigation.
+      const arrayBuffer = File.prototype.arrayBuffer;
+      File.prototype.arrayBuffer = function () {
+        if (this.name !== 'draft.png') return arrayBuffer.call(this);
+        File.prototype.arrayBuffer = arrayBuffer;
+        return new Promise(resolve => { window.__finishDraftRead = () => resolve(bytes.buffer); });
+      };
+      transfer.items.add(file);
       element.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: transfer }));
     });
-    await page.locator('.attachment.image img').waitFor();
     await page.click('.nav-item.new');
+    await page.evaluate(() => { window.__finishDraftRead(); delete window.__finishDraftRead; });
+    await page.waitForFunction(id => window.__pideskState().composerDrafts[id]?.attachments.length === 1, session.id);
     assert.equal(await page.locator('.composer textarea').inputValue(), 'Unsent new conversation');
     assert.equal(await page.locator('.attachment').count(), 0, 'attachments must not leak between sessions');
     await page.locator('.composer textarea').fill('');

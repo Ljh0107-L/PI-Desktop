@@ -102,6 +102,76 @@ test('advertised reasoning and boolean Fast controls use exact ACP config IDs an
   assert.ok(f.events.some(event => event.type === 'cursor_model_changed' && event.cursorConfigOptions));
 });
 
+// Hold an ACP setter before sending it, without timing-dependent sleeps.
+function holdSetter(client, method) {
+  const request = client.request.bind(client);
+  let release;
+  const gate = new Promise(resolve => { release = resolve; });
+  const calls = [];
+  client.request = async (name, ...args) => {
+    calls.push(name);
+    if (name === method) {
+      const error = await gate;
+      if (error) throw error;
+    }
+    return request(name, ...args);
+  };
+  return { calls, release };
+}
+
+for (const configModels of [false, true]) {
+  test(`pending Cursor model setter rejects overlapping prompts and changes (${configModels ? 'config' : 'legacy'})`, { timeout: 15000 }, async t => {
+    const f = fixture(t, { configModels }); await f.desktop.start();
+    const method = configModels ? 'session/set_config_option' : 'session/set_model';
+    const held = holdSetter(f.client, method);
+    const changing = f.desktop.request('set_model', { provider: 'cursor', modelId: 'cursor-test-b' });
+    const before = f.desktop.messages().length;
+    await assert.rejects(f.desktop.request('prompt', { message: 'must retry' }), /configuration is changing/);
+    await assert.rejects(f.desktop.request('set_model', { provider: 'cursor', modelId: 'cursor-test-a' }), /configuration is changing/);
+    if (configModels) {
+      await assert.rejects(f.desktop.request('set_config_option', { configId: 'speed', value: true }), /configuration is changing/);
+      await assert.rejects(f.desktop.request('set_thinking_level', { level: 'high' }), /configuration is changing/);
+    }
+    assert.deepEqual(held.calls, [method]);
+    assert.equal(f.desktop.messages().length, before);
+    assert.equal(f.desktop.streaming, false);
+    await f.desktop.abort(); // No active turn: must not cancel or unlock the setter.
+    assert.throws(() => f.desktop.prompt('still blocked'), /configuration is changing/);
+    held.release(); await changing;
+    assert.deepEqual(f.desktop.prompt('retry'), { disposition: 'started' });
+    await f.desktop.turn;
+    assert.equal(f.desktop.messages().at(-1).model, 'cursor-test-b');
+    assert.match(f.desktop.messages().at(-1).content[0].text, /cursor-test-b/);
+    await f.desktop.setModel('cursor-test-a');
+    assert.equal(f.desktop.state().model.id, 'cursor-test-a');
+  });
+}
+
+test('delayed Cursor config failure releases reservation and allows explicit retries', { timeout: 15000 }, async t => {
+  const f = fixture(t, { configModels: true }); await f.desktop.start();
+  const held = holdSetter(f.client, 'session/set_config_option');
+  const changing = f.desktop.request('set_config_option', { configId: 'speed', value: true });
+  const failed = assert.rejects(changing, /fixture setter failure/);
+  await assert.rejects(f.desktop.request('set_config_option', { configId: 'reasoning-effort', value: 'high' }), /configuration is changing/);
+  assert.throws(() => f.desktop.prompt('blocked'), /configuration is changing/);
+  held.release(new Error('fixture setter failure')); await failed;
+  assert.equal(f.desktop.state().cursorConfigOptions.find(option => option.id === 'speed').currentValue, false);
+  // Replace the deliberately failed transport gate, then retry each operation.
+  delete f.client.request;
+  await assert.rejects(f.desktop.setConfigOption('speed', 'invalid'), /not available/);
+  await f.desktop.setConfigOption('speed', true);
+  await f.desktop.setModel('cursor-test-b');
+  f.desktop.prompt('hold');
+  await assert.rejects(f.desktop.setConfigOption('speed', false), /Wait for Cursor to finish before changing configuration/);
+  await assert.rejects(f.desktop.setModel('cursor-test-a'), /Wait for Cursor to finish before switching models/);
+  assert.throws(() => f.desktop.prompt('busy'), /Cursor is still working; stop the current turn first/);
+  await f.desktop.abort();
+  assert.equal(f.desktop.messages().at(-1).stopReason, 'aborted');
+  await f.desktop.setConfigOption('speed', false);
+  f.desktop.prompt('recovered'); await f.desktop.turn;
+  assert.equal(f.desktop.messages().at(-1).stopReason, 'stop');
+});
+
 test('context reflects only real ACP usage, including idle updates and history restore', { timeout: 15000 }, async t => {
   const f = fixture(t); await f.desktop.start();
   assert.equal((await f.desktop.request('get_session_stats')).contextUsage, null);
