@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, rmSync, symlinkSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -131,6 +133,20 @@ test('cancelling a pending Cursor permission clears desktop and relay question s
   assert.equal(f.desktop.dialogs.size, 0);
   assert.ok(f.events.some(event => event.type === 'cursor_questions_cleared'));
   assert.equal(f.desktop.streaming, false);
+});
+
+test('Cursor close releases inherited pipes even when a detached helper retains them', { timeout: 7000 }, async () => {
+  const client = new CursorAcp({ command: 'unused', cwd: '/tmp' });
+  const child = new EventEmitter(), signals = [];
+  child.stdin = new PassThrough(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+  child.kill = signal => { signals.push(signal); return true; };
+  // Model a direct process which has exited but cannot emit close until its pipes close.
+  child.stderr.once('close', () => { if (child.stdout.destroyed) child.emit('close'); });
+  client.child = child;
+  client.exit = new Promise(resolve => child.once('close', resolve));
+  await client.close();
+  assert.deepEqual(signals, ['SIGTERM', 'SIGKILL']);
+  assert.ok(child.stdin.destroyed && child.stdout.destroyed && child.stderr.destroyed);
 });
 
 test('Cursor EOF is an error, never successful completion', { timeout: 15000 }, async t => {

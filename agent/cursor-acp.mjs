@@ -156,7 +156,14 @@ export class CursorAcp extends EventEmitter {
     };
     // The separate process group also contains tools spawned by an unresponsive CLI.
     kill('SIGTERM');
-    const timer = setTimeout(() => kill('SIGKILL'), 2000);
+    const timer = setTimeout(() => {
+      kill('SIGKILL');
+      // A detached helper or SSH control master may retain inherited pipe handles
+      // after the direct child exits. Do not wait forever for those pipes to drain.
+      this.child.stdin.destroy();
+      this.child.stdout.destroy();
+      this.child.stderr.destroy();
+    }, 2000);
     try { await this.exit; } finally { clearTimeout(timer); }
   }
 }
