@@ -71,16 +71,21 @@ export function RightPanel({ session }) {
   const [detailWidth, detailHandle] = useResizable('subagent-inspector', 480, 300, 680, 'left');
   const context = stats?.contextUsage;
   const percent = Number.isFinite(context?.percent) ? context.percent : null;
-  const contextLabel = Number.isFinite(context?.tokens)
-    ? `${formatTokens(context.tokens)} / ${Number.isFinite(context?.contextWindow) ? formatTokens(context.contextWindow) : '—'}`
-    : percent != null ? `${Math.round(percent)}%` : 'Not reported';
+  // Cursor CLI reports no usage; its adapter estimates the conversation's own share (no window, no meter).
+  const estimated = !!context?.estimated && Number.isFinite(context?.tokens);
+  const contextLabel = estimated ? `~${formatTokens(context.tokens)} tokens`
+    : Number.isFinite(context?.tokens) ? `${formatTokens(context.tokens)} / ${Number.isFinite(context?.contextWindow) ? formatTokens(context.contextWindow) : '—'}`
+    : percent != null ? `${Math.round(percent)}%` : session.engine === 'cursor' ? '—' : 'Not reported';
+  const contextTitle = estimated
+    ? 'Estimated from this conversation’s messages and tool output. Cursor CLI does not report context usage, so its system prompt, rules and compaction are not included.'
+    : 'Context usage reported by the agent';
   if (task) return <aside className="right-panel subagent-inspector" style={{ width: detailWidth }}>
     {detailHandle}<SubagentDetail key={`${session.id}:${task.key}`} sessionId={session.id} task={task} />
   </aside>;
   return (
     <aside className="right-panel">
       <Card title="Context" aside={<>
-        <span className="muted" title="Context usage reported by the agent">{contextLabel}</span>
+        <span className="muted" title={contextTitle}>{contextLabel}</span>
         {percent != null && <span className="meter" title={`${Math.round(percent)}% of the context window`}><span style={{ width: `${Math.max(0, Math.min(100, percent))}%` }} /></span>}
       </>} />
       <UsageCard transcript={transcript} />

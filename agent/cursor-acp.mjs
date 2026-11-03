@@ -44,11 +44,72 @@ export const cursorConfigOptions = result => (result?.configOptions ?? []).filte
 export const cursorSelectValues = option => (option?.options ?? []).flatMap(value => value.options ?? [value]);
 export const cursorModelConfig = result => cursorConfigOptions(result).find(option => option.type === 'select' && (option.category === 'model' || option.id === 'model'));
 export const cursorCurrentModel = result => cursorModelConfig(result)?.currentValue ?? result?.models?.currentModelId;
-export function cursorModels(result, capabilities = {}) {
+// Desktop conversations always run in Cursor's Agent mode; Ask/Plan are not offered.
+export const cursorModeOption = options => (options ?? []).find(option => option.category === 'mode' || option.id === 'mode');
+// Cursor can split reasoning into a thinking switch and a level (Claude: thinking on/off plus
+// reasoning_effort). The desktop offers one Pi-style effort instead: Off (when there is a switch),
+// then the levels. Its id is the desktop's own; the adapter maps a choice to Cursor's options.
+export const CURSOR_EFFORT_ID = 'pidesk-effort';
+const isSwitch = option => option.type === 'boolean' || cursorSelectValues(option).map(value => value.value).sort().join() === 'false,true';
+const switchedOn = option => String(option.currentValue) === 'true';
+function effortParts(options) {
+  const thoughts = (options ?? []).filter(option => option.category === 'thought_level' && (option.type === 'select' || option.type === 'boolean'));
+  return { toggle: thoughts.find(isSwitch) ?? null, level: thoughts.find(option => option.type === 'select' && !isSwitch(option)) ?? null };
+}
+export function cursorThoughtOption(options) {
+  const { toggle, level } = effortParts(options);
+  if (!toggle && !level) return null;
+  const levels = level ? cursorSelectValues(level).map(value => ({ value: value.value, name: value.name || value.value })) : [{ value: 'on', name: 'On' }];
+  return {
+    id: CURSOR_EFFORT_ID, name: 'Reasoning effort', category: 'thought_level', type: 'select',
+    currentValue: toggle && !switchedOn(toggle) ? 'off' : level ? level.currentValue : 'on',
+    options: [...(toggle ? [{ value: 'off', name: 'Off' }] : []), ...levels],
+  };
+}
+// The next Cursor option change towards effort `value` ([] when it is selected, null when the model
+// lacks it). Applied one at a time: turning thinking on can reveal the level option.
+export function cursorEffortChange(options, value) {
+  const effort = cursorThoughtOption(options);
+  if (!effort?.options.some(option => option.value === value)) return null;
+  const { toggle, level } = effortParts(options);
+  const turn = on => [toggle.id, toggle.type === 'boolean' ? on : String(on)];
+  if (value === 'off') return switchedOn(toggle) ? turn(false) : [];
+  if (toggle && !switchedOn(toggle)) return turn(true);
+  return level && value !== 'on' && level.currentValue !== value ? [level.id, value] : [];
+}
+// The per-model settings the desktop shows: one reasoning effort and Cursor's other model parameters.
+export const cursorModelSettings = options => {
+  const effort = cursorThoughtOption(options);
+  return [...(options ?? []).filter(option => option.category !== 'mode' && option.id !== 'mode' && option.category !== 'model' && option.id !== 'model' && option.category !== 'thought_level'), ...(effort ? [effort] : [])];
+};
+// `listed`: Cursor's cursor/list_available_models result, which carries each model's own parameters
+// and defaults, so a new conversation can offer the right efforts before its session exists.
+export function cursorModels(result, capabilities = {}, listed = null) {
   const config = cursorModelConfig(result);
   const options = config ? cursorSelectValues(config).map(option => ({ modelId: option.value, name: option.name })) : result?.models?.availableModels ?? [];
-  const thought = cursorConfigOptions(result).some(option => option.category === 'thought_level');
-  return options.map(m => ({ provider: 'cursor', id: m.modelId, name: m.name || m.modelId, reasoning: thought && m.modelId === cursorCurrentModel(result), input: capabilities.promptCapabilities?.image ? ['text', 'image'] : ['text'] })).filter(m => typeof m.id === 'string' && m.id);
+  const current = cursorCurrentModel(result);
+  const perModel = new Map((Array.isArray(listed?.models) ? listed.models : []).filter(model => typeof model?.value === 'string').map(model => [model.value, cursorModelSettings(cursorConfigOptions(model))]));
+  return options.map(m => {
+    const settings = perModel.get(m.modelId) ?? (m.modelId === current ? cursorModelSettings(cursorConfigOptions(result)) : null);
+    return { provider: 'cursor', id: m.modelId, name: m.name || m.modelId, reasoning: !!cursorThoughtOption(settings), ...(settings ? { configOptions: settings } : {}), input: capabilities.promptCapabilities?.image ? ['text', 'image'] : ['text'] };
+  }).filter(m => typeof m.id === 'string' && m.id);
+}
+// cursor/list_available_models alone (a pre-started CLI has no session yet): each model's settings.
+export const cursorListedModels = listed => (Array.isArray(listed?.models) ? listed.models : [])
+  .filter(model => typeof model?.value === 'string' && model.value)
+  .map(model => ({ id: model.value, name: model.name || model.value, configOptions: cursorModelSettings(cursorConfigOptions(model)) }));
+// Cursor's ACP reports no context usage: no usage_update, nothing in the prompt result. A rough
+// figure for what the conversation itself contributes: ~4 characters per token for ASCII text and
+// ~1 token per CJK character.
+export function estimateTokens(text) {
+  let ascii = 0, wide = 0, other = 0;
+  for (const char of String(text ?? '')) {
+    const code = char.codePointAt(0);
+    if (code < 0x80) ascii++;
+    else if ((code >= 0x3000 && code <= 0x9fff) || (code >= 0xac00 && code <= 0xd7af) || (code >= 0xff00 && code <= 0xffef)) wide++;
+    else other++;
+  }
+  return Math.ceil(ascii / 4 + wide + other / 2);
 }
 
 export class CursorAcp extends EventEmitter {
@@ -142,7 +203,7 @@ export class CursorAcp extends EventEmitter {
     }
   }
   rpcError(method, error) {
-    const labels = { initialize: 'initialization', authenticate: 'authentication', 'session/new': 'session creation', 'session/load': 'session restore', 'session/set_model': 'model selection', 'session/set_config_option': 'model selection', 'session/prompt': 'prompt' };
+    const labels = { initialize: 'initialization', authenticate: 'authentication', 'session/new': 'session creation', 'session/load': 'session restore', 'session/set_model': 'model selection', 'session/set_config_option': 'model selection', 'session/prompt': 'prompt', 'cursor/list_available_models': 'model discovery' };
     const summary = error?.message || 'Cursor request failed';
     const detail = typeof error?.data?.message === 'string' ? error.data.message : '';
     const code = Number.isFinite(error?.code) ? error.code : undefined;
@@ -155,9 +216,10 @@ export class CursorAcp extends EventEmitter {
     for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(this.rpcError(pending.method, error)); }
     this.pending.clear();
   }
-  async openSession(sessionId) {
+  // `cwd` defaults to the CLI's own directory; a pre-started CLI opens its conversation elsewhere.
+  async openSession(sessionId, cwd = this.cwd) {
     if (sessionId && !this.capabilities?.loadSession) throw new Error('This Cursor CLI cannot resume sessions. Update Cursor CLI; the existing history has not been replaced.');
-    const result = await this.request(sessionId ? 'session/load' : 'session/new', { ...(sessionId ? { sessionId } : {}), cwd: this.cwd, mcpServers: [] });
+    const result = await this.request(sessionId ? 'session/load' : 'session/new', { ...(sessionId ? { sessionId } : {}), cwd, mcpServers: [] });
     this.sessionId = sessionId || result.sessionId;
     if (!this.sessionId) throw new Error('Cursor CLI did not return a session ID');
     return result;

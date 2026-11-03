@@ -15,6 +15,7 @@ import { UsageLedger } from './usage.mjs';
 import { cursorCommand } from '../../agent/cursor-acp.mjs';
 import { managedCursor } from '../../core/cursor-release.mjs';
 import { CursorRuntime } from './cursor-runtime.mjs';
+import { stageExtensions } from './extensions.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const piPackage = join(root, 'node_modules/@earendil-works/pi-coding-agent');
@@ -173,6 +174,7 @@ const api = {
     }
     store.saveCursorSettings({ enabled, command: managedCursor(command) ? '' : command.trim(), apiKey, clearKey });
     if (invalidateModels) store.clearCursorModels();
+    if (invalidateModels || !!enabled !== !!previousCursor?.enabled) manager.cursorSettingsChanged();
     manager.prepared.clear();
     if (invalidateModels) cursorModelCache.clear();
     return publicSettings();
@@ -343,9 +345,13 @@ app.whenReady().then(() => {
   if (process.platform === 'darwin' && !app.isPackaged) app.dock?.setIcon(nativeImage.createFromPath(join(root, 'build/icon.png')));
   store = new Store(app.getPath('userData'), safeStorage, { insecureTestStorage: process.env.PIDESK_INSECURE_TEST_STORAGE === '1' });
   syncCompactionReserves();
+  // Pi loads the bridge in milliseconds from outside this ES module package (extensions.mjs).
+  let bridgePath = join(root, 'agent/pidesk-bridge.js');
+  try { bridgePath = stageExtensions(join(root, 'agent'), join(app.getPath('userData'), 'ext')); }
+  catch (error) { console.error('Pi Desktop: could not stage the bridge, loading it in place:', error.message); }
   manager = new SessionManager({
     store, environments, piVersion,
-    bridgePath: join(root, 'agent/pidesk-bridge.js'),
+    bridgePath,
     relayPath: join(root, 'agent/pidesk-relay.mjs'),
     piPackageDir: join(root, 'node_modules/@earendil-works/pi-coding-agent'),
     cacheDir: join(app.getPath('userData'), 'downloads'),
@@ -361,6 +367,7 @@ app.whenReady().then(() => {
   usage = new UsageLedger({ path: join(app.getPath('userData'), 'usage.jsonl'), sessionsDir: join(app.getPath('userData'), 'agent', 'sessions') });
   manager.on('event', ({ event }) => { if (event.type === 'message_end') usage.record(event.message); });
   manager.on('environments-changed', () => send('environments', environments()));
+  manager.on('cursor-models', models => { try { if (store.mergeCursorModelSettings(models)) send('settings', publicSettings()); } catch { /* the cached list stays usable */ } });
   for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'rewound', 'notice', 'environment', 'goal']) manager.on(channel, payload => send(channel, payload));
   manager.on('sessions', () => send('sessions', manager.list()));
   createWindow();

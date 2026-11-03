@@ -66,6 +66,13 @@ try {
     assert.equal(await page.locator('.cursor-model-menu .menu-item', { hasText: 'Cursor Test C' }).count(), 0, 'unselected models stay out of the conversation menu');
     assert.equal(await page.locator('.cursor-model-menu .menu-scroll .menu-item').count(), 2);
     await page.locator('.cursor-model-menu .menu-item', { hasText: 'Cursor Test B' }).click({ timeout: 5000 });
+    // A new Cursor conversation offers the model's efforts (Cursor's default first), like Pi's.
+    // Cursor's default first; afterwards the effort chosen for the previous conversation.
+    assert.equal(await page.locator('.effort-trigger').innerText(), environmentId === 'local' ? 'Medium' : 'High');
+    await page.locator('.effort-trigger').click();
+    assert.deepEqual(await page.locator('.popover .menu-item .menu-label').allTextContents(), ['Off', 'Medium', 'High'], 'a thinking switch and its levels form one Pi-style effort');
+    await page.locator('.popover .menu-item', { hasText: 'High' }).click();
+    assert.equal(await page.getByRole('button', { name: 'Mode', exact: true }).count(), 0, 'Agent mode is fixed, never offered');
     await send(`hello ${environmentId}`);
     await page.locator('.session-main .markdown', { hasText: `Cursor (cursor-test-b): 回复 hello ${environmentId}` }).waitFor({ timeout: 90000 });
     await idle();
@@ -74,29 +81,37 @@ try {
     assert.equal(record.engine, 'cursor'); assert.equal(record.environmentId, environmentId);
     assert.equal(await page.getByRole('button', { name: 'Model', exact: true }).innerText(), 'Cursor Test B', 'selected model uses the catalogue display name after session creation');
     assert.equal(await page.locator('.right-panel .panel-card', { hasText: 'Tools, context and authentication' }).count(), 0, 'redundant Cursor information card is removed');
-    assert.equal(await page.locator('.effort-trigger').count(), 0);
+    assert.equal(await page.locator('.effort-trigger').innerText(), 'High', 'the chosen effort applies to the new conversation');
+    await send('mode-status');
+    await page.locator('.session-main .markdown', { hasText: 'Mode: agent · effort: high' }).waitFor(); await idle();
     if (environmentId === 'local') {
       // Renderer contract regression: use explicit advertised values, never a hard-coded effort list.
       const sessions = await page.evaluate(() => window.__pideskState().sessions);
       const advertised = sessions.map(item => item.id !== id ? item : { ...item, cursorConfigOptions: [
         { id: 'fixture-thought', name: 'Reasoning', category: 'thought_level', type: 'select', currentValue: 'deep', options: [{ value: 'deep', name: 'Deep' }, { value: 'brief', name: 'Brief' }] },
         { id: 'fixture-fast', name: 'Fast', type: 'boolean', currentValue: true },
+        { id: 'mode', name: 'Mode', category: 'mode', type: 'select', currentValue: 'agent', options: [{ value: 'agent', name: 'Agent' }, { value: 'ask', name: 'Ask' }] },
       ] });
       const publish = payload => app.evaluate(({ BrowserWindow }, payload) => BrowserWindow.getAllWindows()[0].webContents.send('pidesk:event', { channel: 'sessions', payload }), payload);
       try {
         await publish(advertised);
-        await page.getByRole('combobox', { name: 'Reasoning', exact: true }).waitFor();
-        assert.equal(await page.getByRole('combobox', { name: 'Reasoning', exact: true }).inputValue(), 'deep');
-        assert.deepEqual(await page.getByRole('combobox', { name: 'Reasoning', exact: true }).locator('option').allTextContents(), ['Deep', 'Brief']);
-        assert.equal(await page.getByRole('button', { name: 'Fast', exact: true }).getAttribute('aria-pressed'), 'true');
+        await page.locator('.effort-trigger', { hasText: 'Deep' }).waitFor();
+        await page.locator('.effort-trigger').click();
+        assert.deepEqual(await page.locator('.popover .menu-item .menu-label').allTextContents(), ['Deep', 'Brief']);
+        await page.keyboard.press('Escape');
+        assert.equal(await page.getByRole('button', { name: 'Fast', exact: true }).innerText(), 'Fast · On');
+        assert.equal(await page.getByRole('button', { name: 'Mode', exact: true }).count(), 0, 'a mode option is never offered');
         await publish(advertised.map(item => item.id === id ? { ...item, streaming: true } : item));
-        await page.waitForFunction(() => document.querySelector('.cursor-config-control select')?.disabled);
+        await page.waitForFunction(() => document.querySelector('.effort-trigger')?.disabled);
         assert.equal(await page.getByRole('button', { name: 'Fast', exact: true }).isDisabled(), true);
         await publish(advertised.map(item => item.id === id ? { ...item, cursorConfigOptions: [] } : item));
-        await page.locator('.cursor-config-control').waitFor({ state: 'detached' });
+        await page.locator('.effort-trigger').waitFor({ state: 'detached' });
         assert.equal(await page.locator('.cursor-config-trigger').count(), 0, 'unsupported controls disappear on model capability change');
       } finally { await publish(sessions); }
     }
+    // Cursor reports no usage: the context figure is a labelled estimate, never a percentage.
+    await page.locator('.right-panel .panel-card', { hasText: 'Context' }).locator('.panel-card-aside', { hasText: /^~\d/ }).waitFor();
+    assert.equal(await page.locator('.right-panel .meter').count(), 0);
     assert.equal(await page.getByRole('button', { name: 'Edit message', exact: true }).count(), 0);
     assert.equal(await page.locator('.usage-table').count(), 0, 'unreported usage must not be fabricated');
     await page.getByRole('button', { name: 'Model', exact: true }).click();

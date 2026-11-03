@@ -9,11 +9,19 @@ let sessionId = 'cursor-fixture-session', modelId = models[0].modelId, turn, req
 const requiresKey = process.argv.includes('--require-key');
 const validKeys = ['cursor-fixture-key-one', 'cursor-fixture-key-two'];
 const configModels = process.argv.includes('--config-models');
-let thoughtLevel = 'medium', fastMode = false;
-const modelState = () => configModels ? { configOptions: [{ id: 'model-choice', category: 'model', type: 'select', name: 'Model', currentValue: modelId, options: [{ group: 'fixture', name: 'Fixture', options: models.map(model => ({ value: model.modelId, name: model.name })) }] }, ...(modelId === 'cursor-test-c' ? [] : [
-  { id: 'reasoning-effort', category: 'thought_level', type: 'select', name: 'Reasoning', currentValue: thoughtLevel, options: [{ value: 'medium', name: 'Medium' }, { value: 'high', name: 'High' }] },
-  { id: 'speed', category: 'model_config', type: 'boolean', name: 'Fast', currentValue: fastMode },
-])] } : { models: { availableModels: models, currentModelId: modelId } };
+let thoughtLevel = 'medium', fastMode = false, thinking = true;
+// Like the official CLI, a session starts in the CLI's last mode (here: --initial-mode), not necessarily Agent.
+let mode = process.argv.includes('--initial-mode') ? process.argv[process.argv.indexOf('--initial-mode') + 1] : 'agent';
+// Tools work in the session's directory, which is not the CLI's own when it was started in advance.
+let sessionCwd = process.cwd();
+// cursor-test-b is shaped like Cursor's Claude models: a thinking switch plus an effort level.
+const modelSettings = (id, effort = 'medium', fast = false, on = true) => id === 'cursor-test-c' ? [] : [
+  ...(id === 'cursor-test-b' ? [{ id: 'thinking', category: 'thought_level', type: 'select', name: 'Thinking', currentValue: String(on), options: [{ value: 'false', name: 'Off' }, { value: 'true', name: 'On' }] }] : []),
+  { id: 'reasoning-effort', category: 'thought_level', type: 'select', name: 'Reasoning', currentValue: effort, options: [{ value: 'medium', name: 'Medium' }, { value: 'high', name: 'High' }] },
+  { id: 'speed', category: 'model_config', type: 'boolean', name: 'Fast', currentValue: fast },
+];
+const modeOption = () => ({ id: 'mode', name: 'Mode', category: 'mode', type: 'select', currentValue: mode, options: [{ value: 'agent', name: 'Agent' }, { value: 'plan', name: 'Plan' }, { value: 'ask', name: 'Ask' }] });
+const modelState = () => configModels ? { configOptions: [modeOption(), { id: 'model-choice', category: 'model', type: 'select', name: 'Model', currentValue: modelId, options: [{ group: 'fixture', name: 'Fixture', options: models.map(model => ({ value: model.modelId, name: model.name })) }] }, ...modelSettings(modelId, thoughtLevel, fastMode, thinking)] } : { models: { availableModels: models, currentModelId: modelId } };
 const pending = new Map();
 const update = update => send({ method: 'session/update', params: { sessionId, update } });
 const text = text => update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
@@ -33,8 +41,12 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
       if (process.env.CURSOR_API_KEY || process.env.CURSOR_AUTH_TOKEN) send({ id: p.id, error: { code: -32602, message: 'Invalid params', data: { message: 'Browser login must not be requested for a pre-authenticated API-key session' } } });
       else result(p.id, {});
       break;
+    case 'cursor/list_available_models':
+      if (!configModels) { send({ id: p.id, error: { code: -32601, message: `Unknown method ${p.method}` } }); break; }
+      result(p.id, { models: models.map(model => ({ value: model.modelId, name: model.name, configOptions: modelSettings(model.modelId) })) }); break;
     case 'session/new': case 'session/load':
       sessionId = p.params.sessionId || sessionId;
+      sessionCwd = p.params.cwd || sessionCwd;
       // A replay must not become a new assistant message in desktop history.
       if (p.method === 'session/load') text('REPLAY MUST BE IGNORED');
       result(p.id, { sessionId, ...modelState() }); break;
@@ -43,6 +55,8 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
       modelId = p.params.modelId; result(p.id, {}); break;
     case 'session/set_config_option':
       if (p.params.configId === 'model-choice') modelId = p.params.value;
+      else if (p.params.configId === 'mode' && ['agent', 'plan', 'ask'].includes(p.params.value)) mode = p.params.value;
+      else if (p.params.configId === 'thinking' && modelId === 'cursor-test-b' && ['true', 'false'].includes(p.params.value)) thinking = p.params.value === 'true';
       else if (p.params.configId === 'reasoning-effort') thoughtLevel = p.params.value;
       else if (p.params.configId === 'speed' && p.params.type === 'boolean') fastMode = p.params.value;
       else { send({ id: p.id, error: { code: -32602, message: 'Unknown configuration' } }); break; }
@@ -50,6 +64,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     case 'session/prompt': {
       turn = p.id;
       const prompt = p.params.prompt.map(c => c.text || '').join('');
+      if (prompt === 'mode-status') { text(`Mode: ${mode} · effort: ${modelId === 'cursor-test-b' && !thinking ? 'off' : thoughtLevel}`); finish(); break; }
       if (prompt === 'auth-status') { text(`Credential: ${process.env.CURSOR_API_KEY === validKeys[1] ? 'rotated' : process.env.CURSOR_API_KEY === validKeys[0] ? 'primary' : 'login'}`); finish(); break; }
       if (prompt === 'auth-error') {
         const secret = process.env.CURSOR_API_KEY || 'no-key';
@@ -61,7 +76,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
       if (prompt === 'hold') { text('Waiting for cancellation'); break; }
       if (prompt === 'usage') { update({ sessionUpdate: 'usage_update', used: 53000, size: 200000 }); text('Reported usage'); finish(); break; }
       if (prompt === 'permission-always') {
-        const memory = join(process.cwd(), 'fixture-native-permissions.json');
+        const memory = join(sessionCwd, 'fixture-native-permissions.json');
         if (existsSync(memory) && JSON.parse(readFileSync(memory, 'utf8')).sessionId === sessionId) { text('Native remembered approval'); finish(); break; }
         ask('session/request_permission', { sessionId, toolCall: { title: 'Read fixture file?', kind: 'read', locations: [{ path: '/fixture/file' }] }, options: [{ optionId: 'remember-fixture-read', name: 'Always allow reading /fixture/file in this session', kind: 'allow_always' }] }, answer => {
           if (answer.outcome.optionId === 'remember-fixture-read') writeFileSync(memory, JSON.stringify({ sessionId }));
@@ -79,7 +94,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
       }
       if (prompt === 'tool') {
         update({ sessionUpdate: 'tool_call', toolCallId: 'cursor-write', title: 'Write Cursor output', kind: 'edit', status: 'in_progress', rawInput: { path: 'cursor-output.md' } });
-        writeFileSync(join(process.cwd(), 'cursor-output.md'), '# Cursor output\n');
+        writeFileSync(join(sessionCwd, 'cursor-output.md'), '# Cursor output\n');
         update({ sessionUpdate: 'tool_call_update', toolCallId: 'cursor-write', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: 'Created cursor-output.md' } }] });
       }
       text(`Cursor (${modelId}): `); text(`回复 ${prompt}`);

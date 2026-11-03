@@ -3,7 +3,7 @@
 // Everything lives in one install root on the host (default ~/.pidesk):
 //   <root>/node   a portable Node.js, only if the host has no usable Node (>= 22.19)
 //   <root>/pi     Pi, installed with npm --ignore-scripts at the same version as the desktop
-//   <root>/ext    the bridge extension and the relay (uploaded over stdin, refreshed by hash)
+//   <root>/ext    the bridge extension, Cursor adapter and relay (uploaded over stdin, refreshed by hash)
 //   <root>/agent  Pi's agent directory (sessions, settings)
 //   <root>/run    the relay's socket and log;  <root>/tmp  TMPDIR for Pi and npm
 //
@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSyn
 import { dirname, relative } from 'node:path';
 import { join } from 'node:path';
 import { shellQuote, sshMuxArgs } from '../../core/transports.mjs';
+import { EXTENSION_FILES, EXTENSION_PACKAGE } from './extensions.mjs';
 
 const MIN_NODE = '22.19.0';
 const NEEDED_KB = 600 * 1024;                 // Pi + portable Node with headroom
@@ -227,7 +228,7 @@ if [ "$PI" != ${shellQuote(piVersion)} ]; then
   REG=$(${shellQuote(node.replace(/\/node$/, '/npm'))} config get registry 2>/dev/null); [ -n "$REG" ] || REG=https://registry.npmjs.org/
   command -v curl >/dev/null && curl -fsS -m 6 -o /dev/null "$REG" 2>/dev/null && echo 'registry=1'
 fi
-for f in cursor-acp.mjs pidesk-cursor.mjs pidesk-subagent.mjs pidesk-bridge.js pidesk-relay.mjs; do printf '%s=%s\n' "$f" "$( (sha256sum ${q}/ext/$f 2>/dev/null || shasum -a 256 ${q}/ext/$f 2>/dev/null) | cut -d' ' -f1)"; done
+for f in ${[...EXTENSION_FILES, 'pidesk-relay.mjs', 'package.json'].join(' ')}; do printf '%s=%s\n' "$f" "$( (sha256sum ${q}/ext/$f 2>/dev/null || shasum -a 256 ${q}/ext/$f 2>/dev/null) | cut -d' ' -f1)"; done
 true`;
 }
 
@@ -282,8 +283,13 @@ export async function prepareRemote(env, { piVersion, piPackageDir, bridgePath, 
   }
 
   const changed = [];
-  for (const [name, path] of [['cursor-acp.mjs', join(dirname(bridgePath), 'cursor-acp.mjs')], ['pidesk-cursor.mjs', join(dirname(bridgePath), 'pidesk-cursor.mjs')], ['pidesk-subagent.mjs', join(dirname(bridgePath), 'pidesk-subagent.mjs')], ['pidesk-bridge.js', bridgePath], ['pidesk-relay.mjs', relayPath]]) {
-    const content = readFileSync(path);
+  // package.json keeps the bridge out of any "type": "module" package above the root (extensions.mjs).
+  const files = [
+    ...EXTENSION_FILES.map(name => [name, readFileSync(name === 'pidesk-bridge.js' ? bridgePath : join(dirname(bridgePath), name))]),
+    ['pidesk-relay.mjs', readFileSync(relayPath)],
+    ['package.json', Buffer.from(EXTENSION_PACKAGE)],
+  ];
+  for (const [name, content] of files) {
     if (state[name]?.[0] !== createHash('sha256').update(content).digest('hex')) changed.push({ name, content: content.toString('base64') });
   }
   if (changed.length) {

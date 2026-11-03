@@ -26,6 +26,17 @@ const DEFAULT_SETTINGS = {
 const KEYCHAIN_SERVICE = 'Pi Desktop Keys';
 const security = args => execFileSync('/usr/bin/security', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 15000 }).trim();
 
+// A Cursor model's own settings (reasoning effort, other parameters) with Cursor's defaults, bounded.
+const text = (value, max = 300) => typeof value === 'string' && value ? value.slice(0, max) : undefined;
+const cleanCursorOptions = options => (Array.isArray(options) ? options : [])
+  .filter(o => o && typeof o.id === 'string' && o.id && o.id.length < 200 && (o.type === 'select' || o.type === 'boolean')).slice(0, 12)
+  .map(o => ({
+    id: o.id, name: text(o.name) ?? o.id, category: text(o.category, 60), type: o.type,
+    currentValue: typeof o.currentValue === 'string' ? o.currentValue.slice(0, 200) : typeof o.currentValue === 'boolean' ? o.currentValue : undefined,
+    ...(o.type === 'select' ? { options: (o.options ?? []).flatMap(v => v?.options ?? [v]).filter(v => v && typeof v.value === 'string' && v.value).slice(0, 30).map(v => ({ value: v.value.slice(0, 200), name: text(v.name) ?? v.value })) } : {}),
+  }));
+const cleanCursorModel = m => ({ id: m.id, name: text(m.name) ?? m.id, ...(Array.isArray(m.configOptions) ? { configOptions: cleanCursorOptions(m.configOptions) } : {}) });
+
 export class Store {
   #master = null;
   constructor(dir, safeStorage, { insecureTestStorage = false, keychainCommand = security } = {}) {
@@ -123,10 +134,22 @@ export class Store {
     }
   }
   saveCursorModels({ models, currentModelId }) {
-    const clean = (models ?? []).filter(m => m && typeof m.id === 'string' && m.id && m.id.length < 300).slice(0, 500).map(m => ({ id: m.id, name: typeof m.name === 'string' && m.name ? m.name.slice(0, 300) : m.id }));
+    const clean = (models ?? []).filter(m => m && typeof m.id === 'string' && m.id && m.id.length < 300).slice(0, 500).map(cleanCursorModel);
     const previous = this.settings.cursor;
     this.settings.cursor = { ...previous, models: clean, modelsAt: Date.now(), currentModelId: typeof currentModelId === 'string' ? currentModelId : undefined };
     try { this.saveSettings(); } catch (error) { this.settings.cursor = previous; throw error; }
+  }
+  // Each model's settings as a pre-started Cursor CLI lists them (efforts and their defaults), so a new
+  // conversation offers the right efforts. Only models already in the catalogue are updated.
+  mergeCursorModelSettings(models) {
+    const listed = new Map((Array.isArray(models) ? models : []).filter(m => m && typeof m.id === 'string' && Array.isArray(m.configOptions)).map(m => [m.id, cleanCursorOptions(m.configOptions)]));
+    const previous = this.settings.cursor;
+    if (!listed.size || !previous?.models?.some(m => listed.has(m.id))) return false;
+    const updated = previous.models.map(m => listed.has(m.id) ? { ...m, configOptions: listed.get(m.id) } : m);
+    if (JSON.stringify(updated) === JSON.stringify(previous.models)) return false;
+    this.settings.cursor = { ...previous, models: updated };
+    try { this.saveSettings(); } catch (error) { this.settings.cursor = previous; throw error; }
+    return true;
   }
   clearCursorModels() {
     const previous = this.settings.cursor;

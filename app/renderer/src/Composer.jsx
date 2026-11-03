@@ -1,11 +1,12 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
-import { MenuItem, MenuSection, Modal, Popover, Spinner, baseName, envIcon, shortPath } from './ui.jsx';
+import { EffortTrigger, MenuItem, MenuSection, Modal, Spinner, Trigger, baseName, envIcon, shortPath } from './ui.jsx';
 import { api, captureComposerDraft, clearQueued, getState, notify, openSettings, recoverComposerDraft, restoreComposerDraft, setComposerDraft, setDraft, setEnvironments, takeComposerDraft, useStore } from './store.js';
 import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerDraft as takeDraft, restoreComposerDraft as restoreDraft, recoverComposerDraft as recoverDraft } from './composer-draft.js';
 import { composerEngine } from './session-engine.js';
 import { favouriteModels } from './file-paths.js';
 import { CursorConfigControls, CursorModelMenu } from './Cursor.jsx';
+import { cursorModelOptions, cursorThought, draftCursorEffort, effortLevels } from './cursor-options.js';
 import { cachedDir, listDir, prefetchDir } from './dirs.js';
 
 const EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -16,16 +17,6 @@ const effortsFor = model => {
   const map = model?.thinkingLevelMap ?? {};
   return EFFORTS.filter(l => map[l] === null ? false : ['xhigh', 'max'].includes(l) ? map[l] != null : true);
 };
-
-// A text-style trigger (no chrome) that opens a popover — the controls under Claude's composer.
-function Trigger({ children, menu, width = 300, placement = 'top-end', className = '', title, label }) {
-  const anchor = useRef(null);
-  const [open, setOpen] = useState(false);
-  return <>
-    <button ref={anchor} type="button" className={`trigger ${open ? 'active' : ''} ${className}`} onClick={() => setOpen(o => !o)} title={title} aria-label={label}>{children}</button>
-    <Popover anchor={anchor} open={open} onClose={() => setOpen(false)} width={width} placement={placement}>{menu(() => setOpen(false))}</Popover>
-  </>;
-}
 
 // ---------------------------------------------------------------- environment menu (Claude-style, with a "More" flyout)
 function EnvItem({ env, value, onPick, status }) {
@@ -432,6 +423,9 @@ export function ComposerBar({ session }) {
   const cursorModelName = settingsCursor?.models?.find(m => m.id === model?.id)?.name ?? model?.name ?? model?.id ?? 'Cursor default';
   const modelTitle = model ? `${model.provider}/${model.id}` : 'Choose a Cursor model';
   const prep = envStatus[environmentId];
+  // A new Cursor conversation offers the efforts Cursor listed for the model, defaulting to Cursor's.
+  const draftCursorThought = isNew && cursor ? cursorThought(cursorModelOptions(settingsCursor, model?.id)) : null;
+  const draftEffort = draftCursorThought ? draftCursorEffort(settingsCursor, model?.id, draft.cursorEffort) : null;
 
   const changeEnv = id => {
     const recents = getState().settings?.recentFolders?.[id] ?? [];
@@ -466,10 +460,10 @@ export function ComposerBar({ session }) {
               <span className="strong">{modelLabel(model, catalog)}</span>
             </Trigger>
           : <button type="button" className="trigger attention" onClick={() => openSettings(true, 'providers')}><Icon name="key" size={15} /><span>Add a model</span></button>}
-        {cursor && session && <CursorConfigControls key={session.id} session={session} />}
-        {!cursor && modelInfo?.reasoning !== false && <Trigger width={210} label="Effort" className="effort-trigger" menu={close => <MenuSection title="Reasoning effort">{effortsFor(modelInfo).map(l => <MenuItem key={l} label={effortLabel(l)} checked={effort === l} onClick={() => { changeEffort(l); close(); }} />)}</MenuSection>}>
-          <span className="muted">{effortLabel(effort)}</span>
-        </Trigger>}
+        {cursor
+          ? session ? <CursorConfigControls key={session.id} session={session} />
+            : draftCursorThought && <EffortTrigger levels={effortLevels(draftCursorThought)} value={draftEffort} onChange={value => setDraft({ cursorEffort: value })} />
+          : modelInfo?.reasoning !== false && <EffortTrigger levels={effortsFor(modelInfo).map(level => ({ value: level, label: effortLabel(level) }))} value={effort} onChange={changeEffort} />}
       </div>
       {browsing && <RemoteBrowser environmentId={environmentId} start={cwd ?? undefined} onPick={path => setDraft({ cwd: path })} onClose={() => setBrowsing(false)} />}
     </div>

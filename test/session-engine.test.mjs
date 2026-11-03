@@ -23,3 +23,15 @@ test('legacy session views advertise Pi without modifying stored records', t => 
   assert.deepEqual(manager.list().map(s => s.engine), ['pi', 'cursor']);
   assert.equal(Object.hasOwn(legacy, 'engine'), false);
 });
+
+test('idle Cursor conversations outlive idle Pi ones, since restarting Cursor delays the next reply', async t => {
+  const pi = { id: 'pi', environmentId: 'local' }, cursor = { id: 'cursor', engine: 'cursor', environmentId: 'local' };
+  const manager = new SessionManager({ store: { sessions: [pi, cursor], settings: {} }, environments: () => [{ id: 'local', kind: 'local' }], local: {} });
+  t.after(() => clearInterval(manager.sweeper));
+  manager.stopRelay = async () => {};
+  const now = Date.now();
+  for (const id of ['pi', 'cursor']) manager.runtimes.set(id, { status: 'connected', streaming: false, questions: new Map(), lastUsed: now - 30 * 60 * 1000, session: { stop: async () => {} } });
+  assert.deepEqual(await manager.sweep(now), ['pi']);
+  manager.runtimes.get('cursor').lastUsed = now - 61 * 60 * 1000;
+  assert.deepEqual(await manager.sweep(now), ['cursor']);
+});

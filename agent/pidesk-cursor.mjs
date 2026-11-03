@@ -1,14 +1,16 @@
 // Cursor CLI runs as a distinct agent behind Pi Desktop's existing durable relay.
 // Only the desktop event envelope is adapted. Cursor owns context, tools and auth.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { CursorAcp, cursorConfigOptions, cursorCurrentModel, cursorModelConfig, cursorModels, cursorSelectValues } from './cursor-acp.mjs';
+import { CURSOR_EFFORT_ID, CursorAcp, cursorConfigOptions, cursorCurrentModel, cursorEffortChange, cursorListedModels, cursorModeOption, cursorModelConfig, cursorModels, cursorModelSettings, cursorSelectValues, cursorThoughtOption, estimateTokens } from './cursor-acp.mjs';
 
 const textOf = content => (content ?? []).map(c => c.type === 'text' ? c.text : c.type === 'resource_link' ? c.uri : JSON.stringify(c)).join('\n');
 export class CursorDesktopSession {
-  constructor({ client, file, cwd, send, credentialVersion = 0 }) {
+  // `effort`: the reasoning effort a new conversation starts with. Afterwards the conversation keeps
+  // its own choice (Cursor stores model parameters globally, shared by every conversation).
+  constructor({ client, file, cwd, send, credentialVersion = 0, effort = null }) {
     this.cursorCredentialVersion = credentialVersion;
     this.client = client; this.file = file; this.cwd = cwd; this.send = send;
     this.entries = []; this.dialogs = new Map(); this.streaming = false;
@@ -26,7 +28,8 @@ export class CursorDesktopSession {
     this.cursorState = [...this.entries].reverse().find(e => e.type === 'cursor_state');
     this.sessionId = this.cursorState?.sessionId;
     this.model = this.cursorState?.model;
-    this.contextUsage = this.cursorState?.contextUsage ?? null;
+    this.effort = this.cursorState?.effort ?? (typeof effort === 'string' && effort ? effort : null);
+    this.contextUsage = this.cursorState?.contextUsage ?? null; // only what Cursor itself reports
     client.on('notification', message => this.notification(message));
     client.on('request', message => { this.clientRequest(message).catch(() => client.reject(message.id)); });
   }
@@ -35,15 +38,46 @@ export class CursorDesktopSession {
     appendFileSync(this.file, JSON.stringify(value) + '\n', { mode: 0o600 });
     this.entries.push(value);
   }
-  saveState() { this.append({ type: 'cursor_state', sessionId: this.sessionId, model: this.model, contextUsage: this.contextUsage }); }
+  saveState() { this.append({ type: 'cursor_state', sessionId: this.sessionId, model: this.model, effort: this.effort, contextUsage: this.contextUsage }); }
   async start(modelId) {
     await this.client.start();
-    const session = await this.client.openSession(this.sessionId);
+    await this.open(modelId);
+  }
+  // Open (or resume) the conversation on a started CLI. A pre-started CLI runs elsewhere, so the
+  // conversation's own directory is passed explicitly.
+  async open(modelId) {
+    const session = await this.client.openSession(this.sessionId, this.cwd);
     this.sessionId = this.client.sessionId;
     this.applyModelState(session);
     this.model ??= { provider: 'cursor', id: modelId ?? 'default' };
     this.saveState();
     if (modelId && modelId !== this.model.id) await this.setModel(modelId);
+    // Neither may cost the conversation: Cursor still answers in whatever mode/effort it has.
+    await this.ensureAgentMode().catch(error => console.error(`Cursor Agent mode: ${error.message}`));
+    await this.applyEffort().catch(error => console.error(`Cursor reasoning effort: ${error.message}`));
+  }
+  // Desktop conversations always run in Agent mode; Ask/Plan are not offered.
+  async ensureAgentMode() {
+    const mode = cursorModeOption(this.configOptions);
+    if (!mode || mode.currentValue === 'agent' || !cursorSelectValues(mode).some(item => item.value === 'agent')) return;
+    await this.applyConfigOption(mode.id, 'agent');
+  }
+  // Cursor keeps one effort per model for all conversations; restore this conversation's own. An
+  // effort can take two option changes (thinking on, then its level).
+  async applyEffort() {
+    for (let step = 0; this.effort && step < 3; step++) {
+      const change = cursorEffortChange(this.configOptions, this.effort);
+      if (!change?.length) return;
+      await this.applyConfigOption(...change);
+    }
+  }
+  async selectEffort(value) {
+    if (!cursorEffortChange(this.configOptions, value)) throw new Error('This reasoning effort is not available from Cursor CLI');
+    this.effort = value;
+    await this.applyEffort();
+    this.saveState();
+    if (cursorThoughtOption(this.configOptions)?.currentValue !== value) throw new Error('Cursor did not apply the requested reasoning effort');
+    return this.state();
   }
   applyModelState(state) {
     this.configOptions = cursorConfigOptions(state);
@@ -75,8 +109,12 @@ export class CursorDesktopSession {
       this.model = { provider: 'cursor', id: modelId, name: this.models.find(model => model.id === modelId)?.name ?? modelId };
     }
     this.saveState();
+    // Cursor switches to the new model's last-used effort; keep this conversation's when offered.
+    await this.applyEffort().catch(error => console.error(`Cursor reasoning effort: ${error.message}`));
   }
   async setConfigOption(configId, value) {
+    if (configId === cursorModeOption(this.configOptions)?.id && value !== 'agent') throw new Error('Cursor conversations always run in Agent mode');
+    if (configId === CURSOR_EFFORT_ID) return this.changeConfiguration(() => this.selectEffort(value), 'Wait for Cursor to finish before changing configuration');
     return this.changeConfiguration(() => this.applyConfigOption(configId, value), 'Wait for Cursor to finish before changing configuration');
   }
   async applyConfigOption(configId, value) {
@@ -90,7 +128,24 @@ export class CursorDesktopSession {
     if (this.configOptions.find(option => option.id === configId)?.currentValue !== value) throw new Error('Cursor did not apply the requested configuration');
     return this.state();
   }
-  state() { return { sessionId: this.sessionId, sessionFile: this.file, cursorCredentialVersion: this.cursorCredentialVersion, isStreaming: this.streaming, model: this.model, thinkingLevel: this.configOptions?.find(option => option.category === 'thought_level')?.currentValue ?? 'off', cursorConfigOptions: this.configOptions ?? [], contextUsage: this.contextUsage }; }
+  // Model and mode are not settings of their own in the desktop: the model menu picks the model, and
+  // the mode is always Agent.
+  state() { return { sessionId: this.sessionId, sessionFile: this.file, cursorCredentialVersion: this.cursorCredentialVersion, isStreaming: this.streaming, model: this.model, thinkingLevel: cursorThoughtOption(this.configOptions)?.currentValue ?? 'off', cursorConfigOptions: cursorModelSettings(this.configOptions), contextUsage: this.contextUsage ?? this.estimatedContext() }; }
+  // Cursor's ACP reports no usage, so estimate what this conversation's visible content adds: text
+  // and tool input/output (earlier reasoning is not resent). Cursor's own system prompt, rules and
+  // compaction are invisible to the desktop, hence `estimated`, and no context window or percentage.
+  estimatedContext() {
+    if (this.estimate?.count === this.entries.length) return this.estimate.value;
+    let tokens = 0;
+    for (const message of this.messages()) {
+      for (const part of Array.isArray(message.content) ? message.content : []) {
+        if (part.type === 'text') tokens += estimateTokens(part.text);
+        else if (part.type === 'toolCall') tokens += estimateTokens(JSON.stringify(part.arguments ?? {}));
+      }
+    }
+    this.estimate = { count: this.entries.length, value: tokens ? { tokens, estimated: true } : null };
+    return this.estimate.value;
+  }
   messages() { return this.entries.filter(e => e.type === 'message').map(e => e.message); }
   endMessage(message) { this.append({ type: 'message', message }); this.send({ type: 'message_end', message }); }
   notification({ method, params }) {
@@ -244,13 +299,12 @@ export class CursorDesktopSession {
       case 'get_available_models': return { models: this.models, currentModelId: this.model?.id, configOptions: this.configOptions ?? [] };
       case 'get_messages': return { messages: this.messages() };
       case 'get_entries': return { entries: this.entries, leafId: this.entries.at(-1)?.id };
-      case 'get_session_stats': return { contextUsage: this.contextUsage };
-      case 'get_config_options': return { configOptions: this.configOptions ?? [] };
+      case 'get_session_stats': return { contextUsage: this.contextUsage ?? this.estimatedContext() };
+      case 'get_config_options': return { configOptions: cursorModelSettings(this.configOptions) };
       case 'set_config_option': case 'cursor_set_config_option': return this.setConfigOption(p.configId, p.value);
       case 'set_thinking_level': {
-        const thought = this.configOptions?.find(option => option.category === 'thought_level');
-        if (!thought) throw new Error('Cursor CLI does not advertise reasoning controls for this model');
-        return this.setConfigOption(thought.id, p.level);
+        if (!cursorThoughtOption(this.configOptions)) throw new Error('Cursor CLI does not advertise reasoning controls for this model');
+        return this.setConfigOption(CURSOR_EFFORT_ID, p.level);
       }
       case 'get_commands': return { commands: [] };
       case 'set_session_name': return {};
@@ -292,15 +346,52 @@ async function main() {
     process.once('SIGTERM', stop); process.once('SIGINT', stop);
     // Opening an empty ACP session advertises account models; it sends no model prompt.
     client.on('request', message => client.reject(message.id, 'Model discovery is non-interactive. Enter a Cursor API Key in Settings or use agent login.'));
-    try { await client.start(); const session = await client.openSession(); process.stdout.write(JSON.stringify({ models: cursorModels(session, client.capabilities), currentModelId: cursorCurrentModel(session), configOptions: cursorConfigOptions(session) }) + '\n'); }
+    try {
+      await client.start();
+      const session = await client.openSession();
+      // Each model's own parameters (efforts and defaults), for conversations not started yet.
+      const listed = await client.request('cursor/list_available_models', {}).catch(() => null);
+      process.stdout.write(JSON.stringify({ models: cursorModels(session, client.capabilities, listed), currentModelId: cursorCurrentModel(session), configOptions: cursorConfigOptions(session) }) + '\n');
+    }
     finally { await client.close(); process.off('SIGTERM', stop); process.off('SIGINT', stop); }
     return;
   }
+  // --spare: started while the user is still writing the first message. The CLI starts and its
+  // account services and model list load now (most of Cursor's start-up); cursor_open then only has
+  // to open the conversation in the directory the message decides.
+  const spare = args.includes('--spare');
   const file = value('--session-file');
-  if (!file) throw new Error('Missing Cursor desktop history path');
-  const desktop = new CursorDesktopSession({ client, file, cwd, send, credentialVersion });
-  const ready = desktop.start(value('--model'));
+  if (!file && !spare) throw new Error('Missing Cursor desktop history path');
+  let desktop = null, opened = null;
+  const open = ({ sessionFile, cwd: dir, model, effort }) => {
+    if (desktop) throw new Error('This Cursor process already has a conversation');
+    if (typeof sessionFile !== 'string' || !isAbsolute(sessionFile) || typeof dir !== 'string' || !isAbsolute(dir)) throw new Error('Invalid Cursor conversation location');
+    desktop = new CursorDesktopSession({ client, file: sessionFile, cwd: dir, send, credentialVersion, effort });
+    return desktop;
+  };
+  const shutdown = async () => { desktop?.clearDialogs(); await client.close(); process.exit(0); };
+  let ready, orphan = null, listed = [];
+  if (spare) {
+    client.on('request', message => { if (!desktop) client.reject(message.id, 'No Cursor conversation is open yet'); });
+    // Listing models loads Cursor's account services, and refreshes each model's efforts for the desktop.
+    ready = client.start().then(() => client.request('cursor/list_available_models', {}).catch(() => null)).then(result => { listed = cursorListedModels(result); });
+    // The desktop drops an unused spare after ten minutes; one it lost track of must not keep Cursor running.
+    orphan = setTimeout(() => { void shutdown(); }, 15 * 60 * 1000);
+  } else ready = open({ sessionFile: file, cwd, effort: value('--thought') }).start(value('--model'));
   ready.catch(error => { console.error(error.message); });
+  const handle = async p => {
+    if (spare && p.type === 'cursor_open') {
+      clearTimeout(orphan);
+      opened = open(p).open(typeof p.model === 'string' && p.model ? p.model : undefined);
+      await opened;
+      return desktop.state();
+    }
+    if (opened) await opened;
+    if (desktop) return desktop.request(p.type, p);
+    if (p.type === 'get_state') return { spare: true, isStreaming: false, cursorCredentialVersion: credentialVersion, model: null, cursorConfigOptions: [], contextUsage: null, models: listed };
+    if (['abort', 'abort_bash', 'clear_queue'].includes(p.type)) return {};
+    throw new Error('Cursor is still starting this conversation');
+  };
   let buffer = '';
   process.stdin.setEncoding('utf8');
   process.stdin.on('data', chunk => {
@@ -311,13 +402,12 @@ async function main() {
       if (!line.trim()) continue;
       let p;
       try { p = JSON.parse(line); } catch { continue; }
-      if (p.type === 'extension_ui_response') { desktop.answer(p.id, p); continue; }
-      void ready.then(() => desktop.request(p.type, p)).then(data => send({ type: 'response', id: p.id, command: p.type, success: true, data }), error => send({ type: 'response', id: p.id, command: p.type, success: false, error: error.message }));
+      if (p.type === 'extension_ui_response') { desktop?.answer(p.id, p); continue; }
+      void ready.then(() => handle(p)).then(data => send({ type: 'response', id: p.id, command: p.type, success: true, data }), error => send({ type: 'response', id: p.id, command: p.type, success: false, error: error.message }));
     }
   });
-  const shutdown = async () => { desktop.clearDialogs(); await client.close(); process.exit(0); };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
   process.stdin.on('end', shutdown);
-  client.on('closed', () => { if (!desktop.streaming) process.exit(1); else desktop.turn?.finally(() => process.exit(1)); });
+  client.on('closed', () => { if (!desktop?.streaming) process.exit(1); else desktop.turn?.finally(() => process.exit(1)); });
 }
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => { console.error(error.message); process.exitCode = 1; });

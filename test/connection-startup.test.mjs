@@ -1,14 +1,15 @@
 // CI-only startup regressions. No app, real SSH host, provider request, or user data is used.
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { SessionManager } from '../app/main/session-manager.mjs';
 import { prepareRemote, remoteInspectionScript } from '../app/main/remote-setup.mjs';
+import { EXTENSION_PACKAGE, stageExtensions } from '../app/main/extensions.mjs';
 import { PiSession } from '../core/pi-session.mjs';
 import { sshRelayTransport } from '../core/transports.mjs';
 
@@ -135,6 +136,7 @@ function remoteFixture(t) {
   const contents = Object.fromEntries(['cursor-acp.mjs', 'pidesk-cursor.mjs', 'pidesk-subagent.mjs', 'pidesk-bridge.js', 'pidesk-relay.mjs'].map(name => {
     const content = `// fixture ${name}\n`; writeFileSync(join(dir, name), content); return [name, content];
   }));
+  contents['package.json'] = EXTENSION_PACKAGE;
   const inspection = ({ nodeVersion = 'v22.19.0', hashes = true } = {}) =>
     `nodeVersion=${nodeVersion}\npi=1.2.3\n` + (hashes ? Object.entries(contents).map(([name, content]) => `${name}=${createHash('sha256').update(content).digest('hex')}\n`).join('') : '');
   const host = { home: '/fixture', hostname: 'fixture', nodes: [{ path: '/fixture/node/bin/node', version: 'v22.19.0' }], disks: [] };
@@ -168,6 +170,39 @@ test('removed cached Node falls back to discovery and repairs its hint', async t
   assert.equal(probes, 1); assert.equal(calls, 2); assert.equal(facts.node, '/replacement/bin/node');
 });
 
+// Inside this "type": "module" package jiti imports the bridge natively, which loads a second,
+// unbundled Pi from node_modules on every start (seconds in Electron). The staged copy must take
+// jiti's transpile path, bound to the modules Pi's bundle already has.
+test('the staged bridge loads through Pi’s bundled modules, not a native import', async t => {
+  const dir = temporary(t), ext = join(dir, 'ext'), agentDir = join(dir, 'agent');
+  const bridge = stageExtensions(resolve('agent'), ext);
+  assert.equal(readFileSync(join(ext, 'package.json'), 'utf8'), EXTENSION_PACKAGE);
+  for (const name of ['pidesk-subagent.mjs', 'pidesk-cursor.mjs', 'cursor-acp.mjs']) assert.ok(existsSync(join(ext, name)), name);
+  const staged = statSync(bridge).mtimeMs;
+  stageExtensions(resolve('agent'), ext);
+  assert.equal(statSync(bridge).mtimeMs, staged, 'unchanged files are not rewritten');
+  mkdirSync(agentDir);
+  const child = spawn(process.execPath, [resolve('node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'), '--mode', 'rpc', '-ne', '-e', bridge, '--no-session'], {
+    cwd: dir, stdio: ['pipe', 'pipe', 'pipe'],
+    env: { PATH: process.env.PATH, HOME: dir, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0', JITI_DEBUG: '1', PIDESK_BOOT: '{"providers":[]}' },
+  });
+  t.after(() => child.kill());
+  let stdout = '', stderr = '';
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  const commands = await new Promise((done, fail) => {
+    const timer = setTimeout(() => fail(new Error(`Pi did not answer: ${stderr.slice(-800)}`)), 30000);
+    child.stdout.on('data', chunk => {
+      stdout += chunk;
+      const response = stdout.split('\n').map(line => { try { return JSON.parse(line); } catch { return null; } }).find(r => r?.type === 'response' && r.command === 'get_commands');
+      if (response) { clearTimeout(timer); done(response.data.commands.map(c => c.name)); }
+    });
+    child.stdin.write(JSON.stringify({ type: 'get_commands', id: 'commands' }) + '\n');
+  });
+  assert.ok(commands.includes('pidesk-title') && commands.includes('goal'), 'the bridge registered its commands');
+  assert.match(stderr, /\[transpile\][^\n]*pidesk-bridge\.js/);
+  assert.doesNotMatch(stderr, /\[native\][^\n]*pidesk-bridge\.js/);
+});
+
 test('bridge updates send only changed files together over stdin', async t => {
   const f = remoteFixture(t), uploads = [];
   await prepareRemote(f.env, f.options, { probe: async () => f.host, run: async (_env, script, options) => {
@@ -175,7 +210,7 @@ test('bridge updates send only changed files together over stdin', async t => {
     uploads.push({ script, files: JSON.parse(options.input) }); return '';
   } });
   assert.equal(uploads.length, 1);
-  assert.equal(uploads[0].files.length, 5);
+  assert.equal(uploads[0].files.length, 6);
   for (const file of uploads[0].files) {
     assert.equal(Buffer.from(file.content, 'base64').toString(), f.contents[file.name]);
     assert.ok(!uploads[0].script.includes(file.content), 'file contents must not appear in argv');

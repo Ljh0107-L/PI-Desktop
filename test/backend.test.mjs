@@ -14,6 +14,7 @@ import { localRelayTransport, relaySpawnSpec } from '../core/transports.mjs';
 import { startEgressProxy } from '../core/egress-proxy.mjs';
 import { SessionManager } from '../app/main/session-manager.mjs';
 import { Store } from '../app/main/store.mjs';
+import { mockCursorCommand } from './cursor-fixture.mjs';
 
 const exec = promisify(execFile);
 const relaySource = resolve('agent/pidesk-relay.mjs');
@@ -257,4 +258,41 @@ test('egress shutdown destroys CONNECT tunnels and handles listen errors', { tim
   await assert.rejects(startEgressProxy({ port: proxy.port }), { code: 'EADDRINUSE' });
   await proxy.close();
   await waitFor(() => client.destroyed && peers.size === 0);
+});
+
+test('a pre-started Cursor CLI becomes the next No-folder conversation, opened in its own directory', { timeout: 30000 }, async t => {
+  const f = await fixture(t);
+  const workspace = process.env.PIDESK_DEFAULT_WORKSPACE;
+  process.env.PIDESK_DEFAULT_WORKSPACE = join(f.dir, 'Pi');
+  t.after(() => { if (workspace === undefined) delete process.env.PIDESK_DEFAULT_WORKSPACE; else process.env.PIDESK_DEFAULT_WORKSPACE = workspace; });
+  const command = mockCursorCommand(f.dir, ['--config-models', '--initial-mode', 'plan']);
+  const store = { sessions: [], settings: { providers: [], environments: {}, cursor: { enabled: true, command, credentialVersion: 0 } }, getKey: () => null, saveSessions() {}, saveSettings() {}, touchRecent() {} };
+  const manager = new SessionManager({ store, environments: () => [{ id: 'local', kind: 'local', label: 'Local' }],
+    local: { node: process.execPath, piCli: peer, agentDir: f.dir, runDir: f.runDir, extraEnv: {} }, relayPath: f.relayPath, bridgePath: resolve('agent/pidesk-bridge.js') });
+  f.cleanups.push(() => manager.shutdown());
+  const listed = new Promise(resolve => manager.once('cursor-models', resolve));
+  assert.equal(await manager.prewarm({ engine: 'cursor', environmentId: 'local', cwd: null }), true);
+  const spare = [...manager.spares.values()][0];
+  await waitFor(() => manager.runtimes.get(spare.id)?.status === 'connected');
+  assert.deepEqual((await listed).find(m => m.id === 'cursor-test-a').configOptions.map(o => o.id), ['speed', 'pidesk-effort'], 'warming refreshes each model\'s efforts');
+  const view = await manager.create({ environmentId: 'local', cwd: null, engine: 'cursor', model: { provider: 'cursor', id: 'cursor-test-b' }, thinkingLevel: 'high', prompt: 'tool please' });
+  assert.equal(view.id, spare.id, 'the conversation adopts the pre-started CLI');
+  assert.equal(manager.spares.size, 0);
+  assert.equal(view.status, 'connected');
+  assert.match(view.cwd, /tool-please$/);
+  assert.deepEqual([view.model.id, view.thinkingLevel], ['cursor-test-b', 'high']);
+  assert.ok(!view.cursorConfigOptions.some(o => o.id === 'mode' || o.id === 'model-choice' || o.id === 'thinking'));
+  const turn = async text => {
+    const settled = new Promise(resolve => { const on = ({ id, event }) => { if (id === view.id && event.type === 'agent_settled') { manager.off('event', on); resolve(); } }; manager.on('event', on); });
+    await manager.prompt(view.id, text); await settled;
+  };
+  await turn('tool');
+  assert.equal(readFileSync(join(view.cwd, 'cursor-output.md'), 'utf8'), '# Cursor output\n', 'tools run in the conversation directory, not the spare\'s');
+  await turn('mode-status');
+  assert.equal((await manager.messages(view.id)).at(-1).content[0].text, 'Mode: agent · effort: high');
+  // Effort changes go to the live session and are recorded for the conversation.
+  await manager.setThinking(view.id, 'medium');
+  assert.equal(store.sessions[0].thinkingLevel, 'medium');
+  manager.cursorSettingsChanged(); // no spare left to drop; must not touch the conversation
+  assert.equal(manager.runtimes.get(view.id)?.status, 'connected');
 });

@@ -70,6 +70,24 @@ export const MenuSection = ({ title, children }) => (
   <div className="menu-section">{title && <div className="menu-section-title">{title}</div>}{children}</div>
 );
 
+// A text-style trigger (no chrome) that opens a popover — the controls under Claude's composer.
+export function Trigger({ children, menu, width = 300, placement = 'top-end', className = '', title, label, disabled }) {
+  const anchor = useRef(null);
+  const [open, setOpen] = useState(false);
+  return <>
+    <button ref={anchor} type="button" className={`trigger ${open ? 'active' : ''} ${className}`} onClick={() => setOpen(o => !o)} title={title} aria-label={label} disabled={disabled}>{children}</button>
+    <Popover anchor={anchor} open={open && !disabled} onClose={() => setOpen(false)} width={width} placement={placement}>{menu(() => setOpen(false))}</Popover>
+  </>;
+}
+
+// Reasoning effort under the composer, the same for Pi and Cursor. `levels`: [{ value, label }].
+export function EffortTrigger({ levels, value, onChange, disabled, title }) {
+  return <Trigger width={210} label="Effort" className="effort-trigger" disabled={disabled} title={title}
+    menu={close => <MenuSection title="Reasoning effort">{levels.map(level => <MenuItem key={String(level.value)} label={level.label} checked={value === level.value} onClick={() => { onChange(level.value); close(); }} />)}</MenuSection>}>
+    <span className="muted">{levels.find(level => level.value === value)?.label ?? value ?? 'Default'}</span>
+  </Trigger>;
+}
+
 // A chip that opens a popover; used for the selectors under the composer.
 export function Chip({ icon, label, title, children, width = 300, placement = 'top-start', disabled, className = '' }) {
   const anchor = useRef(null);

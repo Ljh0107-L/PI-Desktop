@@ -44,12 +44,16 @@ function ConfirmHost() {
 
 function NewSessionView() {
   const draft = useStore(s => s.draft);
-  // Start a Pi in the chosen place ahead of time, so the first message doesn't wait for it.
+  const cursorEnabled = useStore(s => !!s.settings.cursor?.enabled);
+  // Start Pi (or Cursor CLI) in the chosen place ahead of time, so the first message doesn't wait for it.
   useEffect(() => {
-    if (!draft.model || draft.engine === 'cursor') return;
-    const t = setTimeout(() => api('prewarm', { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel }).catch(() => {}), 400);
+    const cursor = draft.engine === 'cursor';
+    if (cursor ? !cursorEnabled : !draft.model) return;
+    const t = setTimeout(() => api('prewarm', cursor
+      ? { engine: 'cursor', environmentId: draft.environmentId, cwd: draft.cwd, model: draft.cursorModel }
+      : { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel }).catch(() => {}), 400);
     return () => clearTimeout(t);
-  }, [draft.engine, draft.environmentId, draft.cwd, draft.model?.provider, draft.model?.id]);
+  }, [draft.engine, cursorEnabled, draft.environmentId, draft.cwd, draft.model?.provider, draft.model?.id]);
   return (
     <div className="new-session">
       <div className="new-session-center" />
@@ -148,6 +152,7 @@ export function App() {
   const notices = useStore(s => s.notices);
   const sidebar = useStore(s => s.sidebar);
   const pendingTranscript = useStore(s => s.transcripts.pending);
+  const pendingEngine = useStore(s => s.pendingEngine);
   useEffect(() => { bootstrap().catch(e => notify(e.message, 'error')); }, []);
   useEffect(() => {
     const onKey = e => {
@@ -162,7 +167,7 @@ export function App() {
   }, []);
   if (!ready) return <div className="app loading" />;
   const pending = activeId === 'pending';
-  const session = sessions.find(s => s.id === activeId) ?? (pending ? { id: 'pending', title: 'New session', status: 'connecting', environmentId: 'local', cwd: '', streaming: true } : null);
+  const session = sessions.find(s => s.id === activeId) ?? (pending ? { id: 'pending', title: 'New session', status: 'connecting', phase: 'starting', engine: pendingEngine, environmentId: 'local', cwd: '', streaming: true } : null);
   const toasts = <div className="toasts">{notices.map(n => <div key={n.id} className={`toast ${n.level}`}><Icon name={n.level === 'error' ? 'alert' : 'check'} size={15} /> {n.message}</div>)}</div>;
   if (settingsOpen) return <div className="app"><SettingsPage />{toasts}</div>;
   return (
