@@ -2,7 +2,15 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## 0.1.28 — Independent Cursor CLI sessions
+## 0.1.29 — Enter a Cursor API Key directly
+
+- **API Key first.** Settings → Cursor SDK now has a password field for a Cursor user API key. The CLI executable setting is tucked under Advanced. With a saved key there is no need to run `agent login`; the official CLI still needs to be installed on the target machine.
+- **Encrypted and never echoed back.** Keys use the existing Keychain-backed secret store, not settings.json. The UI receives only a saved-key flag and clears the input after saving. Blank saves preserve the key; Remove saved key explicitly clears it. Failed storage writes retain the previous credential.
+- **Local and SSH authentication.** The key travels through private stdin/relay boot data and is supplied as `CURSOR_API_KEY` to Cursor, never a command-line flag or desktop-written remote key file. Known credential strings are redacted from CLI error diagnostics. Cursor itself manages its child tools and authentication behavior.
+- **Safe key changes.** Replacing/removing a key does not interrupt active work. At the next idle prompt or model lookup, the adapter restarts with the updated credentials and resumes the same native Cursor session/history. Existing CLI login remains a fallback when no key is saved.
+- **CI regressions.** Coverage includes encryption and write failures, blank-save/remove behavior, stdin transport, diagnostic redaction, local/SSH authentication, key rotation after desktop restart, and preserved conversation identity. Verification and packaging run only in GitHub CI, using offline Cursor fixtures rather than real account quota.
+
+## Included from 0.1.28 — Independent Cursor CLI sessions
 
 - **Cursor SDK in Settings.** Configure the official Cursor CLI executable, check a local or SSH machine, and discover its account models without an inference prompt. Authentication stays with Cursor; install the CLI and run `agent login` on each machine first. The desktop does not install it or transfer credentials silently.
 - **Cursor in the normal conversation UI.** New conversations can select Pi or Cursor CLI. Cursor replies, tool activity, permissions, questions and plan approvals display in the existing interface; files open in the same local/SSH preview. Model selection supports both ACP model catalogs and standard model config options, including grouped models.
