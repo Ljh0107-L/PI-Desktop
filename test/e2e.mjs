@@ -210,19 +210,25 @@ try {
   await page.locator('.usage-table').waitFor({ timeout: 15000 });
   const usageText = await page.locator('.usage').innerText();
   check('right panel Usage card shows tok/s and input / cached / output', /tok\/s/.test(usageText) && /Input/.test(usageText) && /Cached/.test(usageText) && /Output/.test(usageText), usageText.replace(/\s+/g, ' '));
-  check('TPS identifies its denominator', /^(Stream|Request) avg$/.test(await page.locator('.usage-speed-kind').innerText()));
+  // This mock reply has fewer than 80 visible characters and 8-character chunks at 25 ms:
+  // it cannot establish a sufficiently covered generation sample, regardless of request duration.
+  check('short mock reply does not invent a generation TPS', await page.locator('.usage-speed-value b').innerText() === '—'
+    && await page.locator('.usage-speed-kind').innerText() === 'Speed unavailable');
+  check('TPS never offers a full-request average', !/Request avg|Stream avg/.test(usageText));
   check('nothing under the composer but model controls', !(await page.locator('.session-meter').count()));
   // a model that reasons privately: no fake speed, a "Thought for" row with its reasoning tokens
   await waitNew('.markdown', 'echo:', () => send('[[hidden-think]] ponder this'));
   await page.locator('.thinking', { hasText: 'Thought for' }).last().waitFor({ timeout: 15000 });
   const hiddenRow = await page.locator('.thinking', { hasText: 'Thought for' }).last().innerText();
-  const tpsAfter = Number((await page.locator('.usage-speed-value b').innerText()).replace(/[^\d.]/g, ''));
-  check('hidden reasoning shown as "Thought for…" and speed not inflated', /^Thought for \d+s[\s\S]*400 tokens$/.test(hiddenRow.trim()) && tpsAfter > 0 && tpsAfter < 600, `${hiddenRow.replace(/\s+/g, ' ')} · ${tpsAfter} tok/s`);
+  const tpsAfter = await page.locator('.usage-speed-value b').innerText();
+  const hiddenSpeedKind = await page.locator('.usage-speed-kind').innerText();
+  check('hidden reasoning shown as "Thought for…" without fabricated short-answer TPS', /^Thought for \d+s[\s\S]*400 tokens$/.test(hiddenRow.trim())
+    && tpsAfter === '—' && hiddenSpeedKind === 'Speed unavailable', `${hiddenRow.replace(/\s+/g, ' ')} · ${tpsAfter} · ${hiddenSpeedKind}`);
   await S('04b-usage-card');
   await page.locator('.send-button.stop').waitFor({ state: 'detached' });
   const readingSession = (await page.evaluate(() => window.pidesk.invoke('listSessions'))).find(s => s.title.includes('hello from the desktop'));
   await checkReading({ app, page, id: readingSession.id });
-  check('streaming preserves expanded commands and reading position; TPS updates per API call', true);
+  check('streaming preserves reading state; generation TPS excludes TTFT, first chunks and hidden reasoning', true);
   // Manual compaction from the conversation menu leaves a marker with the summary.
   for (const word of ['alpha', 'beta', 'gamma']) await waitNew('.markdown', `echo: ${word} `, () => send(`${word} `.repeat(60)));
   await page.locator('.send-button.stop').waitFor({ state: 'detached', timeout: 30000 });

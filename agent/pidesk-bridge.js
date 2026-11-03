@@ -177,42 +177,101 @@ export function projectlessNote(cwd) {
 // Timing is captured inside Pi before RPC/SSH buffering, then persisted on the final message.
 // Only bounded counters and usage provenance are retained; never raw provider events or credentials.
 export function registerMetrics(pi, clock = () => performance.timeOrigin + performance.now()) {
-  let active = null;
-  let provenance = null;
-  pi.on('turn_start', () => { active = null; provenance = null; });
-  pi.on('session_shutdown', () => { active = null; provenance = null; });
+  let active = null, pendingThinking = null;
+  const reset = () => { active = null; pendingThinking = null; };
+  const window = () => ({ first: null, last: null, chars: 0, deltas: 0, weight: 0, firstWeight: 0 });
+  const matches = message => active && message?.role === 'assistant' && message.timestamp === active.timestamp &&
+    message.provider === active.provider && message.model === active.model && message.api === active.api;
+  const record = (sample, now, chars, weight) => {
+    sample.first ??= now; sample.last = now;
+    sample.chars += chars; sample.deltas++; sample.weight += weight;
+    // Several deltas may arrive at the same first timestamp. All belong to the excluded first
+    // chunk: none of their generation was observed inside the first→last measurement window.
+    if (now === sample.first) sample.firstWeight += weight;
+  };
+  pi.on('turn_start', reset);
+  pi.on('session_start', reset);
+  pi.on('session_shutdown', reset);
+  pi.on('before_provider_request', (event, ctx) => {
+    // The runner supplies { payload }, not provider/model metadata. Use ctx.model only when its
+    // API and id agree with the serialized request, then consume this enum once at message_start.
+    // Normal registry background calls do not inherit the agent's instrumentation hooks. Never
+    // keep the payload, messages, headers or a model object (which could contain credentials).
+    pendingThinking = null;
+    const model = ctx?.model, payload = event.payload, thinking = payload?.thinking;
+    if (active || model?.api !== 'anthropic-messages' || payload?.model !== model.id ||
+        !['enabled', 'adaptive'].includes(thinking?.type) ||
+        !['summarized', 'omitted'].includes(thinking.display)) return;
+    pendingThinking = { provider: model.provider, model: model.id, api: model.api, display: thinking.display };
+  });
   pi.on('message_start', ({ message }) => {
-    if (message.role !== 'assistant') return;
-    active = { timestamp: message.timestamp, start: clock(), first: null, last: null,
-      chars: 0, deltas: 0, thinkingChars: 0, thinkStart: null, thinkEnd: null };
-  });
-  pi.on('message_update', ({ message, assistantMessageEvent: e }) => {
-    if (!active || message?.timestamp !== active.timestamp || typeof e?.delta !== 'string' || !e.delta.length ||
-        !['text_delta', 'thinking_delta', 'toolcall_delta'].includes(e.type)) return;
-    const now = clock();
-    active.first ??= now; active.last = now; active.chars += e.delta.length; active.deltas++;
-    if (e.type === 'thinking_delta') { active.thinkingChars += e.delta.length; active.thinkStart ??= now; }
-    else if (active.thinkStart != null) active.thinkEnd ??= now;
-  });
-  pi.on('provider_stream_event', event => {
-    const data = event.data;
-    const marker = data?.usage?.cursor2api ?? data?.message?.usage?.cursor2api ?? data?.response?.usage?.cursor2api;
-    if (marker && ['upstream', 'estimated'].includes(marker.source)) {
-      provenance = { provider: event.provider, model: event.model, source: marker.source,
-        cache: marker.cache === 'reported' ? 'reported' : 'unknown', thinking: 'summary' };
+    if (message?.role !== 'assistant') return;
+    const request = pendingThinking; pendingThinking = null;
+    active = { timestamp: message.timestamp, provider: message.provider, model: message.model, api: message.api,
+      start: clock(), ...window(), answer: window(), answerThinkingBoundary: false,
+      thinkingChars: 0, thinkStart: null, thinkEnd: null, provenance: null };
+    if (request && request.provider === active.provider && request.model === active.model && request.api === active.api) {
+      active.provenance = { provider: active.provider, model: active.model, thinking: 'summary',
+        thinkingSource: 'request', thinkingDisplay: request.display };
     }
   });
+  pi.on('message_update', ({ message, assistantMessageEvent: e }) => {
+    if (!matches(message)) return;
+    // A redacted block has thinking_start but no thinking_delta. Only invalidate the answer
+    // window if answer output resumes afterwards; tail-only thinking does not span that window.
+    if (e?.type === 'thinking_start' || e?.type === 'thinking_delta') {
+      if (active.answer.first != null) active.answerThinkingBoundary = true;
+    }
+    if (typeof e?.delta !== 'string' || !e.delta.length ||
+        !['text_delta', 'thinking_delta', 'toolcall_delta'].includes(e.type)) return;
+    const now = clock();
+    // Match the renderer's estimateTokens weighting without retaining content or allocating a
+    // per-character collection: each CJK code unit weighs 1, all other UTF-16 units weigh 0.25.
+    let weight = 0;
+    for (let i = 0; i < e.delta.length; i++) {
+      const c = e.delta.charCodeAt(i);
+      const cjk = (c >= 0x3000 && c <= 0x30ff) || (c >= 0x3400 && c <= 0x4dbf) ||
+        (c >= 0x4e00 && c <= 0x9fff) || (c >= 0xac00 && c <= 0xd7af) ||
+        (c >= 0xf900 && c <= 0xfaff) || (c >= 0xff00 && c <= 0xffef);
+      weight += cjk ? 1 : 0.25;
+    }
+    record(active, now, e.delta.length, weight);
+    if (e.type === 'thinking_delta') { active.thinkingChars += e.delta.length; active.thinkStart ??= now; }
+    else {
+      if (active.answerThinkingBoundary) active.answer.interrupted = true;
+      record(active.answer, now, e.delta.length, weight);
+      if (active.thinkStart != null) active.thinkEnd ??= now;
+    }
+  });
+  pi.on('provider_stream_event', event => {
+    // Scope provenance to the active provider/model/API, not the last raw provider event.
+    // Ordinary registry background calls have no agent hooks; the SDK exposes no request id.
+    if (!active || event.provider !== active.provider || event.model !== active.model || event.api !== active.api) return;
+    const data = event.data;
+    const marker = data?.usage?.cursor2api ?? data?.message?.usage?.cursor2api ?? data?.response?.usage?.cursor2api;
+    const cursor = marker && ['upstream', 'estimated'].includes(marker.source);
+    const summary = /^response\.reasoning_summary_(?:text|part)\.(?:added|delta|done)$/.test(data?.type ?? '');
+    // Routing or a custom transport can hide the request's identity/display from this hook. In
+    // Anthropic Messages, a thinking block does not prove that all reasoning was streamed (the
+    // SDK/API default is summarized). Conservatively mark that ambiguity instead of timing it
+    // as full reasoning. Keep the explanatory marker separate from Cursor usage/cache evidence.
+    const anthropicThinking = event.api === 'anthropic-messages' &&
+      data?.type === 'content_block_start' && ['thinking', 'redacted_thinking'].includes(data.content_block?.type);
+    if (!cursor && !summary && !anthropicThinking) return;
+    active.provenance = { ...active.provenance, provider: event.provider, model: event.model,
+      ...(cursor ? { source: marker.source, cache: marker.cache === 'reported' ? 'reported' : 'unknown' } : {}),
+      ...(anthropicThinking && !active.provenance?.thinkingSource ? { thinkingSource: 'anthropic-block' } : {}),
+      thinking: 'summary' };
+  });
   pi.on('message_end', ({ message }) => {
-    if (message.role !== 'assistant') return;
+    if (!matches(message)) return;
     const t = active; active = null;
-    const p = provenance; provenance = null;
-    const owned = p && p.provider === message.provider && p.model === message.model;
-    if (!t || t.timestamp !== message.timestamp) return owned ? { message: { ...message, __usageProvenance: p } } : undefined;
     const end = clock();
     return { message: { ...message,
-      ...(owned ? { __usageProvenance: p } : {}),
+      ...(t.provenance ? { __usageProvenance: t.provenance } : {}),
       __timing: { source: 'agent', complete: true, start: t.start, first: t.first, last: t.last, end,
-        chars: t.chars, deltas: t.deltas, thinkingChars: t.thinkingChars,
+        chars: t.chars, deltas: t.deltas, weight: t.weight, firstWeight: t.firstWeight,
+        answer: { ...t.answer }, thinkingChars: t.thinkingChars,
         think: t.thinkStart == null ? null : (t.thinkEnd ?? end) - t.thinkStart },
     } };
   });

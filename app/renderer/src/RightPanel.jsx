@@ -29,10 +29,10 @@ function UsageCard({ transcript }) {
   const lastMessage = messages.at(-1);
   const last = usageOf([lastMessage]);
   const total = usageOf(transcript.messages);
-  // Compare like with like: no mixing providers/models, request averages, streaming throughput,
+  // Compare like with like: no mixing providers/models, answer-only/full generation scopes,
   // or estimated and reported token numerators in one unlabelled trend.
   const recent = messages.slice(-14).filter(m => m.provider === lastMessage.provider && (m.responseModel ?? m.model) === (lastMessage.responseModel ?? lastMessage.model))
-    .map(m => usageOf([m])).filter(u => u.tps != null && u.speedBasis === last.speedBasis && u.speedTokensEstimated === last.speedTokensEstimated).map(u => u.tps);
+    .map(m => usageOf([m])).filter(u => u.tps != null && u.speedBasis === last.speedBasis && u.speedScope === last.speedScope && u.speedTokensEstimated === last.speedTokensEstimated).map(u => u.tps);
   const speed = speedDisplay(last); // Missing timing must not resurrect the previous call's speed.
   const peak = Math.max(...recent, 1);
   const rows = [

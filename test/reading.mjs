@@ -54,8 +54,8 @@ export async function checkReading({ app, page, id }) {
     await row.locator('.tool-output').evaluate(el => { el.scrollTop = 72; window.__readingRow = el.closest('.tool-call'); });
     step('API call ends');
     await send([{ type: 'message_end', message: assistant }]);
-    assert.equal(await page.locator('.usage-speed-value b').innerText(), '50.0', 'TPS updates after this API call, while the agent is still running');
-    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Request avg', 'receipt-only timing is not generation speed');
+    assert.equal(await page.locator('.usage-speed-value b').innerText(), '—', 'receipt-only completion must not report request-average TPS');
+    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Speed unavailable', 'receipt-only timing cannot establish generation speed');
     assert.equal(await row.evaluate(el => el === window.__readingRow), true, 'final reasoning must not remount the tool row');
     assert.equal(await row.locator('.tool-call-head').getAttribute('aria-expanded'), 'true');
     assert.equal(await row.locator('.tool-output').evaluate(el => el.scrollTop), 72);
@@ -81,11 +81,11 @@ export async function checkReading({ app, page, id }) {
     assert.equal(await row.locator('.tool-output').evaluate(el => el.scrollTop), 72);
     assert.ok(Math.abs(await page.locator('.transcript').evaluate(el => el.scrollTop) - before) < 2, 'streaming must not drag the transcript to the bottom');
     const sourceTiming = { source: 'agent', complete: true, start: stamp, first: stamp + 500, last: stamp + 1500, end: stamp + 2000,
-      chars: answer.length + 'Checking another detail.'.length, thinkingChars: 'Checking another detail.'.length, deltas: 3 };
+      chars: answer.length + 'Checking another detail.'.length, thinkingChars: 'Checking another detail.'.length, deltas: 3, weight: 100, firstWeight: 10 };
     await send([{ type: 'message_end', message: { ...next, __timing: sourceTiming, content: [{ type: 'thinking', thinking: 'Checking another detail.' }, { type: 'text', text: answer }] } }]);
     assert.equal(await pill.evaluate(el => el === window.__changesPill), true, 'changes pill must not disappear/reappear at API call boundaries');
-    assert.equal(await page.locator('.usage-speed-value b').innerText(), '~200', 'source-observed first→last speed is explicitly approximate');
-    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Stream avg');
+    assert.equal(await page.locator('.usage-speed-value b').innerText(), '~180', 'generation TPS excludes TTFT and the first chunk’s 10% of output');
+    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Generation');
     step('jump to latest');
     await page.getByRole('button', { name: 'Jump to latest' }).click();
     assert.ok(await page.locator('.transcript').evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight < 2));
@@ -101,6 +101,23 @@ export async function checkReading({ app, page, id }) {
     assert.equal(await page.locator('.work-body .step-markdown', { hasText: 'A thought to inspect' }).count(), 1);
     await send([{ type: 'message_end', message: { ...thinking, content: [{ type: 'text', text: 'Untimed history' }], usage: { output: 10 } } }]);
     assert.equal(await page.locator('.usage-speed-value b').innerText(), '—', 'untimed call must not inherit a previous speed');
+    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Speed unavailable');
+
+    step('hidden reasoning uses answer-only generation');
+    const answerWindow = { first: stamp + 4000, last: stamp + 5000, chars: 400, deltas: 3, weight: 100, firstWeight: 10 };
+    const hiddenAnswer = { role: 'assistant', timestamp: stamp + 4, content: [{ type: 'text', text: 'Answer. '.repeat(50) }],
+      usage: { output: 500, reasoning: 400 }, durationMs: 6000,
+      __timing: { source: 'agent', complete: true, start: stamp, end: stamp + 6000, thinkingChars: 0, ...answerWindow, answer: answerWindow } };
+    await send([{ type: 'message_end', message: hiddenAnswer }]);
+    assert.equal(await page.locator('.usage-speed-value b').innerText(), '~90.0', 'answer TPS uses (500 − 400) × 90%, not all 500 billed output tokens');
+    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Answer generation');
+
+    step('hidden reasoning without first-answer-chunk evidence has no speed');
+    await send([{ type: 'message_end', message: { ...hiddenAnswer, timestamp: stamp + 5,
+      __timing: { ...hiddenAnswer.__timing, answer: { ...answerWindow, firstWeight: undefined } } } }]);
+    assert.equal(await page.locator('.usage-speed-value b').innerText(), '—', 'incomplete answer timing cannot fall back to full-output TPS or request duration');
+    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Speed unavailable');
+    assert.equal(await page.locator('.usage').getByText('Request avg', { exact: true }).count(), 0);
   } catch (error) {
     await page.screenshot({ path: `/tmp/pidesk-e2e/shots/zz-reading-${label.replace(/\W+/g, '-')}.png` }).catch(() => {});
     const dom = await page.locator('.transcript-inner').innerHTML().catch(() => '');

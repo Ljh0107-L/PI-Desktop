@@ -25,9 +25,9 @@ export function fromHistory(messages, timings = {}) {
 // Pi's usage: input = uncached prompt tokens, cacheRead / cacheWrite = cached prompt tokens, output
 // (which already includes `reasoning` when the provider reports it).
 //
-// Only source-observed stream timing can describe streaming throughput. Renderer receipt timestamps
-// include SSH buffering/replay and cannot measure generation. durationMs is a separate, full-request
-// average (queueing, prefill and reasoning included), never silently mixed with stream throughput.
+// Only source-observed generation windows contribute to TPS. Renderer receipt timestamps include
+// SSH buffering/replay; durationMs includes TTFT and is NEVER a generation-speed denominator.
+// First-chunk content is excluded from the numerator because it predates the measured window.
 // A user-initiated stop sometimes arrives as an ordinary error message ("This
 // operation was aborted") instead of stopReason "aborted". Treat both as an
 // interruption notice, not as a provider failure in a red error box.
@@ -41,45 +41,55 @@ const nonnegative = n => Number.isFinite(n) && n >= 0 ? n : 0;
 const positive = n => Number.isFinite(n) && n > 0;
 function generation(m) {
   if (['pending', 'deferred', 'error', 'aborted'].includes(m.stopReason) || isAbortMessage(m)) return null;
+  const t = m.__timing;
+  // Captured in Pi before RPC/SSH delivery, not reconstructed from desktop receipt times. Older
+  // records without first-chunk weights cannot establish a matching token/time sample.
+  if (!['agent', 'relay'].includes(t?.source) || t.complete !== true ||
+      ![t.start, t.first, t.last, t.end].every(n => Number.isFinite(n) && n >= 0) ||
+      !(t.start <= t.first && t.first < t.last && t.last <= t.end)) return null;
   const blocks = Array.isArray(m.content) ? m.content : [];
   const answer = typeof m.content === 'string' ? m.content : blocks.filter(b => b?.type === 'text').map(b => b.text ?? '').join('\n');
   const thinking = blocks.filter(b => b?.type === 'thinking').map(b => b.thinking ?? '').join('\n');
   const tools = blocks.filter(b => b?.type === 'toolCall').map(b => `${b.name ?? ''} ${JSON.stringify(b.arguments ?? {})}`).join('\n');
   const visible = [answer, thinking, tools].filter(Boolean).join('\n');
   const visibleOutput = estimateTokens(visible);
+  const answerText = [answer, tools].filter(Boolean).join('\n');
   const reported = m.usage?.output;
   const reasoning = nonnegative(m.usage?.reasoning);
-  // A one-token placeholder is common in gateways, including Cursor. Beyond this narrow case,
-  // a character heuristic cannot prove a positive token count wrong (especially for tool JSON).
+  // A one-token placeholder is common in gateways. A character heuristic cannot prove any other
+  // positive provider count wrong, especially for highly compressible text or tool JSON.
   const inferTokens = !positive(reported) || (reported === 1 && visibleOutput >= 20);
-  const estimated = inferTokens || m.__usageProvenance?.source === 'estimated';
-  // Reasoning is already part of output. When estimating, use reported reasoning INSTEAD OF its
-  // visible text, not in addition; hidden, unreported reasoning cannot be reconstructed.
-  const out = inferTokens ? estimateTokens([answer, tools].filter(Boolean).join('\n')) + (reasoning || estimateTokens(thinking)) : reported;
-  if (!positive(out)) return null;
-  const t = m.__timing;
-  const requestMs = positive(m.durationMs) ? m.durationMs : null;
-  let streamMs = null;
-  // Relay contract: timestamp/character counters captured before buffering and retained on replay.
-  // `complete` means message_start and every update were observed; renderer/legacy timings are not
-  // trusted. First→last excludes the first chunk's generation, so even this rate is approximate.
-  if (['agent', 'relay'].includes(t?.source) && t.complete === true && t.deltas >= 2 &&
-      [t.start, t.first, t.last, t.end].every(Number.isFinite) &&
-      t.start <= t.first && t.first < t.last && t.last <= t.end) {
-    const window = t.last - t.first;
-    const coversOutput = visibleOutput >= Math.max(20, out * 0.5) && t.chars >= visible.length * 0.8;
-    const coversReasoning = !(reasoning && m.__usageProvenance?.thinking === 'summary') &&
-      !blocks.some(b => b?.type === 'thinking' && b.redacted) &&
-      (!reasoning || (estimateTokens(thinking) >= reasoning * 0.5 && t.thinkingChars >= thinking.length * 0.8));
-    // Short/one-chunk responses and dense upstream bursts do not establish a useful generation
-    // window. Do not cap genuine throughput: use the independently labeled request average.
-    if (window >= 200 && Number.isFinite(t.chars) && t.chars / window <= 20 && coversOutput && coversReasoning &&
-        (requestMs == null || window <= requestMs)) streamMs = window;
+  let estimated = inferTokens || m.__usageProvenance?.source === 'estimated';
+  let out = inferTokens ? estimateTokens(answerText) + (reasoning || estimateTokens(thinking)) : reported;
+  const coversReasoning = m.__usageProvenance?.thinking !== 'summary' &&
+    !blocks.some(b => b?.type === 'thinking' && b.redacted) &&
+    (!thinking || (Number.isFinite(t.thinkingChars) && t.thinkingChars >= thinking.length * 0.8)) &&
+    (!reasoning || estimateTokens(thinking) >= reasoning * 0.5);
+  const scope = coversReasoning ? 'all' : 'answer';
+  const sample = coversReasoning ? t : t.answer;
+  const content = coversReasoning ? visible : answerText;
+  if (!coversReasoning) {
+    // Hidden/summary reasoning is NOT generated inside the answer window. Subtract it when its
+    // count is known; otherwise estimate visible answer/tool output, never unknown hidden work.
+    if (!inferTokens && Number.isFinite(m.usage?.reasoning) && m.usage.reasoning >= 0) out = reported - reasoning;
+    else { out = estimateTokens(answerText); estimated = true; }
   }
-  return { requestMs, streamMs, out, estimated, hiddenWork: reasoning > 0 };
+  if (!positive(out) || !sample || sample.interrupted === true || !Number.isInteger(sample.deltas) || sample.deltas < 2 ||
+      ![sample.first, sample.last, sample.chars, sample.weight, sample.firstWeight].every(Number.isFinite) ||
+      !(t.first <= sample.first && sample.first < sample.last && sample.last <= t.last) ||
+      !(sample.firstWeight > 0 && sample.firstWeight < sample.weight)) return null;
+  const ms = sample.last - sample.first;
+  // Tiny replies, one-chunk tool JSON and dense upstream bursts cannot establish a useful decode
+  // window. Unknown is preferable to a request average or fabricated high TPS. Keep usage intact.
+  if (ms < 200 || sample.chars / ms > 20 || sample.chars < content.length * 0.8 ||
+      estimateTokens(content) < Math.max(20, out * 0.5)) return null;
+  // Deltas are chunks, not single tokens. Allocate reported tokens by observed token weights and
+  // remove the entire first chunk (including same-timestamp deltas), not merely one token.
+  out *= (sample.weight - sample.firstWeight) / sample.weight;
+  return positive(out) ? { ms, out, estimated, scope, hiddenWork: reasoning > 0 } : null;
 }
 export function usageOf(messages) {
-  const u = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0, reasoningReported: false, cost: 0, genMs: 0, genOut: 0, speedEstimated: false, speedTokensEstimated: false, speedBasis: null, speedPartial: false, hiddenWork: false, start: null, end: null, calls: 0 };
+  const u = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0, reasoningReported: false, cost: 0, genMs: 0, genOut: 0, speedEstimated: false, speedTokensEstimated: false, speedBasis: null, speedScope: null, speedPartial: false, hiddenWork: false, start: null, end: null, calls: 0 };
   const speeds = [];
   let speedCalls = 0;
   for (const m of messages) {
@@ -108,35 +118,34 @@ export function usageOf(messages) {
       u.start = Math.min(u.start ?? t.start, t.start); u.end = Math.max(u.end ?? t.end, t.end);
     }
   }
-  // Aggregate on ONE denominator. Prefer stream timing only when it covers every call; otherwise
-  // use full-request durations where available. Never average stream TPS with request-average TPS.
-  const streams = speeds.filter(g => g.streamMs != null), requests = speeds.filter(g => g.requestMs != null);
-  const useStreams = streams.length > 0 && (streams.length === speedCalls || !requests.length);
-  const samples = useStreams ? streams : requests;
+  // Sum matching generation samples, never request durations or averages of per-call TPS.
+  // Do not mix answer-only samples with full streamed reasoning+answer samples. Missing calls
+  // retain their billed usage but are explicitly excluded from speed, not a reason to change units.
+  const scope = speeds.at(-1)?.scope;
+  const samples = speeds.filter(g => g.scope === scope);
   if (samples.length) {
-    u.speedBasis = useStreams ? 'stream' : 'request';
+    u.speedBasis = 'generation'; u.speedScope = scope;
     u.speedPartial = samples.length < speedCalls;
     for (const g of samples) {
-      u.genMs += useStreams ? g.streamMs : g.requestMs; u.genOut += g.out;
+      u.genMs += g.ms; u.genOut += g.out;
       u.speedTokensEstimated ||= g.estimated; u.hiddenWork ||= g.hiddenWork;
     }
-    u.speedEstimated = useStreams || u.speedTokensEstimated;
+    u.speedEstimated = true; // source-observed chunk timing/first-chunk allocation is approximate
   }
   const prompt = u.input + u.cacheRead + u.cacheWrite;
   return { ...u, prompt, cacheHit: u.cacheUnknown ? null : prompt ? u.cacheRead / prompt : null, tps: u.genMs ? u.genOut / (u.genMs / 1000) : null, durationMs: u.start != null && u.end != null ? u.end - u.start : null };
 }
 
 export function speedDisplay(usage) {
-  if (!Number.isFinite(usage.tps)) return { value: '—', label: 'Speed unavailable', title: 'No usable timing or output count for this call. An older call’s speed is not substituted.' };
-  const stream = usage.speedBasis === 'stream';
-  const title = stream
-    ? 'Output tokens ÷ first→last source-observed stream window. Approximate streaming throughput, not server decode-only TPS; chunking and upstream buffering can affect it.'
-    : 'Output tokens ÷ full model request duration, including queueing, prefill and reasoning. Not generation-only TPS.';
-  const estimate = usage.speedTokensEstimated ? ' Token counts are estimated by the bridge or from visible text/tool arguments and reported or visible reasoning; unreported hidden reasoning is excluded. Provider token totals remain unchanged.' : ' Uses provider-reported output tokens; reasoning is already included.';
+  if (!Number.isFinite(usage.tps)) return { value: '—', label: 'Speed unavailable', title: 'No reliable generation window for this call (for example, old timing or buffered/too little output). Request duration and an older call’s speed are never substituted.' };
+  const answer = usage.speedScope === 'answer';
+  const title = 'Generation tokens after the first chunk ÷ first→last source-observed generation time. Excludes TTFT, tool execution and completion trailers. First-chunk tokens are allocated by text weights and excluded. Approximate, not server decode-only TPS; upstream buffering can affect it.';
+  const scope = answer ? ' Answer/tool output only: hidden or summarized reasoning tokens and time are excluded.' : ' Includes fully streamed reasoning once, not in addition to output.';
+  const estimate = usage.speedTokensEstimated ? ' Token counts are estimated by the bridge or from visible text/tool arguments and reported or visible reasoning. Provider token totals remain unchanged.' : ' Uses provider-reported output counts; provider token totals remain unchanged.';
   return {
     value: `${usage.speedEstimated ? '~' : ''}${usage.tps >= 100 ? Math.round(usage.tps) : usage.tps.toFixed(1)}`,
-    label: stream ? 'Stream avg' : 'Request avg',
-    title: title + estimate + (usage.speedPartial ? ' Only calls with usable timing are included.' : ''),
+    label: answer ? 'Answer generation' : 'Generation',
+    title: title + scope + estimate + (usage.speedPartial ? ' Only calls with usable timing and the same generation scope are included.' : ''),
   };
 }
 // Usage per finished turn (user message → the replies that followed), oldest first.
