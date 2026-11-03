@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { MenuItem, MenuSection, Modal, Popover, Spinner, baseName, envIcon, shortPath } from './ui.jsx';
 import { api, clearQueued, getState, notify, openSettings, setDraft, setEnvironments, useStore } from './store.js';
+import { composerEngine } from './session-engine.js';
 import { CursorModelMenu } from './Cursor.jsx';
 import { cachedDir, listDir, prefetchDir } from './dirs.js';
 
@@ -282,7 +283,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   const [pi, setPi] = useState([]);
   const ref = useRef(null);
   const draftEngine = useStore(s => s.draft.engine);
-  const cursor = (session?.engine ?? draftEngine) === 'cursor';
+  const cursor = composerEngine(session, { engine: draftEngine }) === 'cursor';
   const streaming = session?.streaming;
   useEffect(() => { if (autoFocus) ref.current?.focus(); }, [autoFocus, session?.id]);
   useEffect(() => {
@@ -389,12 +390,13 @@ export function ComposerBar({ session }) {
   const environmentId = isNew ? draft.environmentId : session.environmentId;
   const env = environments.find(e => e.id === environmentId) ?? { id: environmentId, label: session?.environmentLabel ?? 'This computer', kind: environmentId?.startsWith('ssh:') ? 'ssh' : 'local' };
   const cursorEnabled = useStore(s => !!s.settings.cursor?.enabled);
-  const engine = session?.engine ?? draft.engine ?? 'pi';
+  const engine = composerEngine(session, draft);
   const cursor = engine === 'cursor';
   const model = isNew ? cursor ? draft.cursorModel : draft.model : session.model;
   const effort = isNew ? draft.thinkingLevel : session.thinkingLevel;
   const cwd = isNew ? draft.cwd : session.cwd;
   const modelInfo = catalog.find(m => m.provider === model?.provider && m.id === model?.id);
+  const modelTitle = model ? `${model.provider}/${model.id}` : 'Choose a Cursor model';
   const prep = envStatus[environmentId];
 
   const changeEnv = id => {
@@ -424,9 +426,9 @@ export function ComposerBar({ session }) {
       <div className="composer-bar-right">
         {(cursorEnabled || cursor) && (isNew
           ? <Trigger width={220} label="Agent" className="engine-trigger" menu={close => <><MenuItem label="Pi" checked={!cursor} onClick={() => { setDraft({ engine: 'pi' }); close(); }} /><MenuItem label="Cursor CLI" checked={cursor} disabled={!cursorEnabled} onClick={() => { setDraft({ engine: 'cursor' }); close(); }} /></>}><span>{cursor ? 'Cursor CLI' : 'Pi'}</span></Trigger>
-          : <span className="muted engine-label">{cursor ? 'Cursor CLI' : 'Pi'}</span>)}
-        {cursor ? <Trigger width={340} label="Model" className="model-trigger" menu={close => <CursorModelMenu environmentId={environmentId} sessionId={session?.id} value={model} onChange={changeModel} close={close} />}><span className="strong">{model?.name ?? model?.id ?? 'Cursor default'}</span></Trigger> : catalog.length || model
-          ? <Trigger width={320} label="Model" className="model-trigger" menu={close => <ModelMenu value={model} onChange={changeModel} close={close} />}>
+          : <span className="muted engine-label" title="Conversation engine — choose a different engine when starting a new conversation">{cursor ? 'Cursor CLI' : 'Pi'}</span>)}
+        {cursor ? <Trigger width={340} label="Model" title={modelTitle} className="model-trigger" menu={close => <CursorModelMenu environmentId={environmentId} sessionId={session?.id} value={model} onChange={changeModel} close={close} />}><span className="strong">{model?.name ?? model?.id ?? 'Cursor default'}</span></Trigger> : catalog.length || model
+          ? <Trigger width={320} label="Model" title={modelTitle} className="model-trigger" menu={close => <ModelMenu value={model} onChange={changeModel} close={close} />}>
               <span className="strong">{modelLabel(model, catalog)}</span>
             </Trigger>
           : <button type="button" className="trigger attention" onClick={() => openSettings(true, 'providers')}><Icon name="key" size={15} /><span>Add a model</span></button>}

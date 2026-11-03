@@ -300,7 +300,7 @@ export class SessionManager extends EventEmitter {
   }
   #view(record) {
     const runtime = this.runtimes.get(record.id);
-    return { ...record, status: runtime?.status ?? 'idle', phase: runtime?.phase ?? null, streaming: !!runtime?.streaming, pendingQuestions: runtime ? [...runtime.questions.values()] : [] };
+    return { ...record, engine: record.engine === 'cursor' ? 'cursor' : 'pi', status: runtime?.status ?? 'idle', phase: runtime?.phase ?? null, streaming: !!runtime?.streaming, pendingQuestions: runtime ? [...runtime.questions.values()] : [] };
   }
   record(id) {
     const record = this.store.sessions.find(s => s.id === id);

@@ -14,6 +14,7 @@ import './transcript.mjs';
 import './projectless.mjs';
 import { checkReading } from './reading.mjs';
 import { checkFilePreview } from './file-preview-ui.mjs';
+import { checkSessionEngineIsolation } from './session-engine-ui.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -755,6 +756,15 @@ try {
 } catch (error) {
   check('restore failed', false, error.message.split('\n')[0]);
   await S('zz-restore-failure').catch(() => {});
+}
+if (results.every(Boolean)) {
+  try {
+    await checkSessionEngineIsolation({ app, page, session: await activeRecord() });
+    check('legacy Pi composer is isolated from the Cursor draft', true);
+  } catch (error) {
+    check('session engine isolation', false, error.message);
+    await S('zz-session-engine').catch(() => {});
+  }
 }
 const secretsFile = readFileSync(join(profile, 'secrets.json'), 'utf8');
 check('settings never store the key in settings.json', !readFileSync(join(profile, 'settings.json'), 'utf8').includes('sk-e2e-secret') && !secretsFile.includes('sk-e2e-secret') && !readFileSync(join(profile, 'settings.json'), 'utf8').includes('sk-e2e-rotated') && !secretsFile.includes('sk-e2e-rotated'));

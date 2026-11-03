@@ -92,7 +92,11 @@ test('Cursor session uses supplied API key and redacts split authentication erro
   t.after(() => client.close());
   const events = [], file = join(f.cwd, 'history.jsonl');
   const desktop = new CursorDesktopSession({ client, cwd: f.cwd, file, credentialVersion: 4, send: event => events.push(structuredClone(event)) });
+  const requests = [];
+  const originalSend = client.send.bind(client);
+  client.send = message => { if (message.method) requests.push(message.method); return originalSend(message); };
   await desktop.start();
+  assert.deepEqual(requests, ['initialize', 'session/new'], 'API-key sessions must not call the interactive authenticate RPC');
   assert.equal(desktop.state().cursorCredentialVersion, 4);
   desktop.prompt('auth-status'); await desktop.turn;
   assert.equal(desktop.messages().at(-1).content[0].text, 'Credential: primary');
@@ -100,6 +104,16 @@ test('Cursor session uses supplied API key and redacts split authentication erro
   assert.equal(desktop.messages().at(-1).stopReason, 'error');
   assert.match(desktop.messages().at(-1).errorMessage, /\[redacted\]/);
   for (const text of [JSON.stringify(events), readFileSync(file, 'utf8'), client.stderr, client.child.spawnargs.join(' ')]) assert.ok(!text.includes(KEY));
+});
+
+test('Cursor RPC diagnostics preserve method/code/detail without exposing the key', () => {
+  const client = new CursorAcp({ command: 'not-started', cwd: '/tmp', apiKey: KEY });
+  const error = client.rpcError('authenticate', { code: -32602, message: 'Invalid params', data: { message: `Browser login failed for ${KEY}` } });
+  assert.equal(error.method, 'authenticate');
+  assert.equal(error.code, -32602);
+  assert.match(error.message, /authentication.*authenticate.*-32602.*Browser login failed/);
+  assert.ok(!error.message.includes(KEY));
+  assert.match(error.message, /\[redacted\]/);
 });
 
 test('credential changes restart idle sessions once; active work is not interrupted', async t => {

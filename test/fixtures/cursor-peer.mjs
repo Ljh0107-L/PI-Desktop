@@ -24,7 +24,11 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
         send({ id: p.id, error: { code: -32000, message: 'Cursor API Key is missing or invalid' } }); break;
       }
       result(p.id, { protocolVersion: 1, agentCapabilities: { loadSession: true, promptCapabilities: { image: true } }, authMethods: [{ id: 'cursor_login', name: 'Cursor login' }] }); break;
-    case 'authenticate': result(p.id, {}); break;
+    case 'authenticate':
+      // Mirrors the official CLI: this method is browser login, not API-key auth.
+      if (process.env.CURSOR_API_KEY || process.env.CURSOR_AUTH_TOKEN) send({ id: p.id, error: { code: -32602, message: 'Invalid params', data: { message: 'Browser login must not be requested for a pre-authenticated API-key session' } } });
+      else result(p.id, {});
+      break;
     case 'session/new': case 'session/load':
       sessionId = p.params.sessionId || sessionId;
       // A replay must not become a new assistant message in desktop history.

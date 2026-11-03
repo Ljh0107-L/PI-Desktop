@@ -63,7 +63,7 @@ export class CursorAcp extends EventEmitter {
     this.closed = false;
   }
   get stderr() { return this._stderr.slice(-4000); }
-  async start({ authenticate = true } = {}) {
+  async start() {
     // Identity checks are filesystem-only and happen before ANY key-bearing spawn.
     this.command = await validateCursorCommand(this.command, { path: this.env.PATH, cwd: this.cwd });
     const child = this.child = this.spawnProcess(this.command, ['--disable-auto-update', 'acp'], { cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
@@ -94,7 +94,10 @@ export class CursorAcp extends EventEmitter {
     const init = await this.request('initialize', { protocolVersion: 1, clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false }, clientInfo: { name: 'pi-desktop', version: '0.1' } });
     if (init.protocolVersion !== 1) throw new Error(`Unsupported Cursor ACP protocol: ${init.protocolVersion}`);
     this.capabilities = init.agentCapabilities ?? {};
-    if (authenticate && init.authMethods?.some(method => method.id === 'cursor_login')) await this.request('authenticate', { methodId: 'cursor_login' });
+    // The official CLI marks env API keys/auth tokens and an existing CLI login
+    // authenticated at startup. ACP authenticate(cursor_login) instead checks
+    // browser-login credentials and can launch a browser even with an API key.
+    // Never silently enter that interactive flow from a desktop SDK connection.
     return init;
   }
   send(message) {
@@ -109,7 +112,7 @@ export class CursorAcp extends EventEmitter {
         this.pending.delete(id);
         reject(new Error(`Cursor CLI timed out during ${method}`));
       }, timeout) : null;
-      this.pending.set(id, { resolve, reject, timer });
+      this.pending.set(id, { resolve, reject, timer, method });
       try { this.send({ id, method, params }); }
       catch (error) { clearTimeout(timer); this.pending.delete(id); reject(error); }
     });
@@ -127,14 +130,22 @@ export class CursorAcp extends EventEmitter {
       if (!pending) return;
       clearTimeout(pending.timer);
       this.pending.delete(message.id);
-      if (message.error) pending.reject(new Error(this.redact(message.error.message || 'Cursor request failed')));
+      if (message.error) pending.reject(this.rpcError(pending.method, message.error));
       else pending.resolve(message.result);
     }
+  }
+  rpcError(method, error) {
+    const labels = { initialize: 'initialization', authenticate: 'authentication', 'session/new': 'session creation', 'session/load': 'session restore', 'session/set_model': 'model selection', 'session/set_config_option': 'model selection', 'session/prompt': 'prompt' };
+    const summary = error?.message || 'Cursor request failed';
+    const detail = typeof error?.data?.message === 'string' ? error.data.message : '';
+    const code = Number.isFinite(error?.code) ? error.code : undefined;
+    const message = this.redact(`Cursor ${labels[method] ?? method} (${method}${code === undefined ? '' : `, RPC ${code}`}): ${summary}${detail && detail !== summary ? ` — ${detail}` : ''}`);
+    return Object.assign(new Error(message.slice(0, 2400)), { method, code });
   }
   fail(error) {
     if (this.failure) return;
     this.failure = error;
-    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
+    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(this.rpcError(pending.method, error)); }
     this.pending.clear();
   }
   async openSession(sessionId) {
