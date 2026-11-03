@@ -29,7 +29,7 @@ function useListing(sessionId, rel, open, version) {
   useEffect(() => {
     if (!open) return;
     let alive = true;
-    api('listFiles', sessionId, rel).then(r => { listings.set(key, r); if (alive) setState(r); }, e => { if (alive) setState({ error: e.message }); });
+    api('listFiles', sessionId, rel).then(r => { if (alive) { listings.set(key, r); setState(r); } }, e => { if (alive) setState({ error: e.message }); });
     return () => { alive = false; };
   }, [key, open, version]);
   return state;
