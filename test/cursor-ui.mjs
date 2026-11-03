@@ -39,9 +39,9 @@ try {
         await window.pidesk.invoke('prepareEnvironment', state.draft.environmentId);
       }, project);
     }
+    await page.getByRole('button', { name: 'Agent', exact: true }).click();
+    await page.locator('.popover .menu-item', { hasText: /^Cursor CLI$/ }).click();
     if (environmentId === 'local') {
-      await page.getByRole('button', { name: 'Agent', exact: true }).click();
-      await page.locator('.popover .menu-item', { hasText: /^Cursor CLI$/ }).click();
       await page.getByRole('button', { name: 'Folder', exact: true }).click();
       await page.locator('.popover .menu-item', { hasText: 'Choose a folder' }).click();
     }

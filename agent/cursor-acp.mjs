@@ -34,7 +34,7 @@ export class CursorAcp extends EventEmitter {
     this.closed = false;
   }
   async start() {
-    const child = this.child = this.spawnProcess(this.command, ['acp'], { cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const child = this.child = this.spawnProcess(this.command, ['acp'], { cwd: this.cwd, env: this.env, stdio: ['pipe', 'pipe', 'pipe'], detached: process.platform !== 'win32' });
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     let buffer = '';
@@ -116,8 +116,15 @@ export class CursorAcp extends EventEmitter {
     if (!this.child || this.closed) return;
     this.fail(new Error('Cursor connection closed'));
     this.child.stdin.end();
-    this.child.kill('SIGTERM');
-    const timer = setTimeout(() => this.child.kill('SIGKILL'), 2000);
+    const kill = signal => {
+      try {
+        if (process.platform !== 'win32' && this.child.pid) process.kill(-this.child.pid, signal);
+        else this.child.kill(signal);
+      } catch (error) { if (error.code !== 'ESRCH') this.child.kill(signal); }
+    };
+    // The separate process group also contains tools spawned by an unresponsive CLI.
+    kill('SIGTERM');
+    const timer = setTimeout(() => kill('SIGKILL'), 2000);
     try { await this.exit; } finally { clearTimeout(timer); }
   }
 }

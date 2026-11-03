@@ -189,8 +189,10 @@ export class CursorDesktopSession {
     if (!this.streaming) return;
     this.cancelling = true; this.clearDialogs();
     try { this.client.notify('session/cancel', { sessionId: this.sessionId }); } catch { /* process has already exited */ }
-    const timer = setTimeout(() => { void this.client.close(); }, 2500);
-    try { await this.turn; } finally { clearTimeout(timer); }
+    // SessionManager owns the four-second fallback: it stops the relay process and
+    // starts a fresh adapter before accepting another prompt. Do not announce an
+    // early settled event from a CLI that is still being forcibly terminated.
+    await this.turn;
   }
   async request(type, p = {}) {
     switch (type) {
