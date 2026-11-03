@@ -1,6 +1,6 @@
 # Cursor quota bridge integration (deprecated)
 
-The VMISS `cursor-quota.service` has been stopped and disabled at the user's request. The source is retained for reference and rollback; Pi Desktop's new [Cursor SDK sessions](../../docs/cursor.md) use the official CLI/ACP instead. Desktop updates do not restart or redeploy this service.
+The VMISS `cursor-quota.service` has been stopped and disabled at the user's request. The source is retained for reference and rollback. Pi Desktop no longer includes any Cursor engine: its Cursor CLI sessions were removed in 0.1.38. Desktop updates do not restart or redeploy this service.
 
 This directory is a maintained, MIT-licensed snapshot of the Python `cursor2api`
 service deployed on the user's VMISS host, with offline regression fixtures.

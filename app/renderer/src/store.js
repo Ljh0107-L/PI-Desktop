@@ -3,8 +3,6 @@ import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerD
 import { relativeSessionPath } from './file-paths.js';
 import { useRef, useSyncExternalStore } from 'react';
 import { applyEvent, emptyTranscript, fromHistory, rewindTo } from './transcript.js';
-import { favouriteModels } from './file-paths.js';
-import { draftCursorEffort } from './cursor-options.js';
 import { isSubagentFinished, subagentBatches, subagentHistoryId, visibleSubagentBatches } from './subagent-state.js';
 
 // Generation timing per reply (Pi's history keeps token counts but not timing), so tok/s survives reloads.
@@ -82,7 +80,6 @@ export function notify(message, level = 'info') {
 window.pidesk.subscribe(({ channel, payload }) => {
   switch (channel) {
     case 'event': {
-      if (payload.event.type === 'cursor_usage_changed') scheduleStats(payload.id);
       if (transcriptOf(payload.id).rewinding) break; // old branch, superseded by an edit
       { const next = applyEvent(transcriptOf(payload.id), payload.event);
         setTranscript(payload.id, next);
@@ -140,9 +137,6 @@ window.pidesk.subscribe(({ channel, payload }) => {
     case 'environments':
       set({ environments: payload });
       break;
-    case 'settings':
-      set({ settings: payload });
-      break;
     case 'environment':
       set(s => ({ envStatus: { ...s.envStatus, [payload.id]: payload } }));
       if (payload.status === 'ready') import('./dirs.js').then(d => d.prefetchDir(payload.id)); // the folder browser opens instantly
@@ -157,7 +151,7 @@ export async function bootstrap() {
   set({
     ready: true, settings: boot.settings, environments: boot.environments, sessions: boot.sessions, home: boot.home, piVersion: boot.piVersion,
     questions: Object.fromEntries(boot.sessions.map(s => [s.id, s.pendingQuestions ?? []])),
-    draft: { environmentId: d.environmentId ?? 'local', cwd: boot.settings.recentFolders?.[d.environmentId ?? 'local']?.[0] ?? null, model: d.model, thinkingLevel: d.thinkingLevel, cursorEffort: d.cursorEffort ?? null },
+    draft: { environmentId: d.environmentId ?? 'local', cwd: boot.settings.recentFolders?.[d.environmentId ?? 'local']?.[0] ?? null, model: d.model, thinkingLevel: d.thinkingLevel },
   });
   loadCatalog();
   api('resumeRemote').catch(() => {}); // re-attach SSH sessions still running on their hosts
@@ -321,20 +315,15 @@ function scheduleStats(id) {
 
 export async function startSession(text, attachments = []) {
   const { draft } = state;
-  const cursor = draft.engine === 'cursor';
-  if (!cursor && !draft.model) throw new Error('Add a model provider in Settings first.');
-  if (cursor && !state.settings.cursor?.enabled) throw new Error('Enable Cursor SDK in Settings first.');
+  if (!draft.model) throw new Error('Add a model provider in Settings first.');
   const pendingId = 'pending';
-  set({ view: 'session', activeId: pendingId, pendingEngine: cursor ? 'cursor' : 'pi', transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: [{ role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] } } });
+  set({ view: 'session', activeId: pendingId, transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: [{ role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] } } });
   try {
-    const cursorModel = cursor ? draft.cursorModel ?? favouriteModels(state.settings.cursor)[0] ?? null : null;
-    const session = await api('createSession', { environmentId: draft.environmentId, cwd: draft.cwd, engine: draft.engine ?? 'pi', model: cursor ? cursorModel : draft.model, thinkingLevel: cursor ? draftCursorEffort(state.settings.cursor, cursorModel?.id, draft.cursorEffort) ?? 'off' : draft.thinkingLevel, prompt: text });
+    const session = await api('createSession', { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel, prompt: text });
     set(s => ({ activeId: session.id, transcripts: { ...s.transcripts, [session.id]: { ...emptyTranscript(), loaded: true }, [pendingId]: undefined }, sessions: s.sessions.some(x => x.id === session.id) ? s.sessions : [session, ...s.sessions] }));
-    if (!cursor) warnIfNoImages(draft.model, attachments);
+    warnIfNoImages(draft.model, attachments);
     await api('prompt', session.id, text, attachments);
-    if (!cursor) api('updateDefaults', { environmentId: draft.environmentId, model: draft.model, thinkingLevel: draft.thinkingLevel }).then(setSettings);
-    // A chosen Cursor effort is the next Cursor conversation's too (when its model offers it).
-    else if (draft.cursorEffort != null) api('updateDefaults', { cursorEffort: draft.cursorEffort }).then(setSettings);
+    api('updateDefaults', { environmentId: draft.environmentId, model: draft.model, thinkingLevel: draft.thinkingLevel }).then(setSettings);
   } catch (error) {
     set({ view: 'new', activeId: null });
     throw error;

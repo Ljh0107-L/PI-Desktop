@@ -3,7 +3,7 @@
 // Everything lives in one install root on the host (default ~/.pidesk):
 //   <root>/node   a portable Node.js, only if the host has no usable Node (>= 22.19)
 //   <root>/pi     Pi, installed with npm --ignore-scripts at the same version as the desktop
-//   <root>/ext    the bridge extension, Cursor adapter and relay (uploaded over stdin, refreshed by hash)
+//   <root>/ext    the bridge extension and the relay (uploaded over stdin, refreshed by hash)
 //   <root>/agent  Pi's agent directory (sessions, settings)
 //   <root>/run    the relay's socket and log;  <root>/tmp  TMPDIR for Pi and npm
 //
@@ -17,7 +17,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSyn
 import { dirname, relative } from 'node:path';
 import { join } from 'node:path';
 import { shellQuote, sshMuxArgs } from '../../core/transports.mjs';
-import { EXTENSION_FILES, EXTENSION_PACKAGE } from './extensions.mjs';
+import { EXTENSION_FILES, EXTENSION_PACKAGE, OBSOLETE_FILES } from './extensions.mjs';
 
 const MIN_NODE = '22.19.0';
 const NEEDED_KB = 600 * 1024;                 // Pi + portable Node with headroom
@@ -215,6 +215,8 @@ export function remoteInspectionScript(root, node, piVersion) {
   const packagePath = `${root}/pi/node_modules/@earendil-works/pi-coding-agent/package.json`;
   return String.raw`
 mkdir -p ${q}/ext ${q}/agent ${q}/run ${q}/tmp 2>/dev/null || exit 1
+# Left by versions with the (removed) Cursor CLI engine: its runtime (~600 MB) and adapter.
+rm -rf ${q}/cursor-sdk ${OBSOLETE_FILES.map(name => `${q}/ext/${name}`).join(' ')} 2>/dev/null
 chmod 700 ${q}/run 2>/dev/null || exit 1
 # npm's shebang must use the selected Node, not an older Node on the login PATH.
 export PATH=${shellQuote(dirname(node))}:"$PATH"

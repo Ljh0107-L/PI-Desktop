@@ -14,7 +14,6 @@ import './transcript.mjs';
 import './projectless.mjs';
 import { checkReading } from './reading.mjs';
 import { checkFilePreview } from './file-preview-ui.mjs';
-import { checkSessionEngineIsolation } from './session-engine-ui.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -212,20 +211,19 @@ try {
   await page.locator('.usage-table').waitFor({ timeout: 15000 });
   const usageText = await page.locator('.usage').innerText();
   check('right panel Usage card shows tok/s and input / cached / output', /tok\/s/.test(usageText) && /Input/.test(usageText) && /Cached/.test(usageText) && /Output/.test(usageText), usageText.replace(/\s+/g, ' '));
-  // This mock reply has fewer than 80 visible characters and 8-character chunks at 25 ms:
-  // it cannot establish a sufficiently covered generation sample, regardless of request duration.
-  check('short mock reply does not invent a generation TPS', await page.locator('.usage-speed-value b').innerText() === '—'
-    && await page.locator('.usage-speed-kind').innerText() === 'Speed unavailable');
+  // This mock reply is too short to measure a generation window: its speed is a marked estimate, not blank.
+  const shortSpeed = await page.locator('.usage-speed-value b').innerText(), shortKind = await page.locator('.usage-speed-kind').innerText();
+  check('a short reply still shows a generation speed, marked as an estimate', /^~\d/.test(shortSpeed) && shortKind === 'Generation (estimated)', `${shortSpeed} · ${shortKind}`);
   check('TPS never offers a full-request average', !/Request avg|Stream avg/.test(usageText));
   check('nothing under the composer but model controls', !(await page.locator('.session-meter').count()));
-  // a model that reasons privately: no fake speed, a "Thought for" row with its reasoning tokens
+  // a model that reasons privately: a "Thought for" row with its reasoning tokens, and an estimated speed
   await waitNew('.markdown', 'echo:', () => send('[[hidden-think]] ponder this'));
   await page.locator('.thinking', { hasText: 'Thought for' }).last().waitFor({ timeout: 15000 });
   const hiddenRow = await page.locator('.thinking', { hasText: 'Thought for' }).last().innerText();
   const tpsAfter = await page.locator('.usage-speed-value b').innerText();
   const hiddenSpeedKind = await page.locator('.usage-speed-kind').innerText();
-  check('hidden reasoning shown as "Thought for…" without fabricated short-answer TPS', /^Thought for \d+s[\s\S]*400 tokens$/.test(hiddenRow.trim())
-    && tpsAfter === '—' && hiddenSpeedKind === 'Speed unavailable', `${hiddenRow.replace(/\s+/g, ' ')} · ${tpsAfter} · ${hiddenSpeedKind}`);
+  check('hidden reasoning shown as "Thought for…", with its speed estimated over the whole response', /^Thought for \d+s[\s\S]*400 tokens$/.test(hiddenRow.trim())
+    && /^~\d/.test(tpsAfter) && hiddenSpeedKind === 'Generation (estimated)', `${hiddenRow.replace(/\s+/g, ' ')} · ${tpsAfter} · ${hiddenSpeedKind}`);
   await S('04b-usage-card');
   await page.locator('.send-button.stop').waitFor({ state: 'detached' });
   const readingSession = (await page.evaluate(() => window.pidesk.invoke('listSessions'))).find(s => s.title.includes('hello from the desktop'));
@@ -632,10 +630,8 @@ try {
   await page.locator('.session-row', { hasText: '(fork)' }).waitFor({ state: 'detached', timeout: 15000 });
   check('right-click menu is Rename / Fork / Archive / Delete, and Delete removes the session', menuItems === 'Rename|Fork|Archive|Delete', menuItems);
 
-  // ---- commands started just before quitting finish while the app is closed (local and remote)
-  await page.locator('.session-row', { hasText: 'hello from the desktop' }).click();
-  await send('[[bash:sleep 3 && echo local-after-quit | tee local-after-quit.txt]]');
-  await page.locator('.tool-group-head .spinner').first().waitFor({ timeout: 15000 });
+  // ---- a command started just before quitting finishes on the host while the app is closed;
+  // on this Mac nothing keeps running once the app quits
   await page.locator('.session-row', { hasText: 'hello from the server' }).click();
   await send('[[bash:sleep 3 && echo after-quit | tee after-quit.txt]]');
   await page.locator('.tool-group-head .spinner').first().waitFor({ timeout: 15000 });
@@ -650,7 +646,8 @@ try {
 await app.close();
 await new Promise(r => setTimeout(r, 4500));
 check('remote command finished while the app was closed', existsSync(join(remoteProject, 'after-quit.txt')));
-check('local command finished while the app was closed', existsSync(join(localProject, 'local-after-quit.txt')));
+const localRelay = JSON.parse(execFileSync(process.execPath, [join(root, 'agent/pidesk-relay.mjs'), 'list'], { env: { ...process.env, PIDESK_RUN_DIR: join(profile, 'run') } }).toString().trim().split('\n').pop());
+check('quitting stops this Mac\'s relay and its Pis: nothing keeps running in the background', localRelay.daemon === false, JSON.stringify(localRelay).slice(0, 160));
 ({ app, page } = await launch({ userData: profile, env }));
 try {
   const openAt = Date.now();
@@ -747,8 +744,6 @@ try {
   await page.click('.fp-actions .tool-button[aria-label="Close files"]');
   await page.locator('.session-row', { hasText: 'hello from the desktop' }).click();
   await waitText('.markdown', '[mock-lab/alpha-1] echo: hello from the desktop', 90000);
-  await waitText('.markdown', 'Tool result: local-after-quit', 60000);
-  check('reopened local session shows the reply produced while closed', true);
   await waitText('.markdown', '[mock-lab/beta-1] echo: after switching models');
   check('history reloaded from the Pi session file', true);
   await page.waitForTimeout(500);
@@ -756,15 +751,6 @@ try {
 } catch (error) {
   check('restore failed', false, error.message.split('\n')[0]);
   await S('zz-restore-failure').catch(() => {});
-}
-if (results.every(Boolean)) {
-  try {
-    await checkSessionEngineIsolation({ app, page, session: await activeRecord() });
-    check('legacy Pi composer is isolated from the Cursor draft', true);
-  } catch (error) {
-    check('session engine isolation', false, error.message);
-    await S('zz-session-engine').catch(() => {});
-  }
 }
 const secretsFile = readFileSync(join(profile, 'secrets.json'), 'utf8');
 check('settings never store the key in settings.json', !readFileSync(join(profile, 'settings.json'), 'utf8').includes('sk-e2e-secret') && !secretsFile.includes('sk-e2e-secret') && !readFileSync(join(profile, 'settings.json'), 'utf8').includes('sk-e2e-rotated') && !secretsFile.includes('sk-e2e-rotated'));
@@ -775,6 +761,3 @@ await mock.close();
 const failed = results.filter(r => !r).length;
 console.log(`\n${results.length - failed}/${results.length} checks passed. Screenshots: ${opts.shots}`);
 process.exitCode = failed ? 1 : 0;
-// Same CI entry point: isolated Cursor SDK fixtures run only after Pi's suite closes.
-if (!failed) await import('./cursor-ui.mjs');
-if (!process.exitCode) await import('./cursor-official.mjs');

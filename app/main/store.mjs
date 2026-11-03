@@ -7,7 +7,8 @@ import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-export const CURSOR_KEY_ID = 'sdk:cursor';
+// Cursor CLI was removed from Pi Desktop; its saved key and settings are deleted on first start.
+const CURSOR_KEY_ID = 'sdk:cursor';
 
 const DEFAULT_SETTINGS = {
   providers: [],
@@ -26,17 +27,6 @@ const DEFAULT_SETTINGS = {
 const KEYCHAIN_SERVICE = 'Pi Desktop Keys';
 const security = args => execFileSync('/usr/bin/security', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 15000 }).trim();
 
-// A Cursor model's own settings (reasoning effort, other parameters) with Cursor's defaults, bounded.
-const text = (value, max = 300) => typeof value === 'string' && value ? value.slice(0, max) : undefined;
-const cleanCursorOptions = options => (Array.isArray(options) ? options : [])
-  .filter(o => o && typeof o.id === 'string' && o.id && o.id.length < 200 && (o.type === 'select' || o.type === 'boolean')).slice(0, 12)
-  .map(o => ({
-    id: o.id, name: text(o.name) ?? o.id, category: text(o.category, 60), type: o.type,
-    currentValue: typeof o.currentValue === 'string' ? o.currentValue.slice(0, 200) : typeof o.currentValue === 'boolean' ? o.currentValue : undefined,
-    ...(o.type === 'select' ? { options: (o.options ?? []).flatMap(v => v?.options ?? [v]).filter(v => v && typeof v.value === 'string' && v.value).slice(0, 30).map(v => ({ value: v.value.slice(0, 200), name: text(v.name) ?? v.value })) } : {}),
-  }));
-const cleanCursorModel = m => ({ id: m.id, name: text(m.name) ?? m.id, ...(Array.isArray(m.configOptions) ? { configOptions: cleanCursorOptions(m.configOptions) } : {}) });
-
 export class Store {
   #master = null;
   constructor(dir, safeStorage, { insecureTestStorage = false, keychainCommand = security } = {}) {
@@ -49,6 +39,14 @@ export class Store {
     this.settings.defaults = { ...DEFAULT_SETTINGS.defaults, ...this.settings.defaults };
     this.secrets = this.#read('secrets.json', {});
     this.sessions = this.#read('sessions.json', []);
+    this.#forgetCursor();
+  }
+  #forgetCursor() {
+    if (this.settings.cursor !== undefined) { delete this.settings.cursor; try { this.saveSettings(); } catch { /* retried next start */ } }
+    if (this.secrets[CURSOR_KEY_ID]) {
+      const { [CURSOR_KEY_ID]: _, ...rest } = this.secrets;
+      try { this.#write('secrets.json', rest); this.secrets = rest; } catch { /* retried next start */ }
+    }
   }
 
   #read(name, fallback) {
@@ -108,53 +106,6 @@ export class Store {
     }
     this.#write('secrets.json', next);
     this.secrets = next;
-  }
-  saveCursorSettings({ enabled, command, apiKey, clearKey = false }) {
-    if (apiKey !== undefined && typeof apiKey !== 'string') throw new Error('Cursor API Key must be text');
-    const key = apiKey?.trim();
-    if (key && (key.length > 16384 || /[\s\x00-\x1f\x7f]/.test(key))) throw new Error('Invalid Cursor API Key');
-    if (key && clearKey) throw new Error('Cannot save and remove the Cursor API Key together');
-    const previous = this.settings.cursor;
-    const previousSecrets = this.secrets;
-    const changed = !!key || (clearKey && this.hasKey(CURSOR_KEY_ID));
-    const version = Number.isSafeInteger(previous?.credentialVersion) ? previous.credentialVersion : 0;
-    let wroteKey = false;
-    try {
-      if (changed) { this.setKey(CURSOR_KEY_ID, key || null); wroteKey = true; }
-      // Whitelist settings: plaintext keys and renderer hasKey flags never reach settings.json.
-      this.settings.cursor = { ...previous, enabled: !!enabled, command, favorites: Array.isArray(previous?.favorites) ? previous.favorites : [], models: Array.isArray(previous?.models) ? previous.models : [], modelsAt: previous?.modelsAt, currentModelId: previous?.currentModelId, credentialVersion: version + (changed ? 1 : 0) };
-      this.saveSettings();
-    } catch (error) {
-      if (previous === undefined) delete this.settings.cursor; else this.settings.cursor = previous;
-      if (wroteKey) {
-        try { this.#write('secrets.json', previousSecrets); this.secrets = previousSecrets; }
-        catch { throw new Error('Could not save Cursor settings or restore the previous key. Check storage permissions and save the key again.'); }
-      }
-      throw error;
-    }
-  }
-  saveCursorModels({ models, currentModelId }) {
-    const clean = (models ?? []).filter(m => m && typeof m.id === 'string' && m.id && m.id.length < 300).slice(0, 500).map(cleanCursorModel);
-    const previous = this.settings.cursor;
-    this.settings.cursor = { ...previous, models: clean, modelsAt: Date.now(), currentModelId: typeof currentModelId === 'string' ? currentModelId : undefined };
-    try { this.saveSettings(); } catch (error) { this.settings.cursor = previous; throw error; }
-  }
-  // Each model's settings as a pre-started Cursor CLI lists them (efforts and their defaults), so a new
-  // conversation offers the right efforts. Only models already in the catalogue are updated.
-  mergeCursorModelSettings(models) {
-    const listed = new Map((Array.isArray(models) ? models : []).filter(m => m && typeof m.id === 'string' && Array.isArray(m.configOptions)).map(m => [m.id, cleanCursorOptions(m.configOptions)]));
-    const previous = this.settings.cursor;
-    if (!listed.size || !previous?.models?.some(m => listed.has(m.id))) return false;
-    const updated = previous.models.map(m => listed.has(m.id) ? { ...m, configOptions: listed.get(m.id) } : m);
-    if (JSON.stringify(updated) === JSON.stringify(previous.models)) return false;
-    this.settings.cursor = { ...previous, models: updated };
-    try { this.saveSettings(); } catch (error) { this.settings.cursor = previous; throw error; }
-    return true;
-  }
-  clearCursorModels() {
-    const previous = this.settings.cursor;
-    this.settings.cursor = { ...previous, models: [], modelsAt: 0, currentModelId: undefined };
-    try { this.saveSettings(); } catch (error) { this.settings.cursor = previous; throw error; }
   }
   getKey(providerId) {
     const entry = this.secrets[providerId];

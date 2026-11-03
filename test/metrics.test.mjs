@@ -112,9 +112,9 @@ test('raw Cursor provenance survives normalization without input mutation or raw
     assert.equal(JSON.stringify(data), before); assert.equal(message.__usageProvenance, undefined);
     assert.ok(!JSON.stringify(result).includes('do not persist'));
     const totals = usageOf([result]);
-    assert.equal(totals.output, 100); assert.equal(totals.genOut, 0); assert.equal(totals.tps, null);
+    assert.equal(totals.output, 100); assert.equal(totals.speedBasis, 'response', 'summarized reasoning: only a whole-response estimate');
     assert.equal(totals.usageEstimated, true); assert.equal(totals.cacheHit, null); assert.equal(totals.cacheUnknown, true);
-    assert.equal(speedDisplay(totals).label, 'Speed unavailable');
+    assert.equal(speedDisplay(totals).label, 'Generation (estimated)');
     f.emit('turn_start'); f.emit('message_start', { message });
     assert.equal(f.emit('message_end', { message }).message.__usageProvenance, undefined);
   }
@@ -366,13 +366,14 @@ test('answer output resumed after summarized or redacted thinking has no numeric
       assert.equal(result.__timing.answer.interrupted, true);
       assert.equal(result.__timing.answer.last - result.__timing.answer.first, 200000);
       assert.equal(result.__timing.interrupted, undefined, 'the root stream is not an answer-only sample');
-      assert.equal(usage.tps, null); assert.equal(usage.genMs, 0); assert.equal(usage.genOut, 0);
+      // An interrupted answer window is never measured; the speed is a whole-response estimate.
+      assert.equal(usage.speedBasis, 'response'); assert.equal(usage.genMs, 600000);
       assert.equal(usage.output, 180); assert.equal(usage.reasoning, 80);
-      assert.equal(speedDisplay(usage).label, 'Speed unavailable');
+      assert.equal(speedDisplay(usage).label, 'Generation (estimated)');
       const persisted = JSON.parse(JSON.stringify(result));
       assert.equal(persisted.__timing.answer.interrupted, true);
-      assert.equal(usageOf(fromHistory([persisted]).messages).tps, null);
-      assert.equal(usageOf(applyEvent(emptyTranscript(), { type: 'message_end', message: persisted }).messages).tps, null);
+      assert.equal(usageOf(fromHistory([persisted]).messages).speedBasis, 'response');
+      assert.equal(usageOf(applyEvent(emptyTranscript(), { type: 'message_end', message: persisted }).messages).speedBasis, 'response');
     }
   }
 });
@@ -493,6 +494,6 @@ test('turn/session resets and replacing an unfinished call discard all counters 
     assert.equal(result.__usageProvenance, undefined); assert.equal(result.__timing.chars, 0);
     assert.equal(result.__timing.weight, 0); assert.equal(result.__timing.firstWeight, 0);
     assert.deepEqual(result.__timing.answer, { first: null, last: null, chars: 0, deltas: 0, weight: 0, firstWeight: 0 });
-    assert.equal(usageOf([result]).tps, null); assert.equal(usageOf([result]).genOut, 0);
+    assert.equal(usageOf([result]).speedBasis, 'response', 'no measured window survives the reset');
   }
 });

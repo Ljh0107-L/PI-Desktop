@@ -1,19 +1,9 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
-import { composerEngine } from '../app/renderer/src/session-engine.js';
 import { SessionManager } from '../app/main/session-manager.mjs';
-
-test('existing sessions never inherit the new-conversation engine', () => {
-  for (const draft of [{ engine: 'cursor' }, { engine: 'pi' }, {}]) {
-    assert.equal(composerEngine({ id: 'legacy-pi' }, draft), 'pi');
-    assert.equal(composerEngine({ id: 'pi', engine: 'pi' }, draft), 'pi');
-    assert.equal(composerEngine({ id: 'cursor', engine: 'cursor' }, draft), 'cursor');
-    assert.equal(composerEngine({ model: { provider: 'cursor' } }, draft), 'pi', 'a Pi provider name is not an agent engine');
-  }
-  assert.equal(composerEngine(null, { engine: 'cursor' }), 'cursor');
-  assert.equal(composerEngine(undefined, { engine: 'pi' }), 'pi');
-  assert.equal(composerEngine(null, null), 'pi');
-});
 
 test('legacy session views advertise Pi without modifying stored records', t => {
   const legacy = { id: 'legacy', model: { provider: 'model_hub', id: 'very-long-model-name' } };
@@ -24,14 +14,24 @@ test('legacy session views advertise Pi without modifying stored records', t => 
   assert.equal(Object.hasOwn(legacy, 'engine'), false);
 });
 
-test('idle Cursor conversations outlive idle Pi ones, since restarting Cursor delays the next reply', async t => {
-  const pi = { id: 'pi', environmentId: 'local' }, cursor = { id: 'cursor', engine: 'cursor', environmentId: 'local' };
-  const manager = new SessionManager({ store: { sessions: [pi, cursor], settings: {} }, environments: () => [{ id: 'local', kind: 'local' }], local: {} });
+// Cursor CLI was removed: its conversations stay readable from their history file, never start a process,
+// and refuse new messages with an explanation instead of a connection error.
+test('conversations from the removed Cursor engine are read-only history', async t => {
+  const dir = mkdtempSync(join(tmpdir(), 'pd-cursor-legacy-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const file = join(dir, 'history.jsonl');
+  const user = { role: 'user', content: [{ type: 'text', text: 'Hello' }], timestamp: 1 };
+  const reply = { role: 'assistant', content: [{ type: 'text', text: 'Hello! How can I help?' }], timestamp: 2 };
+  writeFileSync(file, [{ type: 'session', version: 3, id: 'h', cwd: dir }, { type: 'message', id: 'a', parentId: 'h', message: user }, { type: 'message', id: 'b', parentId: 'a', message: reply }].map(e => JSON.stringify(e)).join('\n') + '\n');
+  const record = { id: 'cursor', engine: 'cursor', environmentId: 'local', cwd: dir, piSessionFile: file, title: 'Hello' };
+  const manager = new SessionManager({ store: { sessions: [record], settings: { providers: [] } }, environments: () => [{ id: 'local', kind: 'local' }], local: {} });
   t.after(() => clearInterval(manager.sweeper));
-  manager.stopRelay = async () => {};
-  const now = Date.now();
-  for (const id of ['pi', 'cursor']) manager.runtimes.set(id, { status: 'connected', streaming: false, questions: new Map(), lastUsed: now - 30 * 60 * 1000, session: { stop: async () => {} } });
-  assert.deepEqual(await manager.sweep(now), ['pi']);
-  manager.runtimes.get('cursor').lastUsed = now - 61 * 60 * 1000;
-  assert.deepEqual(await manager.sweep(now), ['cursor']);
+  const statuses = []; manager.on('status', s => statuses.push(s));
+  assert.deepEqual(await manager.messages('cursor'), [user, reply]);
+  await assert.rejects(manager.ensureStarted('cursor'), /Cursor CLI was removed/);
+  await assert.rejects(manager.prompt('cursor', 'more'), /read-only/);
+  await assert.rejects(manager.fork('cursor'), /read-only/);
+  assert.equal(manager.warm('cursor'), true);
+  assert.equal(manager.runtimes.size, 0, 'no process or connection state is created');
+  assert.deepEqual(statuses, [], 'opening it never flashes a connection error');
 });

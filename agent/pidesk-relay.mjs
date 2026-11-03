@@ -5,6 +5,7 @@
 //   node pidesk-relay.mjs daemon   the long-lived owner of Pi processes (started on demand, detached)
 //   node pidesk-relay.mjs list     JSON summary of sessions
 //   node pidesk-relay.mjs stop ID  terminate a session's Pi process
+//   node pidesk-relay.mjs shutdown terminate every session, then the daemon (this Mac's relay, when the app quits)
 //
 // The daemon listens on ~/.pidesk/run/relay.sock (directory 0700, socket 0600). Every line Pi writes
 // is numbered and kept in a bounded log; a re-attaching client sends the last number it saw and gets
@@ -66,7 +67,6 @@ function runDaemon() {
       while (session.logBytes > LOG_LIMIT_BYTES && session.log.length > 1) session.logBytes -= session.log.shift().length;
       try {
         const record = JSON.parse(line);
-        if (record.type === 'cursor_questions_cleared') session.pendingUi.clear();
         if (record.type === 'extension_ui_request' && DIALOGS.has(record.method)) session.pendingUi.set(record.id, numbered);
       } catch { /* non-JSON output is still forwarded */ }
       for (const client of session.clients) if (!client.destroyed) client.write(numbered + '\n');
@@ -145,6 +145,16 @@ function runDaemon() {
           // can now restart or delete its session file without racing the old writer.
           const stopped = s && !s.exit ? stopSession(s) : Promise.resolve();
           stopped.then(() => { send(socket, { relay: 'stopped', found: !!s }); socket.end(); });
+          return;
+        }
+        if (message.op === 'shutdown') {
+          // Sessions here need not outlive the desktop: stop them all, answer, then exit.
+          Promise.all([...sessions.values()].filter(s => !s.exit).map(stopSession)).then(() => {
+            send(socket, { relay: 'shutdown', stopped: sessions.size });
+            socket.end();
+            server.close();
+            setTimeout(() => process.exit(0), 50);
+          });
           return;
         }
         if (message.op === 'attach') {
@@ -281,4 +291,5 @@ if (command === 'daemon') runDaemon();
 else if (command === 'attach') runAttach().catch(error => { process.stderr.write(`pidesk-relay: ${error.message}\n`); process.exit(1); });
 else if (command === 'list') request({ op: 'list' }).then(out => { process.stdout.write(out + '\n'); });
 else if (command === 'stop') request({ op: 'stop', sessionId: arg }).then(out => { process.stdout.write(out + '\n'); });
-else { process.stderr.write('usage: pidesk-relay.mjs attach|daemon|list|stop <id>\n'); process.exit(2); }
+else if (command === 'shutdown') request({ op: 'shutdown' }).then(out => { process.stdout.write(out + '\n'); });
+else { process.stderr.write('usage: pidesk-relay.mjs attach|daemon|list|stop <id>|shutdown\n'); process.exit(2); }

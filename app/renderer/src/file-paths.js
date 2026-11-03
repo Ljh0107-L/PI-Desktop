@@ -55,8 +55,3 @@ export function resolveMarkdownReference(destination, documentPath = '') {
 
 export const headingSlug = text => text.toLowerCase().trim().replace(/[^\p{L}\p{N}\p{M}_\-\s]/gu, '').replace(/\s/g, '-');
 
-// Models explicitly selected in Settings, resolved against the cached Cursor list.
-export function favouriteModels(settings) {
-  const byId = new Map((settings?.models ?? []).map(model => [model.id, model]));
-  return (settings?.favorites ?? []).map(id => byId.get(id) ?? { id, name: id });
-}

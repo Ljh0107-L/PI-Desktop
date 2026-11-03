@@ -1,4 +1,6 @@
-import { chmodSync, mkdirSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { chmodSync, mkdirSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 // Launch descriptions for a Pi RPC process, either on this machine or on an SSH host.
 //
 // Both transports run the same tiny POSIX sh bootstrap on the target machine. The bootstrap
@@ -102,4 +104,14 @@ export function sshMuxArgs() {
     try { mkdirSync(muxDir, { recursive: true, mode: 0o700 }); chmodSync(muxDir, 0o700); } catch { muxDir = null; return []; }
   }
   return ['-o', 'ControlMaster=auto', '-o', `ControlPath=${muxDir}/%C`, '-o', 'ControlPersist=600'];
+}
+// Close this app's shared SSH connections when it quits; ControlPersist would keep them for ten minutes.
+// Sessions on the hosts are unaffected: their relays keep them.
+export async function closeSshMux() {
+  if (!muxDir) return;
+  let sockets = [];
+  try { sockets = readdirSync(muxDir); } catch { return; }
+  await Promise.all(sockets.map(name => new Promise(resolve => {
+    execFile('ssh', ['-o', `ControlPath=${join(muxDir, name)}`, '-O', 'exit', 'pidesk'], { timeout: 3000 }, () => resolve());
+  })));
 }

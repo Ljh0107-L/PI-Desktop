@@ -2,6 +2,12 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.1.38 — Pi only, nothing left running, a speed for every reply
+
+- **Cursor CLI is removed.** Pi Desktop runs Pi conversations only; the Cursor SDK settings, engine choice and Cursor model and effort controls are gone. Existing Cursor conversations stay in the sidebar as read-only history (read, copy, delete). The saved Cursor API key and the Cursor runtime and downloads the app installed (about 800 MB on this Mac, and `~/.pidesk/cursor-sdk` on SSH hosts) are deleted, and Cursor processes still running from earlier versions are stopped.
+- **Nothing keeps running after you quit.** On this Mac the relay and every local Pi now stop with the app, and its shared SSH connections close, instead of staying in the background. A relay still running from an earlier version is ended at the first quit too. Local conversations resume from their session files when you open them again. Sessions on SSH hosts still keep running there while the app is closed.
+- **A generation speed for every reply.** Usage showed *Speed unavailable* whenever it could not measure a clean generation window: replies a relay delivered in one burst, single-chunk or short replies, hidden reasoning and older timing. It now shows **Generation (estimated)** instead, from the observed output window when it is long enough, or else from output tokens over the whole response time (time to first token included, so it errs low). Clean windows are still measured exactly as before.
+
 ## 0.1.37 — Cursor conversations start ready
 
 - **No wait after pressing Enter.** The new-conversation screen now starts the whole Cursor conversation ahead: its session is opened in the final directory (No folder: a provisional `new-chat` one) with the draft's model and effort already applied, and changes in the draft are applied as you make them. Sending only publishes it. Before, Cursor still opened the session and applied the effort after you sent (a round trip to Cursor's servers each, 2–5 s), or the whole 6–7 s start-up if it had not finished warming.
@@ -86,7 +92,7 @@ The managed package currently supports macOS/Linux on arm64/x64 and needs at lea
 - **Durable sessions and honest limits.** Cursor runs behind the existing relay and resumes its native session after reconnecting. Stop uses ACP cancellation with bounded process cleanup. Unsupported Pi-only goals, fork, history editing and Pi subagent controls are disabled; missing usage/context counts stay unavailable instead of being fabricated.
 - **CI-only verification.** Offline ACP tests and real Electron local/SSH workflows cover setup, model switching, tool/file links, permissions, cancellation, reload and restart. Regression tests include macOS symlinked install paths. This verifies the documented protocol, not live Cursor account/model access; no real model quota is consumed and no tests/builds/app launches run on the user's workstation.
 
-See [Cursor SDK setup and limitations](https://github.com/Ljh0107-L/PI-Desktop/blob/main/docs/cursor.md). Includes all file-preview and delegation-prompt fixes from 0.1.27 below.
+See [Cursor SDK setup and limitations](https://github.com/Ljh0107-L/PI-Desktop/blob/v0.1.37/docs/cursor.md). Includes all file-preview and delegation-prompt fixes from 0.1.27 below.
 
 ## Included from 0.1.27 — Reliable file previews
 

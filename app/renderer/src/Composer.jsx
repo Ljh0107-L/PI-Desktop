@@ -3,10 +3,6 @@ import { Icon } from './Icons.jsx';
 import { EffortTrigger, MenuItem, MenuSection, Modal, Spinner, Trigger, baseName, envIcon, shortPath } from './ui.jsx';
 import { api, captureComposerDraft, clearQueued, getState, notify, openSettings, recoverComposerDraft, restoreComposerDraft, setComposerDraft, setDraft, setEnvironments, takeComposerDraft, useStore } from './store.js';
 import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerDraft as takeDraft, restoreComposerDraft as restoreDraft, recoverComposerDraft as recoverDraft } from './composer-draft.js';
-import { composerEngine } from './session-engine.js';
-import { favouriteModels } from './file-paths.js';
-import { CursorConfigControls, CursorModelMenu } from './Cursor.jsx';
-import { cursorModelOptions, cursorThought, draftCursorEffort, effortLevels } from './cursor-options.js';
 import { cachedDir, listDir, prefetchDir } from './dirs.js';
 
 const EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -289,8 +285,6 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   const [slashIndex, setSlashIndex] = useState(0);
   const [pi, setPi] = useState([]);
   const ref = useRef(null);
-  const draftEngine = useStore(s => s.draft.engine);
-  const cursor = composerEngine(session, { engine: draftEngine }) === 'cursor';
   const streaming = session?.streaming;
   useEffect(() => { if (autoFocus) ref.current?.focus(); }, [autoFocus, session?.id]);
   useEffect(() => {
@@ -301,7 +295,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   // Slash commands: shown while the message is a single "/word" being typed.
   const slashQuery = /^\/[\w:.-]*$/.test(text) ? text.slice(1).toLowerCase() : null;
   useEffect(() => { if (slashQuery !== null && session?.id) api('commands', session.id).then(setPi).catch(() => {}); }, [slashQuery !== null, session?.id]);
-  const commands = slashQuery === null ? [] : [...BUILTIN_COMMANDS.filter(c => cursor ? c.name === 'new' : session || c.name === 'goal'), ...pi].filter(c => c.name.toLowerCase().includes(slashQuery)).slice(0, 12);
+  const commands = slashQuery === null ? [] : [...BUILTIN_COMMANDS.filter(c => session || c.name === 'goal'), ...pi].filter(c => c.name.toLowerCase().includes(slashQuery)).slice(0, 12);
   useEffect(() => setSlashIndex(0), [slashQuery]);
   const pickCommand = c => { setText(`/${c.name} `); ref.current?.focus(); };
 
@@ -396,7 +390,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
 const shortError = (message = '', label) => /disk .* is full/i.test(message) ? `${label}: disk full`
   : /could not connect/i.test(message) ? `Can’t reach ${label}` : `${label} unavailable`;
 
-// The row under the composer: environment + folder on the left (new sessions), model / effort / permissions on the right.
+// The row under the composer: environment + folder on the left (new sessions), model / effort on the right.
 export function ComposerBar({ session }) {
   const draft = useStore(s => s.draft);
   const catalog = useStore(s => s.catalog);
@@ -407,32 +401,19 @@ export function ComposerBar({ session }) {
   const isNew = !session;
   const environmentId = isNew ? draft.environmentId : session.environmentId;
   const env = environments.find(e => e.id === environmentId) ?? { id: environmentId, label: session?.environmentLabel ?? 'This computer', kind: environmentId?.startsWith('ssh:') ? 'ssh' : 'local' };
-  const cursorEnabled = useStore(s => !!s.settings.cursor?.enabled);
-  const settingsCursor = useStore(s => s.settings.cursor);
-  const favourite = cursorSettings => {
-    const first = cursorSettings?.favorites?.[0];
-    const model = cursorSettings?.models?.find(m => m.id === first);
-    return model ? { provider: 'cursor', id: model.id, name: model.name } : first ? { provider: 'cursor', id: first } : null;
-  };
-  const engine = composerEngine(session, draft);
-  const cursor = engine === 'cursor';
-  const model = isNew ? cursor ? (draft.cursorModel ?? favouriteModels(settingsCursor)[0] ?? null) : draft.model : session.model;
+  const model = isNew ? draft.model : session.model;
   const effort = isNew ? draft.thinkingLevel : session.thinkingLevel;
   const cwd = isNew ? draft.cwd : session.cwd;
   const modelInfo = catalog.find(m => m.provider === model?.provider && m.id === model?.id);
-  const cursorModelName = settingsCursor?.models?.find(m => m.id === model?.id)?.name ?? model?.name ?? model?.id ?? 'Cursor default';
-  const modelTitle = model ? `${model.provider}/${model.id}` : 'Choose a Cursor model';
+  const modelTitle = model ? `${model.provider}/${model.id}` : undefined;
   const prep = envStatus[environmentId];
-  // A new Cursor conversation offers the efforts Cursor listed for the model, defaulting to Cursor's.
-  const draftCursorThought = isNew && cursor ? cursorThought(cursorModelOptions(settingsCursor, model?.id)) : null;
-  const draftEffort = draftCursorThought ? draftCursorEffort(settingsCursor, model?.id, draft.cursorEffort) : null;
 
   const changeEnv = id => {
     const recents = getState().settings?.recentFolders?.[id] ?? [];
-    setDraft({ environmentId: id, cwd: recents[0] ?? null, cursorModel: null });
+    setDraft({ environmentId: id, cwd: recents[0] ?? null });
     if (id !== 'local') api('prepareEnvironment', id);
   };
-  const changeModel = m => isNew ? setDraft(cursor ? { cursorModel: m } : { model: m }) : api('setModel', session.id, m.provider, m.id).catch(e => notify(e.message, 'error'));
+  const changeModel = m => isNew ? setDraft({ model: m }) : api('setModel', session.id, m.provider, m.id).catch(e => notify(e.message, 'error'));
   const changeEffort = l => isNew ? setDraft({ thinkingLevel: l }) : api('setThinking', session.id, l).catch(e => notify(e.message, 'error'));
 
   return (
@@ -452,18 +433,12 @@ export function ComposerBar({ session }) {
         </>}
       </div>
       <div className="composer-bar-right">
-        {(cursorEnabled || cursor) && (isNew
-          ? <Trigger width={220} label="Agent" className="engine-trigger" menu={close => <><MenuItem label="Pi" checked={!cursor} onClick={() => { setDraft({ engine: 'pi' }); close(); }} /><MenuItem label="Cursor CLI" checked={cursor} disabled={!cursorEnabled} onClick={() => { setDraft({ engine: 'cursor', cursorModel: draft.cursorModel ?? favourite(settingsCursor) }); close(); }} /></>}><span>{cursor ? 'Cursor CLI' : 'Pi'}</span></Trigger>
-          : <span className="muted engine-label" title="Conversation engine — choose a different engine when starting a new conversation">{cursor ? 'Cursor CLI' : 'Pi'}</span>)}
-        {cursor ? <Trigger width={340} label="Model" title={modelTitle} className="model-trigger" menu={close => <CursorModelMenu environmentId={environmentId} sessionId={session?.id} value={model} onChange={changeModel} close={close} />}><span className="strong">{cursorModelName}</span></Trigger> : catalog.length || model
+        {catalog.length || model
           ? <Trigger width={320} label="Model" title={modelTitle} className="model-trigger" menu={close => <ModelMenu value={model} onChange={changeModel} close={close} />}>
               <span className="strong">{modelLabel(model, catalog)}</span>
             </Trigger>
           : <button type="button" className="trigger attention" onClick={() => openSettings(true, 'providers')}><Icon name="key" size={15} /><span>Add a model</span></button>}
-        {cursor
-          ? session ? <CursorConfigControls key={session.id} session={session} />
-            : draftCursorThought && <EffortTrigger levels={effortLevels(draftCursorThought)} value={draftEffort} onChange={value => setDraft({ cursorEffort: value })} />
-          : modelInfo?.reasoning !== false && <EffortTrigger levels={effortsFor(modelInfo).map(level => ({ value: level, label: effortLabel(level) }))} value={effort} onChange={changeEffort} />}
+        {modelInfo?.reasoning !== false && <EffortTrigger levels={effortsFor(modelInfo).map(level => ({ value: level, label: effortLabel(level) }))} value={effort} onChange={changeEffort} />}
       </div>
       {browsing && <RemoteBrowser environmentId={environmentId} start={cwd ?? undefined} onPick={path => setDraft({ cwd: path })} onClose={() => setBrowsing(false)} />}
     </div>

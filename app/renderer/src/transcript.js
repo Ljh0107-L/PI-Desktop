@@ -88,6 +88,38 @@ function generation(m) {
   out *= (sample.weight - sample.firstWeight) / sample.weight;
   return positive(out) ? { ms, out, estimated, scope, hiddenWork: reasoning > 0 } : null;
 }
+// When no clean source window exists (one burst from a buffering relay, a single chunk, older or
+// receipt-only timing, hidden reasoning), estimate generation speed from the reply instead of showing
+// nothing: output tokens (reported, else counted from the visible output) over the observed output
+// window when it is long enough to measure, else over the whole response time. That time includes
+// time to first token, so the estimate errs low. Always marked as an estimate.
+const MIN_WINDOW_MS = 200, MIN_RESPONSE_MS = 50;
+function estimatedGeneration(m) {
+  if (['pending', 'deferred', 'error', 'aborted'].includes(m.stopReason) || isAbortMessage(m)) return null;
+  const blocks = Array.isArray(m.content) ? m.content : [];
+  const visible = typeof m.content === 'string' ? m.content : blocks.map(b => b?.type === 'text' ? b.text ?? ''
+    : b?.type === 'thinking' ? b.thinking ?? '' : b?.type === 'toolCall' ? `${b.name ?? ''} ${JSON.stringify(b.arguments ?? {})}` : '').filter(Boolean).join('\n');
+  const reported = m.usage?.output, counted = estimateTokens(visible);
+  const inferTokens = !positive(reported) || (reported === 1 && counted >= 20);
+  const out = inferTokens ? counted : reported;
+  if (!positive(out)) return null;
+  const t = m.__timing ?? {};
+  const time = n => typeof n === 'number' && Number.isFinite(n) && n >= 0;
+  // Hidden, summarized or redacted reasoning was generated before the visible output: only the whole
+  // response covers it.
+  const reasoning = nonnegative(m.usage?.reasoning);
+  const thinking = blocks.filter(b => b?.type === 'thinking').map(b => b.thinking ?? '').join('\n');
+  const hiddenReasoning = reasoning > 0 && (m.__usageProvenance?.thinking === 'summary' || blocks.some(b => b?.type === 'thinking' && b.redacted) || estimateTokens(thinking) < reasoning * 0.5);
+  if (!hiddenReasoning && time(t.first) && time(t.last) && t.last - t.first >= MIN_WINDOW_MS) {
+    const firstShare = positive(t.weight) && positive(t.firstWeight) && t.firstWeight < t.weight ? t.firstWeight / t.weight
+      : Number.isInteger(t.deltas) && t.deltas > 1 ? 1 / t.deltas : 0;
+    return { ms: t.last - t.first, out: out * (1 - firstShare), estimated: inferTokens, scope: 'all', fallback: 'window', hiddenWork: false };
+  }
+  // Pi's request duration covers the whole call; a relay replaying a buffered reply can make the
+  // stream's own start→end far shorter than the generation took.
+  const ms = Math.max(time(m.durationMs) ? m.durationMs : 0, time(t.start) && time(t.end) ? t.end - t.start : 0);
+  return ms >= MIN_RESPONSE_MS ? { ms, out, estimated: inferTokens, scope: 'all', fallback: 'response', hiddenWork: hiddenReasoning } : null;
+}
 export function usageOf(messages) {
   const u = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0, reasoningReported: false, cost: 0, genMs: 0, genOut: 0, speedEstimated: false, speedTokensEstimated: false, speedBasis: null, speedScope: null, speedPartial: false, hiddenWork: false, start: null, end: null, calls: 0 };
   const speeds = [];
@@ -111,20 +143,21 @@ export function usageOf(messages) {
     u.usageEstimated ||= m.__usageProvenance?.source === 'estimated';
     u.cacheUnknown ||= m.__usageProvenance?.cache === 'unknown';
     if (!['pending', 'deferred', 'error', 'aborted'].includes(m.stopReason) && !isAbortMessage(m)) speedCalls += 1;
-    const g = generation(m);
+    const g = generation(m) ?? estimatedGeneration(m);
     if (g) speeds.push(g);
     const t = m.__timing;
     if (Number.isFinite(t?.start) && Number.isFinite(t?.end) && t.end >= t.start) {
       u.start = Math.min(u.start ?? t.start, t.start); u.end = Math.max(u.end ?? t.end, t.end);
     }
   }
-  // Sum matching generation samples, never request durations or averages of per-call TPS.
-  // Do not mix answer-only samples with full streamed reasoning+answer samples. Missing calls
-  // retain their billed usage but are explicitly excluded from speed, not a reason to change units.
-  const scope = speeds.at(-1)?.scope;
-  const samples = speeds.filter(g => g.scope === scope);
+  // Sum matching generation samples, never averages of per-call TPS. Measured samples take precedence
+  // over estimates; answer-only samples are not mixed with full streamed reasoning+answer samples.
+  const measured = speeds.filter(g => !g.fallback);
+  const pool = measured.length ? measured : speeds;
+  const scope = pool.at(-1)?.scope;
+  const samples = pool.filter(g => g.scope === scope);
   if (samples.length) {
-    u.speedBasis = 'generation'; u.speedScope = scope;
+    u.speedBasis = measured.length ? 'generation' : samples.some(g => g.fallback === 'response') ? 'response' : 'window'; u.speedScope = scope;
     u.speedPartial = samples.length < speedCalls;
     for (const g of samples) {
       u.genMs += g.ms; u.genOut += g.out;
@@ -137,7 +170,17 @@ export function usageOf(messages) {
 }
 
 export function speedDisplay(usage) {
-  if (!Number.isFinite(usage.tps)) return { value: '—', label: 'Speed unavailable', title: 'No reliable generation window for this call (for example, old timing or buffered/too little output). Request duration and an older call’s speed are never substituted.' };
+  if (!Number.isFinite(usage.tps)) return { value: '—', label: 'Speed unavailable', title: 'This reply has no output or timing to estimate its speed from.' };
+  if (usage.speedBasis === 'response' || usage.speedBasis === 'window') {
+    const basis = usage.speedBasis === 'response'
+      ? 'Estimated: output tokens ÷ the whole response time, because the output arrived in one burst or a single chunk (a buffering relay) or its reasoning was hidden. That time includes time to first token, so the real generation speed is at least this.'
+      : 'Estimated: output tokens after the first chunk ÷ the first→last output time seen by the desktop.';
+    return {
+      value: `~${usage.tps >= 100 ? Math.round(usage.tps) : usage.tps.toFixed(1)}`,
+      label: 'Generation (estimated)',
+      title: basis + (usage.speedTokensEstimated ? ' Token counts are estimated from the visible output; provider token totals remain unchanged.' : ' Uses provider-reported output counts.'),
+    };
+  }
   const answer = usage.speedScope === 'answer';
   const title = 'Generation tokens after the first chunk ÷ first→last source-observed generation time. Excludes TTFT, tool execution and completion trailers. First-chunk tokens are allocated by text weights and excluded. Approximate, not server decode-only TPS; upstream buffering can affect it.';
   const scope = answer ? ' Answer/tool output only: hidden or summarized reasoning tokens and time are excluded.' : ' Includes fully streamed reasoning once, not in addition to output.';

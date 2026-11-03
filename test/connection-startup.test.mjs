@@ -9,7 +9,7 @@ import { promisify } from 'node:util';
 import test from 'node:test';
 import { SessionManager } from '../app/main/session-manager.mjs';
 import { prepareRemote, remoteInspectionScript } from '../app/main/remote-setup.mjs';
-import { EXTENSION_PACKAGE, stageExtensions } from '../app/main/extensions.mjs';
+import { EXTENSION_FILES, EXTENSION_PACKAGE, OBSOLETE_FILES, stageExtensions } from '../app/main/extensions.mjs';
 import { PiSession } from '../core/pi-session.mjs';
 import { sshRelayTransport } from '../core/transports.mjs';
 
@@ -57,40 +57,6 @@ function fakeSessions(t, { onStart, onRequest } = {}) {
   return calls;
 }
 
-test('Cursor interrupt retries an explicit busy rejection when streaming events lag', async t => {
-  const { manager, store } = managerFixture(t);
-  store.sessions.push({ id: 'cursor', engine: 'cursor', environmentId: 'local', title: 'Existing' });
-  const session = new PiSession({ id: 'cursor', transport: {} });
-  const runtime = { session, engine: 'cursor', streaming: false, questions: new Map(), cursorCredentialVersion: 0 };
-  manager.runtimes.set('cursor', runtime);
-  manager.ensureStarted = async () => session;
-  const calls = [];
-  let prompts = 0;
-  t.mock.method(session, 'request', async (type, payload) => {
-    calls.push({ type, payload });
-    if (type === 'prompt' && ++prompts === 1) throw new Error('Cursor is still working; stop the current turn first');
-    // No settled event: the old turn already ended before abort was received.
-    return type === 'prompt' ? { disposition: 'started' } : {};
-  });
-  const result = await manager.prompt('cursor', 'replacement', [{ kind: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }], { interrupt: true });
-  assert.equal(result.interrupted, true);
-  assert.deepEqual(calls.map(call => call.type), ['prompt', 'abort_bash', 'clear_queue', 'abort', 'prompt']);
-  assert.deepEqual(calls[0].payload, calls.at(-1).payload, 'retry preserves text and image content');
-  assert.equal(session.listenerCount('event'), 0, 'successful idle abort cleans up the settled waiter');
-});
-
-test('Cursor prompt failures other than busy are not retried', async t => {
-  const { manager, store } = managerFixture(t);
-  store.sessions.push({ id: 'cursor', engine: 'cursor', environmentId: 'local', title: 'Existing' });
-  const session = new PiSession({ id: 'cursor', transport: {} });
-  manager.runtimes.set('cursor', { session, engine: 'cursor', streaming: false, questions: new Map(), cursorCredentialVersion: 0 });
-  manager.ensureStarted = async () => session;
-  let calls = 0;
-  t.mock.method(session, 'request', async () => { calls++; throw new Error('connection closed'); });
-  await assert.rejects(manager.prompt('cursor', 'replacement', [], { interrupt: true }), /connection closed/);
-  assert.equal(calls, 1, 'ambiguous failure must not duplicate a user prompt');
-});
-
 test('settled waiters can be cancelled without leaving listeners or timers', async () => {
   const session = new PiSession({ id: 'fixture', transport: {} });
   const controller = new AbortController();
@@ -133,7 +99,7 @@ function remoteFixture(t) {
   const dir = temporary(t), cacheDir = join(dir, 'cache');
   const env = { host: 'fixture.invalid', sshArgs: ['-p', '2222'] };
   const options = { piVersion: '1.2.3', root: '/fixture/install', cacheDir, bridgePath: join(dir, 'pidesk-bridge.js'), relayPath: join(dir, 'pidesk-relay.mjs') };
-  const contents = Object.fromEntries(['cursor-acp.mjs', 'pidesk-cursor.mjs', 'pidesk-subagent.mjs', 'pidesk-bridge.js', 'pidesk-relay.mjs'].map(name => {
+  const contents = Object.fromEntries([...EXTENSION_FILES, 'pidesk-relay.mjs'].map(name => {
     const content = `// fixture ${name}\n`; writeFileSync(join(dir, name), content); return [name, content];
   }));
   contents['package.json'] = EXTENSION_PACKAGE;
@@ -175,9 +141,12 @@ test('removed cached Node falls back to discovery and repairs its hint', async t
 // jiti's transpile path, bound to the modules Pi's bundle already has.
 test('the staged bridge loads through Pi’s bundled modules, not a native import', async t => {
   const dir = temporary(t), ext = join(dir, 'ext'), agentDir = join(dir, 'agent');
+  mkdirSync(ext, { recursive: true });
+  for (const name of OBSOLETE_FILES) writeFileSync(join(ext, name), '// left by an older version\n');
   const bridge = stageExtensions(resolve('agent'), ext);
   assert.equal(readFileSync(join(ext, 'package.json'), 'utf8'), EXTENSION_PACKAGE);
-  for (const name of ['pidesk-subagent.mjs', 'pidesk-cursor.mjs', 'cursor-acp.mjs']) assert.ok(existsSync(join(ext, name)), name);
+  assert.ok(existsSync(join(ext, 'pidesk-subagent.mjs')));
+  for (const name of OBSOLETE_FILES) assert.ok(!existsSync(join(ext, name)), `${name} from the removed Cursor engine is not staged`);
   const staged = statSync(bridge).mtimeMs;
   stageExtensions(resolve('agent'), ext);
   assert.equal(statSync(bridge).mtimeMs, staged, 'unchanged files are not rewritten');
@@ -210,7 +179,7 @@ test('bridge updates send only changed files together over stdin', async t => {
     uploads.push({ script, files: JSON.parse(options.input) }); return '';
   } });
   assert.equal(uploads.length, 1);
-  assert.equal(uploads[0].files.length, 6);
+  assert.equal(uploads[0].files.length, EXTENSION_FILES.length + 2, 'agent files, relay and package.json');
   for (const file of uploads[0].files) {
     assert.equal(Buffer.from(file.content, 'base64').toString(), f.contents[file.name]);
     assert.ok(!uploads[0].script.includes(file.content), 'file contents must not appear in argv');

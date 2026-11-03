@@ -9,7 +9,7 @@ export function SessionMenuItems({ session, close, onRename }) {
   const failed = e => notify(e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), 'error');
   return <>
     <MenuItem icon="edit" label="Rename" onClick={() => { close(); onRename(); }} />
-    <MenuItem icon="fork" label="Fork" disabled={session.engine === 'cursor'} title={session.engine === 'cursor' ? 'Cursor ACP does not support forking' : undefined} onClick={() => { close(); forkSession(session.id).catch(failed); }} />
+    <MenuItem icon="fork" label="Fork" disabled={session.engine === 'cursor'} title={session.engine === 'cursor' ? 'Cursor conversations are read-only' : undefined} onClick={() => { close(); forkSession(session.id).catch(failed); }} />
     <MenuItem icon="archive" label="Archive" onClick={() => { close(); api('archive', session.id); if (active) newSession(); }} />
     <MenuItem icon="trash" label="Delete" className="danger" onClick={() => { close(); askConfirm({ title: 'Delete conversation?', message: session.title, action: 'Delete', run: () => deleteSession(session.id).catch(failed) }); }} />
   </>;

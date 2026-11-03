@@ -54,8 +54,8 @@ export async function checkReading({ app, page, id }) {
     await row.locator('.tool-output').evaluate(el => { el.scrollTop = 72; window.__readingRow = el.closest('.tool-call'); });
     step('API call ends');
     await send([{ type: 'message_end', message: assistant }]);
-    assert.equal(await page.locator('.usage-speed-value b').innerText(), '—', 'receipt-only completion must not report request-average TPS');
-    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Speed unavailable', 'receipt-only timing cannot establish generation speed');
+    assert.match(await page.locator('.usage-speed-value b').innerText(), /^~\d/, 'receipt-only completion still shows a speed');
+    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Generation (estimated)', 'receipt-only timing is an estimate, not a measurement');
     assert.equal(await row.evaluate(el => el === window.__readingRow), true, 'final reasoning must not remount the tool row');
     assert.equal(await row.locator('.tool-call-head').getAttribute('aria-expanded'), 'true');
     assert.equal(await row.locator('.tool-output').evaluate(el => el.scrollTop), 72);
@@ -100,8 +100,9 @@ export async function checkReading({ app, page, id }) {
     await send([{ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: 1, toolCall: { ...call, id: 'second-reading-call' } } }]);
     assert.equal(await page.locator('.work-body .step-markdown', { hasText: 'A thought to inspect' }).count(), 1);
     await send([{ type: 'message_end', message: { ...thinking, content: [{ type: 'text', text: 'Untimed history' }], usage: { output: 10 } } }]);
-    assert.equal(await page.locator('.usage-speed-value b').innerText(), '—', 'untimed call must not inherit a previous speed');
-    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Speed unavailable');
+    // Without source timing the call gets its own estimate (or none), never the previous call's speed.
+    assert.notEqual(await page.locator('.usage-speed-value b').innerText(), '~180', 'untimed call must not inherit a previous speed');
+    assert.ok(['Generation (estimated)', 'Speed unavailable'].includes(await page.locator('.usage-speed-kind').innerText()));
 
     step('hidden reasoning uses answer-only generation');
     const answerWindow = { first: stamp + 4000, last: stamp + 5000, chars: 400, deltas: 3, weight: 100, firstWeight: 10 };
@@ -112,11 +113,11 @@ export async function checkReading({ app, page, id }) {
     assert.equal(await page.locator('.usage-speed-value b').innerText(), '~90.0', 'answer TPS uses (500 − 400) × 90%, not all 500 billed output tokens');
     assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Answer generation');
 
-    step('hidden reasoning without first-answer-chunk evidence has no speed');
+    step('hidden reasoning without first-answer-chunk evidence is estimated');
     await send([{ type: 'message_end', message: { ...hiddenAnswer, timestamp: stamp + 5,
       __timing: { ...hiddenAnswer.__timing, answer: { ...answerWindow, firstWeight: undefined } } } }]);
-    assert.equal(await page.locator('.usage-speed-value b').innerText(), '—', 'incomplete answer timing cannot fall back to full-output TPS or request duration');
-    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Speed unavailable');
+    assert.equal(await page.locator('.usage-speed-value b').innerText(), '~83.3', 'incomplete answer timing estimates all 500 output tokens ÷ the 6 s response, marked as an estimate');
+    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Generation (estimated)');
     assert.equal(await page.locator('.usage').getByText('Request avg', { exact: true }).count(), 0);
   } catch (error) {
     await page.screenshot({ path: `/tmp/pidesk-e2e/shots/zz-reading-${label.replace(/\W+/g, '-')}.png` }).catch(() => {});

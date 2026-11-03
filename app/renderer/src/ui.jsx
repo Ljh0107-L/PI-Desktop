@@ -80,7 +80,7 @@ export function Trigger({ children, menu, width = 300, placement = 'top-end', cl
   </>;
 }
 
-// Reasoning effort under the composer, the same for Pi and Cursor. `levels`: [{ value, label }].
+// Reasoning effort under the composer. `levels`: [{ value, label }].
 export function EffortTrigger({ levels, value, onChange, disabled, title }) {
   return <Trigger width={210} label="Effort" className="effort-trigger" disabled={disabled} title={title}
     menu={close => <MenuSection title="Reasoning effort">{levels.map(level => <MenuItem key={String(level.value)} label={level.label} checked={value === level.value} onClick={() => { onChange(level.value); close(); }} />)}</MenuSection>}>

@@ -15,6 +15,14 @@ const unavailable = u => {
   assert.equal(u.speedBasis, null); assert.equal(u.speedScope, null);
   assert.equal(speedDisplay(u).value, '—'); assert.equal(speedDisplay(u).label, 'Speed unavailable');
 };
+// Without a measurable source window the speed is estimated from the reply, never left blank.
+const estimate = (u, basis, tps) => {
+  assert.equal(u.speedBasis, basis);
+  if (tps !== undefined) assert.ok(Math.abs(u.tps - tps) < 1e-6, `${u.tps} ≈ ${tps}`);
+  else assert.ok(Number.isFinite(u.tps) && u.tps > 0);
+  const display = speedDisplay(u);
+  assert.match(display.value, /^~/); assert.equal(display.label, 'Generation (estimated)'); assert.match(display.title, /^Estimated/);
+};
 
 test('TPS measures generation after the first chunk, not the full request or TTFT', () => {
   const u = usage();
@@ -39,13 +47,15 @@ test('huge prefill, delayed completion trailers and arbitrary request duration n
   }
 });
 
-test('request-only and legacy source/renderer timings never become generation speed', () => {
-  for (const durationMs of [1, 500, 3000, 900000]) unavailable(usage({ durationMs, __timing: undefined }));
-  for (const source of [undefined, 'renderer', 'unknown']) unavailable(usage({ __timing: timing({ source }) }));
+test('request-only, receipt and legacy timings give a marked estimate instead of nothing', () => {
+  for (const durationMs of [500, 3000, 900000]) estimate(usage({ durationMs, __timing: undefined }), 'response', 100 / (durationMs / 1000));
+  unavailable(usage({ durationMs: 1, __timing: undefined }));
+  for (const source of [undefined, 'renderer', 'unknown']) estimate(usage({ __timing: timing({ source }) }), 'window', 90);
   for (const source of ['agent', 'relay']) {
     assert.equal(usage({ __timing: timing({ source }) }).tps, 90);
-    unavailable(usage({ __timing: timing({ source, weight: undefined }) }));
-    unavailable(usage({ __timing: timing({ source, firstWeight: undefined }) }));
+    assert.equal(usage({ __timing: timing({ source }) }).speedBasis, 'generation', 'a clean source window stays a measurement');
+    estimate(usage({ __timing: timing({ source, weight: undefined }) }), 'window', 100 * 2 / 3);
+    estimate(usage({ __timing: timing({ source, firstWeight: undefined }) }), 'window', 100 * 2 / 3);
   }
 });
 
@@ -65,15 +75,15 @@ test('slow or fast replay and history restore use source clocks and retain first
     assert.deepEqual(fromHistory(transcript.messages, { 1000: stale }).messages[0].__timing, final.__timing);
     assert.equal(usageOf(fromHistory([message({ __timing: undefined })], { 1000: final.__timing }).messages).tps, 90);
     const legacy = { ...final, __timing: undefined };
-    unavailable(usageOf(applyEvent(transcript, { type: 'message_end', message: legacy }).messages.slice(-1)));
+    estimate(usageOf(applyEvent(transcript, { type: 'message_end', message: legacy }).messages.slice(-1)), 'response', 100 / 3);
   }
 });
 
-test('mid-reply attach needs a complete source sample, not a manufactured receipt window', () => {
+test('mid-reply attach estimates from the whole response instead of a manufactured receipt window', () => {
   let transcript = applyEvent(emptyTranscript(), { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'partial' } });
   transcript = applyEvent(transcript, { type: 'message_end', message: message({ __timing: undefined }) });
   assert.equal(transcript.messages[0].__timing, undefined);
-  unavailable(usageOf(transcript.messages));
+  estimate(usageOf(transcript.messages), 'response', 100 / 3);
   assert.equal(usageOf(applyEvent(emptyTranscript(), { type: 'message_end', message: message() }).messages).tps, 90);
 });
 
@@ -91,10 +101,10 @@ test('empty deltas remain activity-only and do not establish first-token timing'
   assert.equal(transcript.messages[0].__timing.start, 0);
   assert.equal(transcript.messages[0].__timing.first, 100);
   assert.equal(transcript.messages[0].__timing.deltas, 1);
-  unavailable(usageOf(transcript.messages));
+  estimate(usageOf(transcript.messages), 'response', 100 / 3);
 });
 
-test('incomplete, malformed, single-chunk, short and dense windows report unavailable, never request averages', () => {
+test('incomplete, malformed, single-chunk, short and dense windows still give a marked estimate', () => {
   for (const patch of [
     { complete: false }, { complete: undefined }, { deltas: 1 }, { deltas: 0 }, { deltas: 2.5 }, { deltas: '3' },
     { start: -1 }, { first: undefined }, { first: NaN }, { last: Infinity }, { first: '1000' },
@@ -103,7 +113,11 @@ test('incomplete, malformed, single-chunk, short and dense windows report unavai
     { weight: undefined }, { weight: 0 }, { weight: NaN }, { weight: Infinity }, { weight: '100' },
     { firstWeight: undefined }, { firstWeight: 0 }, { firstWeight: -1 }, { firstWeight: 100 },
     { firstWeight: 200 }, { firstWeight: Infinity }, { firstWeight: '10' },
-  ]) unavailable(usage({ __timing: timing(patch) }));
+  ]) {
+    const u = usage({ __timing: timing(patch) });
+    assert.ok(['window', 'response'].includes(u.speedBasis), JSON.stringify(patch));
+    estimate(u, u.speedBasis);
+  }
   const fast = usage({ usage: { output: 1000 }, content: [{ type: 'text', text: 'x'.repeat(4000) }],
     __timing: timing({ last: 1500, end: 1600, chars: 4000, weight: 1000, firstWeight: 100 }) });
   assert.equal(fast.tps, 1800, 'valid high throughput is not arbitrarily capped');
@@ -132,18 +146,20 @@ test('placeholder estimates cover text, thinking and tool-only output but never 
   }
 });
 
-test('invalid output counts can estimate speed only with a valid generation window', () => {
+test('invalid output counts estimate tokens from the visible reply', () => {
   for (const output of [undefined, null, 0, -1, NaN, Infinity, '100']) {
     const u = usage({ usage: { output } });
     assert.equal(u.output, 0); assert.equal(u.speedTokensEstimated, true); assert.equal(u.tps, 90);
-    unavailable(usage({ usage: { output }, __timing: undefined }));
+    const fallback = usage({ usage: { output }, __timing: undefined });
+    estimate(fallback, 'response', estimateTokens('x'.repeat(400)) / 3);
+    assert.equal(fallback.speedTokensEstimated, true);
   }
   unavailable(usage({ usage: undefined }));
   unavailable(usage({ usage: { output: 0 }, content: [] }));
 });
 
 test('genuine positive counts in compressible text/tool bodies remain provider-reported', () => {
-  unavailable(usage({ usage: { output: 1 }, content: [{ type: 'text', text: 'OK' }] }));
+  estimate(usage({ usage: { output: 1 }, content: [{ type: 'text', text: 'OK' }] }), 'window', 0.9);
   for (const content of [
     [{ type: 'text', text: 'x'.repeat(10000) }],
     [{ type: 'toolCall', name: 'write', arguments: { content: 'x'.repeat(10000) } }],
@@ -161,8 +177,9 @@ test('hidden, summarized or redacted reasoning uses answer tokens and its own fi
     assert.equal(u.speedScope, 'answer'); assert.equal(u.tps, 90); assert.equal(u.genMs, 1000);
     assert.equal(u.genOut, 90); assert.equal(u.output, 500); assert.equal(u.reasoning, 400);
     assert.equal(speedDisplay(u).label, 'Answer generation');
-    unavailable(usage({ ...overrides, __timing: timing() }));
-    unavailable(usage({ ...overrides, __timing: timing({ answer: answerTiming({ firstWeight: undefined }) }) }));
+    // Without a usable answer window: the whole response, which also covers the hidden reasoning.
+    estimate(usage({ ...overrides, __timing: timing() }), 'response', 500 / 3);
+    estimate(usage({ ...overrides, __timing: timing({ answer: answerTiming({ firstWeight: undefined }) }) }), 'response', 500 / 3);
   }
 });
 
@@ -174,7 +191,7 @@ test('summary provenance overrides even a long thinking summary, with unknown co
     assert.equal(u.speedScope, 'answer'); assert.equal(u.genOut, 90); assert.equal(u.genMs, 1000);
     assert.equal(u.speedTokensEstimated, reasoning == null); assert.equal(u.output, 500);
   }
-  for (const reasoning of [500, 600]) unavailable(usage({ content, usage: { output: 500, reasoning }, __timing: source, __usageProvenance: { thinking: 'summary' } }));
+  for (const reasoning of [500, 600]) estimate(usage({ content, usage: { output: 500, reasoning }, __timing: source, __usageProvenance: { thinking: 'summary' } }), 'response', 500 / 3);
 });
 
 test('fully streamed reasoning counts once; unstreamed final thinking is not proof of a full window', () => {
@@ -185,13 +202,14 @@ test('fully streamed reasoning counts once; unstreamed final thinking is not pro
   const placeholder = usage({ usage: { output: 1, reasoning: 80 }, content, __timing: source });
   assert.equal(placeholder.genOut, 90, '(20 estimated answer + 80 reasoning) × 90%, not double counted');
   assert.equal(placeholder.output, 1); assert.equal(placeholder.reasoning, 80); assert.equal(placeholder.speedTokensEstimated, true);
-  unavailable(usage({ content, usage: { output: 100, reasoning: 80 }, __timing: timing() }));
-  unavailable(usage({ content, usage: { output: 100 }, __timing: timing() }));
+  // Visible reasoning without its own chunk accounting: the observed output window, estimated.
+  estimate(usage({ content, usage: { output: 100, reasoning: 80 }, __timing: timing() }), 'window', 90);
+  estimate(usage({ content, usage: { output: 100 }, __timing: timing() }), 'window', 90);
 });
 
-test('an answer window spanning interleaved thinking is unavailable even with valid timestamps', () => {
-  unavailable(usage({ usage: { output: 500, reasoning: 400 },
-    __timing: timing({ answer: answerTiming({ interrupted: true }) }) }));
+test('an answer window spanning interleaved thinking falls back to the whole response', () => {
+  estimate(usage({ usage: { output: 500, reasoning: 400 },
+    __timing: timing({ answer: answerTiming({ interrupted: true }) }) }), 'response', 500 / 3);
 });
 
 test('session speed sums only valid generation tokens and time, excluding tool gaps and untimed calls', () => {

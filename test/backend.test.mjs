@@ -14,7 +14,6 @@ import { localRelayTransport, relaySpawnSpec } from '../core/transports.mjs';
 import { startEgressProxy } from '../core/egress-proxy.mjs';
 import { SessionManager } from '../app/main/session-manager.mjs';
 import { Store } from '../app/main/store.mjs';
-import { mockCursorCommand } from './cursor-fixture.mjs';
 
 const exec = promisify(execFile);
 const relaySource = resolve('agent/pidesk-relay.mjs');
@@ -260,51 +259,38 @@ test('egress shutdown destroys CONNECT tunnels and handles listen errors', { tim
   await waitFor(() => client.destroyed && peers.size === 0);
 });
 
-test('a pre-started Cursor conversation is published by the first message, then replaced', { timeout: 30000 }, async t => {
-  const f = await fixture(t);
-  const workspace = process.env.PIDESK_DEFAULT_WORKSPACE;
-  process.env.PIDESK_DEFAULT_WORKSPACE = join(f.dir, 'Pi');
-  t.after(() => { if (workspace === undefined) delete process.env.PIDESK_DEFAULT_WORKSPACE; else process.env.PIDESK_DEFAULT_WORKSPACE = workspace; });
-  const command = mockCursorCommand(f.dir, ['--config-models', '--initial-mode', 'plan']);
-  const store = { sessions: [], settings: { providers: [], environments: {}, cursor: { enabled: true, command, credentialVersion: 0 } }, getKey: () => null, saveSessions() {}, saveSettings() {}, touchRecent() {} };
-  const manager = new SessionManager({ store, environments: () => [{ id: 'local', kind: 'local', label: 'Local' }],
-    local: { node: process.execPath, piCli: peer, agentDir: f.dir, runDir: f.runDir, extraEnv: {} }, relayPath: f.relayPath, bridgePath: resolve('agent/pidesk-bridge.js') });
-  f.cleanups.push(() => manager.shutdown());
-  const model = { provider: 'cursor', id: 'cursor-test-b' };
-  const listed = new Promise(resolve => manager.once('cursor-models', resolve));
-  assert.equal(await manager.prewarm({ engine: 'cursor', environmentId: 'local', cwd: null, model, thinkingLevel: 'medium' }), true);
-  const spare = [...manager.spares.values()][0];
-  assert.match(spare.record.cwd, /new-chat/, 'No folder: a provisional directory, decided before the first message');
-  await waitFor(() => manager.runtimes.get(spare.id)?.status === 'connected');
-  assert.deepEqual((await listed).find(m => m.id === 'cursor-test-a').configOptions.map(o => o.id), ['speed', 'pidesk-effort'], 'a pre-started Cursor refreshes each model\'s efforts');
-  // The draft's effort changes after the start: the started conversation follows at once.
-  await manager.prewarm({ engine: 'cursor', environmentId: 'local', cwd: null, model, thinkingLevel: 'high' });
-  await spare.record.tuning;
-  assert.equal((await manager.runtimes.get(spare.id).session.state()).thinkingLevel, 'high');
-  const view = await manager.create({ environmentId: 'local', cwd: null, engine: 'cursor', model, thinkingLevel: 'high', prompt: 'tool please' });
-  assert.equal(view.id, spare.id, 'the first message adopts the pre-started conversation');
-  assert.equal(view.cwd, spare.record.cwd);
-  assert.deepEqual([view.status, view.model.id, view.thinkingLevel], ['connected', 'cursor-test-b', 'high']);
-  assert.ok(!view.cursorConfigOptions.some(o => o.id === 'mode' || o.id === 'model-choice' || o.id === 'thinking'));
-  const turn = async text => {
-    const settled = new Promise(resolve => { const on = ({ id, event }) => { if (id === view.id && event.type === 'agent_settled') { manager.off('event', on); resolve(); } }; manager.on('event', on); });
-    await manager.prompt(view.id, text); await settled;
-  };
-  await turn('tool');
-  assert.equal(readFileSync(join(view.cwd, 'cursor-output.md'), 'utf8'), '# Cursor output\n');
-  await turn('mode-status');
-  assert.equal((await manager.messages(view.id)).at(-1).content[0].text, 'Mode: agent · effort: high');
-  // The next new Cursor conversation is started ahead too; dropped unused, it leaves nothing behind.
-  await waitFor(() => manager.spares.size === 1);
-  const next = [...manager.spares.values()][0];
-  assert.notEqual(next.id, view.id);
-  assert.notEqual(next.record.cwd, view.cwd);
-  await waitFor(() => manager.runtimes.get(next.id)?.status === 'connected');
-  const nextFile = next.record.piSessionFile;
-  assert.ok(existsSync(next.record.cwd) && existsSync(nextFile));
-  manager.cursorSettingsChanged();
-  await waitFor(() => !existsSync(next.record.cwd) && !existsSync(nextFile));
-  assert.equal(manager.runtimes.get(view.id)?.status, 'connected', 'the published conversation is untouched');
-  await manager.setThinking(view.id, 'medium');
-  assert.equal(store.sessions[0].thinkingLevel, 'medium');
+// Nothing of the app keeps running on this Mac after it quits; sessions on SSH hosts keep their relays.
+test('the relay shutdown stops every session, answers, then exits', { timeout: 15000 }, async t => {
+  const f = await fixture(t, { startDaemon: false });
+  const a = f.connect('quit-a'), b = f.connect('quit-b');
+  await a.start(); await b.start();
+  const pids = (await f.relay('list')).sessions.map(s => s.pid);
+  assert.equal(pids.length, 2);
+  assert.equal((await f.relay('shutdown')).relay, 'shutdown');
+  await waitFor(async () => (await f.relay('list')).daemon === false);
+  for (const pid of pids) assert.equal(alive(pid), false, `Pi ${pid} stopped with the relay`);
+});
+
+test('quitting the app leaves no local relay or Pi behind', { timeout: 15000 }, async t => {
+  const f = await fixture(t, { startDaemon: false });
+  const manager = managerFor(t, f);
+  const record = await manager.create({ environmentId: 'local', cwd: f.dir, model: { provider: 'fixture', id: 'model' } });
+  const pid = (await f.relay('list')).sessions.find(s => s.id === record.id)?.pid;
+  assert.ok(pid && alive(pid));
+  await manager.shutdown();
+  assert.equal((await f.relay('list')).daemon, false, 'the relay daemon exited');
+  assert.equal(alive(pid), false);
+});
+
+test('quitting also ends a relay daemon from an older version, which has no shutdown', { timeout: 15000 }, async t => {
+  const f = await fixture(t, { startDaemon: false });
+  writeFileSync(f.relayPath, readFileSync(relaySource, 'utf8').replace("message.op === 'shutdown'", "message.op === 'not-in-older-versions'"));
+  const manager = managerFor(t, f);
+  const record = await manager.create({ environmentId: 'local', cwd: f.dir, model: { provider: 'fixture', id: 'model' } });
+  const pid = (await f.relay('list')).sessions.find(s => s.id === record.id)?.pid;
+  assert.ok(pid && alive(pid));
+  assert.equal(await f.relay('shutdown').catch(() => 'no answer'), 'no answer', 'this daemon ignores shutdown');
+  await manager.shutdown();
+  assert.equal((await f.relay('list')).daemon, false, 'the old daemon was ended, not left to idle');
+  assert.equal(alive(pid), false);
 });
