@@ -2,6 +2,15 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.1.35 — Fast first replies, Agent-mode Cursor and one effort control
+
+- **Pi starts in a fraction of a second.** The bridge extension sat inside the app's own ES-module package, so Pi's extension loader imported it natively and compiled a second, unbundled copy of Pi from `node_modules` on every start: 1–6 s before the first reply, a new conversation, a fork or a model catalogue. It is now staged in the app's data folder and binds to Pi's already-loaded modules (about 0.2 s), as SSH hosts always did. A regression test checks the loading path.
+- **Cursor CLI is ready before you send.** With Cursor CLI selected for a new conversation, the desktop starts Cursor in advance and loads its account services (about 5 s of Cursor's start-up). The first message then only opens the session, in its own directory for No folder. Idle Cursor conversations keep running for an hour instead of 20 minutes, since a restart delays the next reply.
+- **Agent mode only.** Cursor conversations always run in Agent mode; the Mode menu is gone and a CLI that starts in Ask/Plan is switched to Agent.
+- **One effort control.** Cursor's reasoning effort uses the same control as Pi's and is available before a new conversation starts, with the efforts Cursor lists for the chosen model. Models that split reasoning into a thinking switch and a level (Claude) get one list: Off, then the levels. Each conversation keeps its own effort although Cursor stores one per model, and your last choice is reused for the next conversation.
+- **Context for Cursor.** Cursor reports no usage over ACP, so Context shows a clearly marked estimate (`~`) of the conversation's own text and tool output, with no invented window or percentage.
+- **Cleaner Cursor SDK settings.** On/Off, API key, models and connection are separate groups with aligned actions and a clear status line.
+
 ## 0.1.34 — Reliable drafts and Cursor controls
 
 - **Session drafts stay separate.** Text and images survive navigation. Late image reads cannot leak into the next new conversation or resurrect a deleted draft. Drafts remain in memory, not across app restarts.
