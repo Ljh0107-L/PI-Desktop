@@ -64,7 +64,7 @@ function TreeDir({ sessionId, rel, depth, active, version }) {
 function CodeView({ text, ext }) {
   const html = useMemo(() => {
     const lang = LANGS[ext];
-    try { return lang && hljs.getLanguage(lang) ? hljs.highlight(text, { language: lang, ignoreIllegals: true }).value : hljs.highlightAuto(text.slice(0, 200000)).value; }
+    try { return lang && hljs.getLanguage(lang) ? hljs.highlight(text, { language: lang, ignoreIllegals: true }).value : text.length <= 200000 ? hljs.highlightAuto(text).value : text.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
     catch { return text.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
   }, [text, ext]);
   const lines = text.split('\n').length;
@@ -103,9 +103,9 @@ function Preview({ sessionId, path, refreshKey }) {
         {file?.kind === 'image' && (file.dataUrl ? <div className="fp-image"><img src={file.dataUrl} alt={parts.at(-1)} /></div> : <div className="fp-empty">Image too large to preview · {sizeLabel(file.size)}</div>)}
         {file?.kind === 'binary' && <div className="fp-empty"><Icon name="fileAny" size={16} /> Binary file · {sizeLabel(file.size)}</div>}
         {file?.kind === 'text' && (ext === 'md' && !source
-          ? <div className="fp-markdown"><Markdown text={file.content} /></div>
+          ? <div className="fp-markdown"><Markdown text={file.content} sessionId={sessionId} documentPath={file.path ?? path} refreshKey={refreshKey} /></div>
           : <CodeView text={file.content} ext={ext} />)}
-        {file?.truncated && file.kind === 'text' && <div className="fp-truncated">First {sizeLabel(file.content.length)} of {sizeLabel(file.size)}</div>}
+        {file?.truncated && file.kind === 'text' && <div className="fp-truncated">First {sizeLabel(new TextEncoder().encode(file.content).length)} of {sizeLabel(file.size)}</div>}
       </div>
     </div>
   );
@@ -189,7 +189,7 @@ export function FilePane({ session }) {
       </div>
       <div className="fp-body">
         {state.active
-          ? <Preview sessionId={session.id} path={state.active} refreshKey={refresh} />
+          ? <Preview key={`${session.id}\n${state.active}`} sessionId={session.id} path={state.active} refreshKey={refresh} />
           : state.changes ? <ChangesView sessionId={session.id} changes={state.changes} />
           : <div className="fp-preview fp-placeholder"><Icon name="folder" size={26} /><span>Open files appear here</span></div>}
         {tree && (state.active || state.changes

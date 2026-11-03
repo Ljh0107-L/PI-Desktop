@@ -13,6 +13,7 @@ import { startMockLlm } from './mock-llm.mjs';
 import './transcript.mjs';
 import './projectless.mjs';
 import { checkReading } from './reading.mjs';
+import { checkFilePreview } from './file-preview-ui.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -317,6 +318,9 @@ try {
   await S('05b-files-empty-max');
   await page.click('.fp-actions .tool-button[aria-label="Close files"]');
   check('write tool created the file and file browsing still works', existsSync(join(localProject, 'notes/plan.md')) && readFileSync(join(localProject, 'notes/plan.md'), 'utf8').includes('ship M1'));
+  await page.locator('.send-button.stop').waitFor({ state: 'detached', timeout: 30000 });
+  await checkFilePreview({ page, id: readingSession.id, project: localProject, environmentId: 'local', shots: opts.shots });
+  check('local file preview: relative images/links, anchors, image refresh/errors, clean file switching and complete source', true);
 
   // Pi asks a question with choices: answered by clicking an option
   await send('[[ask:Which database should the demo use?|Postgres,SQLite,No database]]');
@@ -452,6 +456,9 @@ try {
   await page.click('.tool-call-head');
   check('remote command ran in the remote folder', (await page.locator('.tool-output').last().innerText()).includes('api-server'));
   await S('08-remote-session');
+  await page.locator('.send-button.stop').waitFor({ state: 'detached', timeout: 30000 });
+  await checkFilePreview({ page, id: (await activeRecord()).id, project: remoteProject, environmentId: 'ssh:pidesk-test', shots: opts.shots });
+  check('SSH file preview: relative images/links, anchors, image refresh/errors, clean file switching and complete source', true);
 
   await page.locator('.subagent-list-head').click();
   await waitNew('.session-main .markdown', 'Subagents: 2/2 completed', () => send('[[subagents]]'), 60000);

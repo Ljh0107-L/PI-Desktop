@@ -1,11 +1,10 @@
 import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, safeStorage, shell } from 'electron';
-import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
-import { open, readdir, stat } from 'node:fs/promises';
-import { homedir } from 'node:os';
-import { basename, dirname, extname, join, posix, resolve } from 'node:path';
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { listEnvironments } from './environments.mjs';
 import { listRemoteDir, runSsh } from './remote-setup.mjs';
+import { decodeRemoteFilePreview, filePreview, remoteFilePreviewScript } from './file-preview.mjs';
 import { execFile } from 'node:child_process';
 import { shellQuote } from '../../core/transports.mjs';
 import { SessionManager } from './session-manager.mjs';
@@ -61,16 +60,16 @@ async function fetchRemoteModels({ api: format, baseUrl }, apiKey) {
   throw new Error(`Couldn't list models: ${lastError?.message ?? 'no response'}`);
 }
 
-const IMAGE_TYPES = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', ico: 'image/x-icon' };
-const isDir = p => { try { return statSync(p).isDirectory(); } catch { return false; } };
-// A path inside (or relative to) a session's folder, on the session's machine.
-function sessionPath(id, rel) {
+// Resolve and inspect paths on the session's own machine, including remote ~/ paths.
+async function sessionFilePreview(id, operation, rel = '') {
   const record = manager.record(id);
   const env = manager.env(record.environmentId);
-  const base = record.cwd;
-  const join_ = env.kind === 'local' ? join : posix.join;
-  const path = !rel ? base : rel.startsWith('/') ? rel : rel.startsWith('~/') && env.kind === 'local' ? join(homedir(), rel.slice(2)) : join_(base, rel);
-  return { env, path };
+  if (env.kind === 'local') return filePreview(operation, record.cwd, rel);
+  // Sessions already prepare Node on the host; reuse that runtime instead of parsing
+  // ls output or relying on platform-specific shell utilities for binary-safe reads.
+  const { node } = await manager.prepare(record.environmentId);
+  const output = await runSsh(env, remoteFilePreviewScript(node, operation, record.cwd, rel), { timeout: operation === 'read' ? 60000 : 30000 });
+  return decodeRemoteFilePreview(output);
 }
 
 const BUILTIN_PROVIDERS = {
@@ -244,38 +243,8 @@ const api = {
   openExternal: url => /^https?:\/\//.test(url) ? shell.openExternal(url) : false,
   openPath: path => shell.openPath(path),
   // File preview (Claude-style): browse and read files in a session's folder, local or over SSH.
-  async listFiles(id, rel = '') {
-    const { env, path } = sessionPath(id, rel);
-    let entries;
-    if (env.kind === 'local') {
-      entries = (await readdir(path, { withFileTypes: true })).map(e => ({ name: e.name, dir: e.isDirectory() || (e.isSymbolicLink() && isDir(join(path, e.name))) }));
-    } else {
-      const out = await runSsh(env, `cd ${shellQuote(path)} && ls -1pA | head -2000`, { timeout: 30000 });
-      entries = out.split('\n').filter(Boolean).map(name => ({ name: name.replace(/\/$/, ''), dir: name.endsWith('/') }));
-    }
-    entries = entries.filter(e => e.name !== '.DS_Store').sort((a, b) => (b.dir - a.dir) || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
-    return { path, entries };
-  },
-  async readFile(id, rel) {
-    const { env, path } = sessionPath(id, rel);
-    const image = IMAGE_TYPES[extname(path).slice(1).toLowerCase()];
-    const limit = image ? 8 << 20 : 1 << 20;
-    let size, data;
-    if (env.kind === 'local') {
-      size = (await stat(path)).size;
-      const handle = await open(path, 'r');
-      try { data = Buffer.alloc(Math.min(size, limit)); await handle.read(data, 0, data.length, 0); } finally { await handle.close(); }
-    } else {
-      const out = await runSsh(env, `f=${shellQuote(path)}; [ -f "$f" ] || { echo missing; exit 0; }; wc -c < "$f"; head -c ${limit} "$f" | base64`, { timeout: 60000 });
-      const nl = out.indexOf('\n');
-      if (out.startsWith('missing')) throw new Error(`${path} is not a file`);
-      size = Number(out.slice(0, nl).trim());
-      data = Buffer.from(out.slice(nl + 1), 'base64');
-    }
-    if (image) return { path, size, kind: 'image', truncated: size > limit, dataUrl: size > limit ? null : `data:${image};base64,${data.toString('base64')}` };
-    const binary = data.subarray(0, 8000).includes(0);
-    return { path, size, kind: binary ? 'binary' : 'text', truncated: size > limit, content: binary ? null : data.toString('utf8') };
-  },
+  listFiles: (id, rel = '') => sessionFilePreview(id, 'list', rel),
+  readFile: (id, rel) => sessionFilePreview(id, 'read', rel),
 };
 
 ipcMain.handle('pidesk:invoke', async (_event, method, ...args) => {

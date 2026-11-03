@@ -665,6 +665,9 @@ a[href], .markdown a { cursor: pointer; }
 .fp-content { flex: 1; min-height: 0; overflow: auto; }
 .fp-markdown { padding: 4px 22px 40px; user-select: text; }
 .fp-markdown .markdown { font-size: 14.5px; }
+.fp-markdown img { max-width: 100%; height: auto; object-fit: contain; }
+.markdown-image-error { display: inline-block; max-width: 100%; padding: 8px 12px; border: 0.5px solid var(--border-strong); border-radius: 6px; color: #f39a8a; font-size: 13px; overflow-wrap: anywhere; }
+.fp-tree-wrap { max-width: 50%; }
 .fp-code { display: flex; min-width: max-content; padding: 4px 0 40px; font: 12.5px/1.6 var(--mono); }
 .fp-gutter { margin: 0; padding: 0 12px 0 16px; text-align: right; color: var(--faint); user-select: none; border-right: 0.5px solid var(--hairline); }
 .fp-source { margin: 0; padding: 0 20px 0 14px; user-select: text; }

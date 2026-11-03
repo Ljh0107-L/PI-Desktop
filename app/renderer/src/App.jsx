@@ -103,7 +103,7 @@ function SessionView({ session }) {
         </div>
         {terminalOpen && <TerminalPanel session={session} />}
       </div>
-      {filePaneOpen ? <FilePane session={session} /> : rightPanel && <RightPanel session={session} />}
+      {filePaneOpen ? <FilePane key={session.id} session={session} /> : rightPanel && <RightPanel session={session} />}
     </div>
   );
 }

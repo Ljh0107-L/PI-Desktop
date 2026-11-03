@@ -101,7 +101,8 @@ const blockedToolSummary = (tool, args) => clip(typeof args?.description === 'st
   : tool === 'bash' ? 'shell command' : `${tool} operation`, 180);
 
 export const SUBAGENT_PROMPT = `You can use the subagent tool to delegate focused tasks to agents with independent context windows.
-- Delegate independent investigations, reviews, or clearly separated implementation tasks when this saves time or keeps the main context focused. Handle trivial tasks directly.
+- Default to doing the work yourself. Delegate only a substantial, clearly bounded independent task when parallelism or context isolation has a concrete benefit that outweighs coordination overhead. Do not delegate routine discovery, small fixes, or dependent stages merely because the tool is available.
+- Establish the relevant code and task boundaries before delegating. Prefer one targeted call over repeated speculative calls; after a delegation failure, continue directly unless retrying addresses a specific transient cause.
 - Every call must include tasks: an array of 1–6 objects with non-empty name and task. context alone is not a task. At most 3 subagents run at once in this Pi session. The call waits for their results. Use separate calls for dependent stages.
 - Scope large implementations into incremental, complete writes/edits. Keep discovery within known project/runtime paths, not unbounded filesystem scans. Compatible bash tools default to 120 seconds when timeout is omitted; specify a bounded timeout for longer commands.
 - Each subagent uses your current model, reasoning effort, working directory and available coding tools. It does not see your assistant/tool transcript. Supply concrete goals, relevant paths, required output, and all applicable user constraints in task/context, including where tests may run and whether editing is allowed.

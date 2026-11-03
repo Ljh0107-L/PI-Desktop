@@ -1,4 +1,5 @@
 // Client-side state for the renderer: one immutable snapshot, updated from IPC events.
+import { relativeSessionPath } from './file-paths.js';
 import { useRef, useSyncExternalStore } from 'react';
 import { applyEvent, emptyTranscript, fromHistory, rewindTo } from './transcript.js';
 import { isSubagentFinished, subagentBatches, subagentHistoryId, visibleSubagentBatches } from './subagent-state.js';
@@ -381,15 +382,10 @@ export function newSession() { navigate({ view: 'new', activeId: null }); set({ 
 
 // ---------------------------------------------------------------- file preview
 // Paths inside the session folder are kept relative to it; anything else stays absolute.
-const relToSession = (id, path) => {
-  const cwd = state.sessions.find(s => s.id === id)?.cwd;
-  let p = String(path).replace(/^file:\/\//, '').replace(/^\.\//, '');
-  try { p = decodeURIComponent(p); } catch { /* keep as is */ }
-  p = p.split('#')[0];
-  return cwd && p.startsWith(cwd + '/') ? p.slice(cwd.length + 1) : p;
-};
+const relToSession = (id, path) => relativeSessionPath(state.sessions.find(s => s.id === id)?.cwd, path);
 export function openFile(id, path) {
   const rel = relToSession(id, path);
+  if (!rel) return;
   set(s => {
     const cur = s.files[id] ?? { tabs: [], active: null };
     const tabs = cur.tabs.includes(rel) ? cur.tabs : [...cur.tabs, rel].slice(-8);
@@ -401,7 +397,7 @@ export function closeFile(id, path) {
     const cur = s.files[id] ?? { tabs: [], active: null };
     const tabs = cur.tabs.filter(t => t !== path);
     const active = cur.active === path ? tabs.at(-1) ?? null : cur.active;
-    return { files: { ...s.files, [id]: { tabs, active } } };
+    return { files: { ...s.files, [id]: { ...cur, tabs, active } } };
   });
 }
 export const setFilePaneOpen = open => set({ filePaneOpen: open });

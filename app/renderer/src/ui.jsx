@@ -4,7 +4,9 @@ import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import hljs from 'highlight.js/lib/common';
 import { Icon } from './Icons.jsx';
-import { api } from './store.js';
+import { api, openFile } from './store.js';
+import { resolveMarkdownReference } from './file-paths.js';
+import { loadMarkdownImages, prepareFileMarkdown, scrollMarkdownAnchor } from './markdown-files.js';
 
 // ---------------------------------------------------------------- popover menu
 export function Popover({ anchor, open, onClose, children, placement = 'top-start', width, className = '' }) {
@@ -102,8 +104,16 @@ renderer.codespan = ({ text }) => looksLikePath(text.replace(/&amp;/g, '&')) ? `
 marked.setOptions({ gfm: true, breaks: false, renderer });
 DOMPurify.addHook('afterSanitizeAttributes', node => { if (node.tagName === 'A') { node.setAttribute('target', '_blank'); node.setAttribute('rel', 'noreferrer'); } });
 
-export function Markdown({ text, streaming }) {
-  const html = useMemo(() => DOMPurify.sanitize(marked.parse(text ?? '')), [text]);
+export function Markdown({ text, streaming, sessionId, documentPath, refreshKey }) {
+  const root = useRef(null);
+  const html = useMemo(() => {
+    const clean = DOMPurify.sanitize(marked.parse(text ?? ''), { USE_PROFILES: { html: true }, FORBID_ATTR: ['srcset'] });
+    return documentPath !== undefined ? prepareFileMarkdown(clean, documentPath) : clean;
+  }, [text, documentPath]);
+  useEffect(() => {
+    if (!sessionId || documentPath === undefined || !root.current) return;
+    return loadMarkdownImages(root.current, path => api('readFile', sessionId, path));
+  }, [html, sessionId, documentPath, refreshKey]);
   const onClick = e => {
     const copy = e.target.closest('[data-copy]');
     if (copy) {
@@ -112,15 +122,25 @@ export function Markdown({ text, streaming }) {
       return;
     }
     const ref = e.target.closest('[data-path]');
-    if (ref) { window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: ref.dataset.path.replace(/&amp;/g, '&') })); return; }
+    if (ref) {
+      const path = ref.dataset.path.replace(/&amp;/g, '&');
+      // Inline code is a literal project path, unlike a Markdown URL destination.
+      if (sessionId) openFile(sessionId, path);
+      else window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: path }));
+      return;
+    }
     const link = e.target.closest('a');
     if (!link) return;
     e.preventDefault();
-    const href = link.getAttribute('href') ?? '';
-    if (/^(https?:|mailto:)/i.test(href)) api('openExternal', href);
-    else if (href && !href.startsWith('#')) window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: href }));
+    const destination = resolveMarkdownReference(link.getAttribute('href'), documentPath);
+    if (destination.kind === 'external') api('openExternal', destination.url);
+    else if (destination.kind === 'anchor') scrollMarkdownAnchor(root.current, destination.fragment);
+    else if (destination.kind === 'file') {
+      if (sessionId) openFile(sessionId, destination.path);
+      else window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: destination.path }));
+    }
   };
-  return <div className={`markdown ${streaming ? 'streaming' : ''}`} onClick={onClick} dangerouslySetInnerHTML={{ __html: html }} />;
+  return <div ref={root} className={`markdown ${streaming ? 'streaming' : ''}`} onClick={onClick} dangerouslySetInnerHTML={{ __html: html }} />;
 }
 
 export function Spinner({ size = 14 }) {
