@@ -29,9 +29,11 @@ async function fixture(t, { startDaemon = true, mode, delay = 0 } = {}) {
   const relayPath = join(dir, 'relay.mjs'); copyFileSync(relaySource, relayPath);
   const env = { ...process.env, PIDESK_RUN_DIR: runDir };
   const relay = async (...args) => JSON.parse((await exec(process.execPath, [relayPath, ...args], { env, timeout: 10000 })).stdout);
-  let daemon;
+  let daemon, daemonClosed;
   if (startDaemon) {
     daemon = spawn(process.execPath, [relayPath, 'daemon'], { env, stdio: 'ignore' });
+    // Listen from the start: a manager's shutdown ends the daemon before cleanup gets here.
+    daemonClosed = once(daemon, 'close');
     await waitFor(async () => (await relay('list')).daemon !== false);
   }
   const sessions = [], cleanups = [];
@@ -39,7 +41,7 @@ async function fixture(t, { startDaemon = true, mode, delay = 0 } = {}) {
     for (const cleanup of cleanups) await cleanup();
     await Promise.all(sessions.map(s => s.stop(50).catch(() => {})));
     for (const s of (await relay('list')).sessions ?? []) if (s.alive) await relay('stop', s.id);
-    if (daemon) { const closed = once(daemon, 'close'); daemon.kill(); await closed; }
+    if (daemon) { daemon.kill(); await daemonClosed; }
     else { // only this fixture's private script; never stop an app/user relay
       await exec('pkill', ['-f', `${relayPath} daemon`]).catch(() => {});
     }
