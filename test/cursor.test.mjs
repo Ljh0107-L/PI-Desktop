@@ -52,6 +52,9 @@ function adapterProcess(t, args, env = {}) {
 test('Cursor environment excludes Pi boot credentials and Electron Node mode', () => {
   const env = cursorEnvironment({ PATH: '/bin', HOME: '/home/user', PIDESK_BOOT: 'secret', ANTHROPIC_API_KEY: 'secret', ELECTRON_RUN_AS_NODE: '1', CURSOR_AUTH_TOKEN: 'cursor-login' });
   assert.deepEqual(env, { PATH: '/bin', HOME: '/home/user', CURSOR_AUTH_TOKEN: 'cursor-login', NO_OPEN_BROWSER: '1', AGENT_CLI_CREDENTIAL_STORE: 'memory' });
+  // A host behind a company proxy: Cursor needs the same proxy and CA settings as any program there.
+  const proxied = cursorEnvironment({ PATH: '/bin', HTTPS_PROXY: 'http://proxy:8118', http_proxy: 'http://proxy:8118', NO_PROXY: '.corp', NODE_EXTRA_CA_CERTS: '/etc/ca.pem', OPENAI_API_KEY: 'secret' });
+  assert.deepEqual(proxied, { PATH: '/bin', HTTPS_PROXY: 'http://proxy:8118', http_proxy: 'http://proxy:8118', NO_PROXY: '.corp', NODE_EXTRA_CA_CERTS: '/etc/ca.pem', NO_OPEN_BROWSER: '1' });
   assert.equal(cursorCommand('~/.local/bin/agent', '/remote/home'), '/remote/home/.local/bin/agent');
   assert.equal(cursorCommand('/path with spaces/agent'), '/path with spaces/agent');
   assert.throws(() => cursorCommand('bad\npath'));
@@ -217,6 +220,16 @@ test('a pre-started adapter opens its conversation where the first message decid
   await spare.request('prompt', { message: 'mode-status' }); await spare.settled();
   assert.equal((await spare.request('get_messages')).messages.at(-1).content[0].text, 'Mode: agent · effort: high');
   await assert.rejects(spare.request('cursor_open', { cwd: conversation, sessionFile: file }), /already has a conversation/);
+});
+
+test('a spare that cannot reach Cursor fails at once instead of at the first message', { timeout: 15000 }, async t => {
+  const f = fixture(t, { configModels: true });
+  const broken = mockCursorCommand(join(f.cwd, 'broken'), ['--config-models', '--list-error']);
+  const spare = adapterProcess(t, ['--spare', '--cwd', f.cwd, '--command', broken]);
+  await assert.rejects(spare.request('get_state'), /model discovery.*Failed to initialize ACP services/);
+  const legacy = mockCursorCommand(join(f.cwd, 'legacy'), []); // answers cursor/list_available_models with -32601
+  const older = adapterProcess(t, ['--spare', '--cwd', f.cwd, '--command', legacy]);
+  assert.equal((await older.request('get_state')).spare, true, 'a CLI without model listing still warms');
 });
 
 // Hold an ACP setter before sending it, without timing-dependent sleeps.

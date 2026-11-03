@@ -374,7 +374,9 @@ async function main() {
   if (spare) {
     client.on('request', message => { if (!desktop) client.reject(message.id, 'No Cursor conversation is open yet'); });
     // Listing models loads Cursor's account services, and refreshes each model's efforts for the desktop.
-    ready = client.start().then(() => client.request('cursor/list_available_models', {}).catch(() => null)).then(result => { listed = cursorListedModels(result); });
+    // Only a CLI without the method is tolerated: no network or a bad key fails the spare now, so the
+    // first message starts afresh and reports it, instead of first waiting out this CLI's timeouts.
+    ready = client.start().then(() => client.request('cursor/list_available_models', {}).catch(error => { if (error.code === -32601) return null; throw error; })).then(result => { listed = cursorListedModels(result); });
     // The desktop drops an unused spare after ten minutes; one it lost track of must not keep Cursor running.
     orphan = setTimeout(() => { void shutdown(); }, 15 * 60 * 1000);
   } else ready = open({ sessionFile: file, cwd, effort: value('--thought') }).start(value('--model'));

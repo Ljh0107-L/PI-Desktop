@@ -2,6 +2,11 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.1.36 — Cursor on hosts behind a proxy
+
+- **Cursor CLI works on SSH hosts that reach the internet through a proxy.** The desktop passed Cursor only a minimal environment, without the host's `HTTPS_PROXY`/`NO_PROXY` and CA settings. On a company host Cursor then could not connect, and a new conversation stayed at *Starting Cursor…* while each step waited out its connection timeouts. Cursor now gets the same proxy and CA settings as any program on the host; Pi provider keys are still never passed.
+- **Failures show sooner.** A pre-started Cursor CLI that cannot load its account services is dropped at once, so the first message starts afresh and reports the real error instead of waiting for several timeouts in a row.
+
 ## 0.1.35 — Fast first replies, Agent-mode Cursor and one effort control
 
 - **Pi starts in a fraction of a second.** The bridge extension sat inside the app's own ES-module package, so Pi's extension loader imported it natively and compiled a second, unbundled copy of Pi from `node_modules` on every start: 1–6 s before the first reply, a new conversation, a fork or a model catalogue. It is now staged in the app's data folder and binds to Pi's already-loaded modules (about 0.2 s), as SSH hosts always did. A regression test checks the loading path.

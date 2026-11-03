@@ -28,9 +28,12 @@ export async function validateCursorCommand(command, { path = process.env.PATH ?
   }
 }
 
+// A host that reaches the internet only through a proxy (typical on company networks) needs its proxy
+// and CA settings, as any program run there would; without them Cursor hangs connecting.
+const NETWORK_ENV = ['HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy', 'NODE_EXTRA_CA_CERTS', 'SSL_CERT_FILE', 'SSL_CERT_DIR'];
 export function cursorEnvironment(source = process.env, apiKey) {
   // In particular never forward Pi provider keys, PIDESK_BOOT or ELECTRON_RUN_AS_NODE.
-  const keep = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM', 'CURSOR_API_KEY', 'CURSOR_AUTH_TOKEN'];
+  const keep = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM', 'CURSOR_API_KEY', 'CURSOR_AUTH_TOKEN', ...NETWORK_ENV];
   const env = Object.fromEntries(keep.filter(key => source[key] !== undefined).map(key => [key, source[key]]));
   env.NO_OPEN_BROWSER = '1';
   if (['memory', 'file'].includes(source.AGENT_CLI_CREDENTIAL_STORE)) env.AGENT_CLI_CREDENTIAL_STORE = source.AGENT_CLI_CREDENTIAL_STORE;

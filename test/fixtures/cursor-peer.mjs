@@ -42,6 +42,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
       else result(p.id, {});
       break;
     case 'cursor/list_available_models':
+      if (process.argv.includes('--list-error')) { send({ id: p.id, error: { code: -32603, message: 'Internal error', data: { message: 'Failed to initialize ACP services' } } }); break; }
       if (!configModels) { send({ id: p.id, error: { code: -32601, message: `Unknown method ${p.method}` } }); break; }
       result(p.id, { models: models.map(model => ({ value: model.modelId, name: model.name, configOptions: modelSettings(model.modelId) })) }); break;
     case 'session/new': case 'session/load':
