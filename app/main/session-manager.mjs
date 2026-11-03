@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { execFile } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmdirSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -343,24 +343,19 @@ export class SessionManager extends EventEmitter {
   // While the user is on the new-session screen, start a Pi in advance where the next conversation will
   // run; the first message then adopts it instead of waiting for SSH + Pi start-up. With No folder the
   // spare runs in the root and moves into the conversation's own directory when the first message names it.
-  // A Cursor spare is a started CLI with its account services loaded (most of Cursor's start-up); its
-  // conversation opens in the right directory when the first message arrives.
   spares = new Map(); // `${environmentId}\n${cwd}` (or projectlessSpareKey, cursorSpareKey) -> { id, record, timer }
   async prewarm({ environmentId, cwd: chosen, model, thinkingLevel, noFolder, engine }) {
     if (!environmentId) return false;
-    const cursor = engine === 'cursor';
-    if (cursor && !this.store.settings.cursor?.enabled) return false;
     const env = this.environments().find(e => e.id === environmentId);
     if (!env || (env.kind === 'ssh' && !env.enabled)) return false;
+    if (engine === 'cursor') return this.#prewarmCursor(env, chosen || null, model, thinkingLevel);
     const cwd = chosen || await this.projectlessRoot(environmentId).catch(() => null);
     if (!cwd) return false;
-    const key = cursor ? cursorSpareKey(environmentId, chosen || null) : chosen ? `${environmentId}\n${cwd}` : projectlessSpareKey(environmentId);
+    const key = chosen ? `${environmentId}\n${cwd}` : projectlessSpareKey(environmentId);
     for (const [k] of this.spares) if (k !== key) this.#dropSpare(k);
     const existing = this.spares.get(key);
     if (existing) { this.#armSpare(key, existing); return true; }
-    const record = cursor
-      ? { id: randomUUID(), title: 'New session', engine: 'cursor', environmentId, environmentLabel: env.label, cwd, noFolder: !chosen || undefined, model, spare: true, cursorSpare: true }
-      : { id: randomUUID(), title: 'New session', environmentId, environmentLabel: env.label, cwd, noFolder: (!chosen || noFolder) || undefined, model, thinkingLevel: thinkingLevel ?? 'medium', spare: true };
+    const record = { id: randomUUID(), title: 'New session', environmentId, environmentLabel: env.label, cwd, noFolder: (!chosen || noFolder) || undefined, model, thinkingLevel: thinkingLevel ?? 'medium', spare: true };
     const spare = { id: record.id, record };
     this.spares.set(key, spare);
     this.#armSpare(key, spare);
@@ -381,16 +376,74 @@ export class SessionManager extends EventEmitter {
     this.spares.delete(key);
     this.#stopSpare(spare).catch(() => {});
   }
-  async #stopSpare(spare) {
+  async #stopSpare(spare, { remote = true } = {}) {
     clearTimeout(spare.timer);
     // Wait for any in-flight attach to finish before stopping the relay's Pi.
     await this.close(spare.id);
     const env = this.environments().find(e => e.id === spare.record.environmentId);
     if (env) await this.stopRelay(env, spare.id).catch(() => {});
+    if (spare.record.cursorSpare) await this.#discardCursorSpare(spare.record, { remote }).catch(() => {});
   }
-  // A pre-started Cursor CLI holds the Cursor settings (key, executable) it started with.
+  // A pre-started Cursor conversation holds the Cursor settings (key, executable) it started with.
   cursorSettingsChanged() {
     for (const [key, spare] of [...this.spares]) if (spare.record.engine === 'cursor') this.#dropSpare(key);
+  }
+
+  // A Cursor conversation started ahead of its first message, in its final directory (No folder: a
+  // provisional new-chat one) with the draft's model and effort. Cursor needs a server round trip to
+  // open a session and another for each setting; done now, the first message only publishes it.
+  async #prewarmCursor(env, chosen, model, effort) {
+    if (!this.store.settings.cursor?.enabled) return false;
+    const key = cursorSpareKey(env.id, chosen);
+    const existing = this.spares.get(key);
+    if (existing) { this.#armSpare(key, existing); this.#retuneCursor(existing.record, model, effort); return true; }
+    const cwd = chosen ?? await this.#projectlessDir(env, '').catch(() => null);
+    if (!cwd) return false;
+    const record = { id: randomUUID(), title: 'New session', engine: 'cursor', environmentId: env.id, environmentLabel: env.label, cwd, noFolder: !chosen || undefined, model, cursorEffort: effort || undefined, spare: true, cursorSpare: true };
+    if (this.spares.has(key)) { await this.#discardCursorSpare(record).catch(() => {}); return true; } // a concurrent call won
+    for (const [k] of this.spares) if (k !== key) this.#dropSpare(k);
+    const spare = { id: record.id, record };
+    this.spares.set(key, spare);
+    this.#armSpare(key, spare);
+    this.ensureStarted(record.id, record).catch(() => { if (this.spares.get(key) === spare) this.#dropSpare(key); });
+    return true;
+  }
+  // The draft's model or effort changed after its Cursor started: apply them now, in the background.
+  #retuneCursor(record, model, effort) {
+    const modelChanged = !!model?.id && model.id !== record.model?.id, effortChanged = !!effort && effort !== record.cursorEffort;
+    if (!modelChanged && !effortChanged) return;
+    if (modelChanged) record.model = model;
+    if (effortChanged) record.cursorEffort = effort;
+    record.tuning = (record.tuning ?? Promise.resolve()).then(() => this.#tuneCursor(record)).catch(() => {});
+  }
+  // Bring a started Cursor conversation to its record's model and effort (one round trip each, only if needed).
+  async #tuneCursor(record) {
+    const session = await this.ensureStarted(record.id, record);
+    let state = await session.state();
+    if (record.model?.id && state.model?.id !== record.model.id) {
+      await session.setModel('cursor', record.model.id).catch(error => this.emit('notice', { id: record.id, level: 'warning', message: error.message }));
+      state = await session.state();
+    }
+    if (record.cursorEffort && state.thinkingLevel !== record.cursorEffort) {
+      await session.request('set_thinking_level', { level: record.cursorEffort }).catch(() => {});
+      state = await session.state();
+    }
+    return state;
+  }
+  // An unused pre-started Cursor conversation: its history file, and its provisional No-folder directory
+  // while that is still empty (rmdir never removes files).
+  async #discardCursorSpare(record, { remote = true } = {}) {
+    const env = this.environments().find(e => e.id === record.environmentId);
+    if (!env) return;
+    if (env.kind === 'local') {
+      rmSync(record.piSessionFile ?? join(this.local.agentDir, 'cursor-sessions', `${record.id}.jsonl`), { force: true });
+      if (record.noFolder) for (const dir of [join(record.cwd, 'work'), join(record.cwd, 'outputs'), record.cwd]) { try { rmdirSync(dir); } catch { /* not empty: keep it */ } }
+      return;
+    }
+    if (!remote) return;
+    const file = record.piSessionFile ?? `${(await this.prepare(env.id)).agentDir}/cursor-sessions/${record.id}.jsonl`;
+    const q = shellQuote(record.cwd);
+    await runSsh(env, `rm -f ${shellQuote(file)}${record.noFolder ? `; rmdir ${q}/work ${q}/outputs ${q} 2>/dev/null` : ''}; true`, { timeout: 30000 });
   }
 
   // ---------------------------------------------------------------- No folder
@@ -452,20 +505,31 @@ export class SessionManager extends EventEmitter {
     if (engine === 'cursor' && !this.store.settings.cursor?.enabled) throw new Error('Enable Cursor SDK in Settings first.');
     const env = this.env(environmentId);
     const noFolder = !chosen;
+    if (engine === 'cursor') {
+      // A pre-started Cursor conversation already has its directory (No folder: a provisional one).
+      const key = cursorSpareKey(environmentId, chosen || null);
+      const spare = this.spares.get(key);
+      if (spare) {
+        this.spares.delete(key);
+        clearTimeout(spare.timer);
+        try { return await this.#adoptCursor(spare.record, { model, thinkingLevel }); }
+        catch { await this.#stopSpare(spare); } // it failed to start: start a fresh one below
+      }
+    }
     const cwd = noFolder ? await this.#projectlessDir(env, prompt) : chosen;
     const fields = {
       title: 'New session', engine, environmentId, environmentLabel: env.label, cwd, noFolder: noFolder || undefined,
       project: noFolder ? 'No folder' : env.kind === 'local' ? basename(cwd) : remoteBase(cwd),
     };
-    const spareKey = engine === 'cursor' ? cursorSpareKey(environmentId, noFolder ? null : cwd) : noFolder ? projectlessSpareKey(environmentId) : `${environmentId}\n${cwd}`;
-    const spare = this.spares.get(spareKey);
+    const spareKey = noFolder ? projectlessSpareKey(environmentId) : `${environmentId}\n${cwd}`;
+    const spare = engine === 'cursor' ? null : this.spares.get(spareKey);
     if (spare) {
       this.spares.delete(spareKey);
       clearTimeout(spare.timer);
-      try { return await (engine === 'cursor' ? this.#adoptCursor(spare.record, fields, { model, thinkingLevel }) : this.#adopt(spare.record, fields, { model, thinkingLevel })); }
-      catch { await this.#stopSpare(spare); } // the warm Pi/CLI failed or could not move: start a fresh one below
+      try { return await this.#adopt(spare.record, fields, { model, thinkingLevel }); }
+      catch { await this.#stopSpare(spare); } // the warm Pi failed or could not move: start a fresh one below
     }
-    const record = { id: randomUUID(), ...fields, model, thinkingLevel: thinkingLevel ?? 'medium', createdAt: Date.now(), updatedAt: Date.now() };
+    const record = { id: randomUUID(), ...fields, model, thinkingLevel: thinkingLevel ?? 'medium', ...(engine === 'cursor' && thinkingLevel ? { cursorEffort: thinkingLevel } : {}), createdAt: Date.now(), updatedAt: Date.now() };
     this.#add(record);
     await this.ensureStarted(record.id);
     return this.#view(record);
@@ -499,20 +563,21 @@ export class SessionManager extends EventEmitter {
     this.#save(record, { model: wantModel, thinkingLevel: wantLevel });
     return this.#view(record);
   }
-  // Take over a pre-started Cursor CLI: open the conversation in its own directory, with the chosen
-  // model and effort, as a fresh start would.
-  async #adoptCursor(spareRecord, fields, { model, thinkingLevel }) {
-    const session = await this.ensureStarted(spareRecord.id, spareRecord);
-    const env = this.env(spareRecord.environmentId);
-    const agentDir = env.kind === 'local' ? this.local.agentDir : (await this.prepare(env.id)).agentDir;
-    const state = await session.request('cursor_open', {
-      cwd: fields.cwd, sessionFile: `${agentDir}/cursor-sessions/${spareRecord.id}.jsonl`,
-      model: (model ?? spareRecord.model)?.id, effort: thinkingLevel && thinkingLevel !== 'off' ? thinkingLevel : undefined,
-    }, { timeout: 120000 });
-    const record = Object.assign(spareRecord, fields, { createdAt: Date.now(), updatedAt: Date.now() });
-    delete record.spare; delete record.cursorSpare;
-    Object.assign(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId, model: state.model, thinkingLevel: state.thinkingLevel ?? 'off', cursorConfigOptions: state.cursorConfigOptions ?? [] });
+  // Take over a pre-started Cursor conversation: usually just publish it. Settings changed in the draft
+  // since are applied first; the next new Cursor conversation here is started ahead as well.
+  async #adoptCursor(record, { model, thinkingLevel }) {
+    this.#retuneCursor(record, model, thinkingLevel);
+    await record.tuning;
+    const state = await this.#tuneCursor(record);
+    const env = this.env(record.environmentId);
+    delete record.spare; delete record.cursorSpare; delete record.tuning;
+    Object.assign(record, {
+      title: 'New session', environmentLabel: env.label, project: record.noFolder ? 'No folder' : env.kind === 'local' ? basename(record.cwd) : remoteBase(record.cwd),
+      piSessionFile: state.sessionFile, piSessionId: state.sessionId, model: state.model, thinkingLevel: state.thinkingLevel ?? 'off', cursorConfigOptions: state.cursorConfigOptions ?? [],
+      createdAt: Date.now(), updatedAt: Date.now(),
+    });
     this.#add(record);
+    this.prewarm({ engine: 'cursor', environmentId: record.environmentId, cwd: record.noFolder ? null : record.cwd, model: state.model, thinkingLevel: record.cursorEffort }).catch(() => {});
     return this.#view(record);
   }
 
@@ -583,10 +648,10 @@ export class SessionManager extends EventEmitter {
       const file = record.piSessionFile || `${facts.agentDir}/cursor-sessions/${record.id}.jsonl`;
       const command = await this.cursorCommand(record.environmentId);
       const adapter = `${dirname(facts.bridge)}/pidesk-cursor.mjs`;
-      // A spare opens its conversation later (cursor_open); --thought is the effort a conversation
-      // starts with until it records its own.
-      const conversation = record.cursorSpare ? ['--spare'] : ['--session-file', file, ...(record.model?.id ? ['--model', record.model.id] : []), ...(record.thinkingLevel && record.thinkingLevel !== 'off' ? ['--thought', record.thinkingLevel] : [])];
-      const spawn = { cwd: record.cwd, env: env.kind === 'local' ? { ...this.local.extraEnv } : {}, argv: [facts.node, adapter, '--cwd', record.cwd, '--command', command, ...conversation] };
+      // --thought is the effort a conversation starts with until it records its own choice.
+      const effort = record.cursorEffort ?? (record.thinkingLevel !== 'off' ? record.thinkingLevel : undefined);
+      const spawn = { cwd: record.cwd, env: env.kind === 'local' ? { ...this.local.extraEnv } : {}, argv: [facts.node, adapter, '--cwd', record.cwd, '--command', command, '--session-file', file,
+        ...(record.model?.id ? ['--model', record.model.id] : []), ...(effort ? ['--thought', effort] : []), ...(record.cursorSpare ? ['--spare'] : [])] };
       const transport = env.kind === 'local'
         ? localRelayTransport({ node: facts.node, relayPath: facts.relay, runDir: facts.runDir, extraEnv: this.local.extraEnv })
         : sshRelayTransport({ host: env.host, sshOptions: env.sshArgs ?? [], node: facts.node, relayPath: facts.relay, runDir: facts.runDir });
@@ -657,10 +722,6 @@ export class SessionManager extends EventEmitter {
     if (record.engine === 'cursor') {
       runtime.cursorCredentialVersion = state.cursorCredentialVersion ?? 0;
       this.#assertCurrent(record, runtime);
-      if (state.spare) { // a pre-started CLI: its conversation opens with the first message
-        if (state.models?.length) this.emit('cursor-models', state.models);
-        return session;
-      }
       this.#save(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId, model: state.model, thinkingLevel: state.thinkingLevel ?? 'off', cursorConfigOptions: state.cursorConfigOptions ?? [] });
       return session;
     }
@@ -718,6 +779,7 @@ export class SessionManager extends EventEmitter {
     if (event.type === 'agent_start') { runtime.streaming = true; this.emit('status', { id: record.id, status: runtime.status, streaming: true }); }
     if (event.type === 'agent_settled') { runtime.streaming = false; this.#save(record, { lastActiveAt: Date.now() }); this.emit('status', { id: record.id, status: runtime.status, streaming: false }); }
     if (record.engine === 'cursor' && event.type === 'cursor_model_changed' && event.model?.provider === 'cursor') this.#save(record, { model: event.model, thinkingLevel: event.thinkingLevel ?? 'off', cursorConfigOptions: event.cursorConfigOptions ?? [] });
+    if (record.engine === 'cursor' && event.type === 'cursor_models') { this.emit('cursor-models', event.models ?? []); return; }
     if (record.engine === 'cursor' && event.type === 'cursor_questions_cleared') {
       runtime.questions.clear(); this.emit('questions-cleared', { id: record.id });
     }
@@ -1206,7 +1268,7 @@ export class SessionManager extends EventEmitter {
     clearInterval(this.sweeper);
     const spares = [...this.spares.values()];
     this.spares.clear();
-    await Promise.all(spares.map(spare => this.#stopSpare(spare)));
+    await Promise.all(spares.map(spare => this.#stopSpare(spare, { remote: false })));
     await Promise.all([...this.runtimes.keys()].map(id => this.close(id)));
     await this.egress?.close();
   }

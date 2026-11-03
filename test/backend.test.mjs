@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
 import { once } from 'node:events';
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -260,7 +260,7 @@ test('egress shutdown destroys CONNECT tunnels and handles listen errors', { tim
   await waitFor(() => client.destroyed && peers.size === 0);
 });
 
-test('a pre-started Cursor CLI becomes the next No-folder conversation, opened in its own directory', { timeout: 30000 }, async t => {
+test('a pre-started Cursor conversation is published by the first message, then replaced', { timeout: 30000 }, async t => {
   const f = await fixture(t);
   const workspace = process.env.PIDESK_DEFAULT_WORKSPACE;
   process.env.PIDESK_DEFAULT_WORKSPACE = join(f.dir, 'Pi');
@@ -270,29 +270,41 @@ test('a pre-started Cursor CLI becomes the next No-folder conversation, opened i
   const manager = new SessionManager({ store, environments: () => [{ id: 'local', kind: 'local', label: 'Local' }],
     local: { node: process.execPath, piCli: peer, agentDir: f.dir, runDir: f.runDir, extraEnv: {} }, relayPath: f.relayPath, bridgePath: resolve('agent/pidesk-bridge.js') });
   f.cleanups.push(() => manager.shutdown());
+  const model = { provider: 'cursor', id: 'cursor-test-b' };
   const listed = new Promise(resolve => manager.once('cursor-models', resolve));
-  assert.equal(await manager.prewarm({ engine: 'cursor', environmentId: 'local', cwd: null }), true);
+  assert.equal(await manager.prewarm({ engine: 'cursor', environmentId: 'local', cwd: null, model, thinkingLevel: 'medium' }), true);
   const spare = [...manager.spares.values()][0];
+  assert.match(spare.record.cwd, /new-chat/, 'No folder: a provisional directory, decided before the first message');
   await waitFor(() => manager.runtimes.get(spare.id)?.status === 'connected');
-  assert.deepEqual((await listed).find(m => m.id === 'cursor-test-a').configOptions.map(o => o.id), ['speed', 'pidesk-effort'], 'warming refreshes each model\'s efforts');
-  const view = await manager.create({ environmentId: 'local', cwd: null, engine: 'cursor', model: { provider: 'cursor', id: 'cursor-test-b' }, thinkingLevel: 'high', prompt: 'tool please' });
-  assert.equal(view.id, spare.id, 'the conversation adopts the pre-started CLI');
-  assert.equal(manager.spares.size, 0);
-  assert.equal(view.status, 'connected');
-  assert.match(view.cwd, /tool-please$/);
-  assert.deepEqual([view.model.id, view.thinkingLevel], ['cursor-test-b', 'high']);
+  assert.deepEqual((await listed).find(m => m.id === 'cursor-test-a').configOptions.map(o => o.id), ['speed', 'pidesk-effort'], 'a pre-started Cursor refreshes each model\'s efforts');
+  // The draft's effort changes after the start: the started conversation follows at once.
+  await manager.prewarm({ engine: 'cursor', environmentId: 'local', cwd: null, model, thinkingLevel: 'high' });
+  await spare.record.tuning;
+  assert.equal((await manager.runtimes.get(spare.id).session.state()).thinkingLevel, 'high');
+  const view = await manager.create({ environmentId: 'local', cwd: null, engine: 'cursor', model, thinkingLevel: 'high', prompt: 'tool please' });
+  assert.equal(view.id, spare.id, 'the first message adopts the pre-started conversation');
+  assert.equal(view.cwd, spare.record.cwd);
+  assert.deepEqual([view.status, view.model.id, view.thinkingLevel], ['connected', 'cursor-test-b', 'high']);
   assert.ok(!view.cursorConfigOptions.some(o => o.id === 'mode' || o.id === 'model-choice' || o.id === 'thinking'));
   const turn = async text => {
     const settled = new Promise(resolve => { const on = ({ id, event }) => { if (id === view.id && event.type === 'agent_settled') { manager.off('event', on); resolve(); } }; manager.on('event', on); });
     await manager.prompt(view.id, text); await settled;
   };
   await turn('tool');
-  assert.equal(readFileSync(join(view.cwd, 'cursor-output.md'), 'utf8'), '# Cursor output\n', 'tools run in the conversation directory, not the spare\'s');
+  assert.equal(readFileSync(join(view.cwd, 'cursor-output.md'), 'utf8'), '# Cursor output\n');
   await turn('mode-status');
   assert.equal((await manager.messages(view.id)).at(-1).content[0].text, 'Mode: agent · effort: high');
-  // Effort changes go to the live session and are recorded for the conversation.
+  // The next new Cursor conversation is started ahead too; dropped unused, it leaves nothing behind.
+  await waitFor(() => manager.spares.size === 1);
+  const next = [...manager.spares.values()][0];
+  assert.notEqual(next.id, view.id);
+  assert.notEqual(next.record.cwd, view.cwd);
+  await waitFor(() => manager.runtimes.get(next.id)?.status === 'connected');
+  const nextFile = next.record.piSessionFile;
+  assert.ok(existsSync(next.record.cwd) && existsSync(nextFile));
+  manager.cursorSettingsChanged();
+  await waitFor(() => !existsSync(next.record.cwd) && !existsSync(nextFile));
+  assert.equal(manager.runtimes.get(view.id)?.status, 'connected', 'the published conversation is untouched');
   await manager.setThinking(view.id, 'medium');
   assert.equal(store.sessions[0].thinkingLevel, 'medium');
-  manager.cursorSettingsChanged(); // no spare left to drop; must not touch the conversation
-  assert.equal(manager.runtimes.get(view.id)?.status, 'connected');
 });

@@ -11,6 +11,8 @@ import { TerminalPanel } from './TerminalPanel.jsx';
 import { Palette } from './Palette.jsx';
 import { MenuItem, Modal, Popover, Spinner } from './ui.jsx';
 import { emptyTranscript } from './transcript.js';
+import { favouriteModels } from './file-paths.js';
+import { draftCursorEffort } from './cursor-options.js';
 import { api, bootstrap, closeConfirm, set as setStore, getState, newSession, notify, openFile, openPalette, openSettings, sendPrompt, setDraft, setFilePaneOpen, startSession, toggleRightPanel, toggleSidebar, useStore } from './store.js';
 
 // The session's goal (/goal): objective, state, and pause / resume / clear.
@@ -44,16 +46,19 @@ function ConfirmHost() {
 
 function NewSessionView() {
   const draft = useStore(s => s.draft);
-  const cursorEnabled = useStore(s => !!s.settings.cursor?.enabled);
-  // Start Pi (or Cursor CLI) in the chosen place ahead of time, so the first message doesn't wait for it.
+  const cursorSettings = useStore(s => s.settings.cursor);
+  const cursor = draft.engine === 'cursor';
+  const cursorModel = cursor ? draft.cursorModel ?? favouriteModels(cursorSettings)[0] ?? null : null;
+  const cursorEffort = cursor ? draftCursorEffort(cursorSettings, cursorModel?.id, draft.cursorEffort) : null;
+  // Start Pi (or a Cursor conversation, with the draft's model and effort) in the chosen place ahead of
+  // time, so the first message doesn't wait for it. Later draft changes retune a started Cursor.
   useEffect(() => {
-    const cursor = draft.engine === 'cursor';
-    if (cursor ? !cursorEnabled : !draft.model) return;
+    if (cursor ? !cursorSettings?.enabled : !draft.model) return;
     const t = setTimeout(() => api('prewarm', cursor
-      ? { engine: 'cursor', environmentId: draft.environmentId, cwd: draft.cwd, model: draft.cursorModel }
+      ? { engine: 'cursor', environmentId: draft.environmentId, cwd: draft.cwd, model: cursorModel, thinkingLevel: cursorEffort }
       : { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel }).catch(() => {}), 400);
     return () => clearTimeout(t);
-  }, [draft.engine, cursorEnabled, draft.environmentId, draft.cwd, draft.model?.provider, draft.model?.id]);
+  }, [cursor, cursorSettings?.enabled, draft.environmentId, draft.cwd, draft.model?.provider, draft.model?.id, cursorModel?.id, cursorEffort]);
   return (
     <div className="new-session">
       <div className="new-session-center" />

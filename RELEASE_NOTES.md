@@ -2,6 +2,11 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.1.37 — Cursor conversations start ready
+
+- **No wait after pressing Enter.** The new-conversation screen now starts the whole Cursor conversation ahead: its session is opened in the final directory (No folder: a provisional `new-chat` one) with the draft's model and effort already applied, and changes in the draft are applied as you make them. Sending only publishes it. Before, Cursor still opened the session and applied the effort after you sent (a round trip to Cursor's servers each, 2–5 s), or the whole 6–7 s start-up if it had not finished warming.
+- **The next one is ready too.** After each new Cursor conversation, the next is started ahead in the same place. An unused one stops after ten minutes and removes its empty directory and history file.
+
 ## 0.1.36 — Cursor on hosts behind a proxy
 
 - **Cursor CLI works on SSH hosts that reach the internet through a proxy.** The desktop passed Cursor only a minimal environment, without the host's `HTTPS_PROXY`/`NO_PROXY` and CA settings. On a company host Cursor then could not connect, and a new conversation stayed at *Starting Cursor…* while each step waited out its connection timeouts. Cursor now gets the same proxy and CA settings as any program on the host; Pi provider keys are still never passed.

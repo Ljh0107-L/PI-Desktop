@@ -200,36 +200,21 @@ test('catalog lists each model’s own efforts without mode or model', { timeout
   assert.deepEqual(models.find(m => m.id === 'cursor-test-c').configOptions, []);
 });
 
-test('a pre-started adapter opens its conversation where the first message decides', { timeout: 15000 }, async t => {
+test('a conversation started ahead of its first message is ready in its directory and lists model efforts', { timeout: 15000 }, async t => {
   const f = fixture(t, { configModels: true, flags: ['--initial-mode', 'ask'] });
   const conversation = join(f.cwd, 'conversation'); mkdirSync(conversation);
-  const spare = adapterProcess(t, ['--spare', '--cwd', f.cwd, '--command', f.command]);
-  const warm = await spare.request('get_state');
-  assert.equal(warm.spare, true);
-  assert.deepEqual(warm.models.find(m => m.id === 'cursor-test-b').configOptions.map(o => o.id), ['speed', 'pidesk-effort']);
-  await assert.rejects(spare.request('prompt', { message: 'too early' }), /still starting/);
-  await assert.rejects(spare.request('cursor_open', { cwd: 'relative', sessionFile: join(conversation, 'h.jsonl') }), /Invalid/);
   const file = join(conversation, 'history.jsonl');
-  const state = await spare.request('cursor_open', { cwd: conversation, sessionFile: file, model: 'cursor-test-b', effort: 'high' });
-  assert.equal(state.model.id, 'cursor-test-b');
-  assert.equal(state.thinkingLevel, 'high');
+  const spare = adapterProcess(t, ['--spare', '--cwd', conversation, '--command', f.command, '--session-file', file, '--model', 'cursor-test-b', '--thought', 'high']);
+  const state = await spare.request('get_state');
+  assert.deepEqual([state.model.id, state.thinkingLevel], ['cursor-test-b', 'high']);
   assert.equal(JSON.parse(readFileSync(file, 'utf8').split('\n')[0]).cwd, conversation);
+  for (let i = 0; i < 100 && !spare.events.some(e => e.type === 'cursor_models'); i++) await new Promise(r => setTimeout(r, 20));
+  const listed = spare.events.find(e => e.type === 'cursor_models');
+  assert.deepEqual(listed.models.find(m => m.id === 'cursor-test-b').configOptions.map(o => o.id), ['speed', 'pidesk-effort']);
   await spare.request('prompt', { message: 'tool' }); await spare.settled();
   assert.equal(readFileSync(join(conversation, 'cursor-output.md'), 'utf8'), '# Cursor output\n', 'tools work in the conversation directory');
-  assert.ok(!existsSync(join(f.cwd, 'cursor-output.md')));
   await spare.request('prompt', { message: 'mode-status' }); await spare.settled();
   assert.equal((await spare.request('get_messages')).messages.at(-1).content[0].text, 'Mode: agent · effort: high');
-  await assert.rejects(spare.request('cursor_open', { cwd: conversation, sessionFile: file }), /already has a conversation/);
-});
-
-test('a spare that cannot reach Cursor fails at once instead of at the first message', { timeout: 15000 }, async t => {
-  const f = fixture(t, { configModels: true });
-  const broken = mockCursorCommand(join(f.cwd, 'broken'), ['--config-models', '--list-error']);
-  const spare = adapterProcess(t, ['--spare', '--cwd', f.cwd, '--command', broken]);
-  await assert.rejects(spare.request('get_state'), /model discovery.*Failed to initialize ACP services/);
-  const legacy = mockCursorCommand(join(f.cwd, 'legacy'), []); // answers cursor/list_available_models with -32601
-  const older = adapterProcess(t, ['--spare', '--cwd', f.cwd, '--command', legacy]);
-  assert.equal((await older.request('get_state')).spare, true, 'a CLI without model listing still warms');
 });
 
 // Hold an ACP setter before sending it, without timing-dependent sleeps.

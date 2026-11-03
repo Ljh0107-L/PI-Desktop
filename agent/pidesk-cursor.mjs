@@ -1,7 +1,7 @@
 // Cursor CLI runs as a distinct agent behind Pi Desktop's existing durable relay.
 // Only the desktop event envelope is adapted. Cursor owns context, tools and auth.
 import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname, isAbsolute } from 'node:path';
+import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { CURSOR_EFFORT_ID, CursorAcp, cursorConfigOptions, cursorCurrentModel, cursorEffortChange, cursorListedModels, cursorModeOption, cursorModelConfig, cursorModels, cursorModelSettings, cursorSelectValues, cursorThoughtOption, estimateTokens } from './cursor-acp.mjs';
@@ -356,43 +356,23 @@ async function main() {
     finally { await client.close(); process.off('SIGTERM', stop); process.off('SIGINT', stop); }
     return;
   }
-  // --spare: started while the user is still writing the first message. The CLI starts and its
-  // account services and model list load now (most of Cursor's start-up); cursor_open then only has
-  // to open the conversation in the directory the message decides.
-  const spare = args.includes('--spare');
   const file = value('--session-file');
-  if (!file && !spare) throw new Error('Missing Cursor desktop history path');
-  let desktop = null, opened = null;
-  const open = ({ sessionFile, cwd: dir, model, effort }) => {
-    if (desktop) throw new Error('This Cursor process already has a conversation');
-    if (typeof sessionFile !== 'string' || !isAbsolute(sessionFile) || typeof dir !== 'string' || !isAbsolute(dir)) throw new Error('Invalid Cursor conversation location');
-    desktop = new CursorDesktopSession({ client, file: sessionFile, cwd: dir, send, credentialVersion, effort });
-    return desktop;
-  };
-  const shutdown = async () => { desktop?.clearDialogs(); await client.close(); process.exit(0); };
-  let ready, orphan = null, listed = [];
-  if (spare) {
-    client.on('request', message => { if (!desktop) client.reject(message.id, 'No Cursor conversation is open yet'); });
-    // Listing models loads Cursor's account services, and refreshes each model's efforts for the desktop.
-    // Only a CLI without the method is tolerated: no network or a bad key fails the spare now, so the
-    // first message starts afresh and reports it, instead of first waiting out this CLI's timeouts.
-    ready = client.start().then(() => client.request('cursor/list_available_models', {}).catch(error => { if (error.code === -32601) return null; throw error; })).then(result => { listed = cursorListedModels(result); });
-    // The desktop drops an unused spare after ten minutes; one it lost track of must not keep Cursor running.
-    orphan = setTimeout(() => { void shutdown(); }, 15 * 60 * 1000);
-  } else ready = open({ sessionFile: file, cwd, effort: value('--thought') }).start(value('--model'));
+  if (!file) throw new Error('Missing Cursor desktop history path');
+  const desktop = new CursorDesktopSession({ client, file, cwd, send, credentialVersion, effort: value('--thought') });
+  const ready = desktop.start(value('--model'));
   ready.catch(error => { console.error(error.message); });
+  const shutdown = async () => { desktop.clearDialogs(); await client.close(); process.exit(0); };
+  // --spare: started ahead of its first message, while the user is still writing it. It also refreshes
+  // each model's efforts for new conversations (never delaying this one), and stops by itself if the
+  // desktop lost track of it before using it (it drops an unused one after ten minutes).
+  let orphan = null;
+  if (args.includes('--spare')) {
+    ready.then(() => client.request('cursor/list_available_models', {})).then(listed => send({ type: 'cursor_models', models: cursorListedModels(listed) }), () => {});
+    orphan = setTimeout(() => { void shutdown(); }, 15 * 60 * 1000);
+  }
   const handle = async p => {
-    if (spare && p.type === 'cursor_open') {
-      clearTimeout(orphan);
-      opened = open(p).open(typeof p.model === 'string' && p.model ? p.model : undefined);
-      await opened;
-      return desktop.state();
-    }
-    if (opened) await opened;
-    if (desktop) return desktop.request(p.type, p);
-    if (p.type === 'get_state') return { spare: true, isStreaming: false, cursorCredentialVersion: credentialVersion, model: null, cursorConfigOptions: [], contextUsage: null, models: listed };
-    if (['abort', 'abort_bash', 'clear_queue'].includes(p.type)) return {};
-    throw new Error('Cursor is still starting this conversation');
+    if (p.type === 'prompt') clearTimeout(orphan);
+    return desktop.request(p.type, p);
   };
   let buffer = '';
   process.stdin.setEncoding('utf8');
@@ -404,12 +384,12 @@ async function main() {
       if (!line.trim()) continue;
       let p;
       try { p = JSON.parse(line); } catch { continue; }
-      if (p.type === 'extension_ui_response') { desktop?.answer(p.id, p); continue; }
+      if (p.type === 'extension_ui_response') { desktop.answer(p.id, p); continue; }
       void ready.then(() => handle(p)).then(data => send({ type: 'response', id: p.id, command: p.type, success: true, data }), error => send({ type: 'response', id: p.id, command: p.type, success: false, error: error.message }));
     }
   });
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
   process.stdin.on('end', shutdown);
-  client.on('closed', () => { if (!desktop?.streaming) process.exit(1); else desktop.turn?.finally(() => process.exit(1)); });
+  client.on('closed', () => { if (!desktop.streaming) process.exit(1); else desktop.turn?.finally(() => process.exit(1)); });
 }
 if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => { console.error(error.message); process.exitCode = 1; });
