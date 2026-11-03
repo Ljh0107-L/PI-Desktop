@@ -650,6 +650,7 @@ a[href], .markdown a { cursor: pointer; }
 .turn-foot:hover { opacity: 1; }
 
 .cursor-settings { max-width: 620px; }
+.cursor-settings .row-meta { white-space: normal; overflow: visible; line-height: 1.5; }
 .cursor-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; }
 .cursor-head .section-title { margin-bottom: 4px; }
 .cursor-toggle { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 13px; flex: none; }
