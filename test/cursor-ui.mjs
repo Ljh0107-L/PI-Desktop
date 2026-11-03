@@ -10,7 +10,7 @@ rmSync(work, { recursive: true, force: true });
 const profile = join(work, 'profile'), project = join(work, 'project');
 mkdirSync(profile, { recursive: true }); mkdirSync(project, { recursive: true });
 const command = join(work, 'mock cursor');
-writeFileSync(command, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(join(root, 'test/fixtures/cursor-peer.mjs'))} "$@"\n`);
+writeFileSync(command, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(join(root, 'test/fixtures/cursor-peer.mjs'))} --config-models "$@"\n`);
 chmodSync(command, 0o700);
 // Reuse only the isolated test-host install; never ~/.pidesk.
 writeFileSync(join(profile, 'settings.json'), JSON.stringify({ environments: { 'ssh:pidesk-test': { root: '/tmp/pidesk-e2e/remote-install', added: true, enabled: true } } }));

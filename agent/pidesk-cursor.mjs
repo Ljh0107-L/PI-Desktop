@@ -4,7 +4,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
-import { CursorAcp, cursorModels } from './cursor-acp.mjs';
+import { CursorAcp, cursorCurrentModel, cursorModelConfig, cursorModels } from './cursor-acp.mjs';
 
 const textOf = content => (content ?? []).map(c => c.type === 'text' ? c.text : c.type === 'resource_link' ? c.uri : JSON.stringify(c)).join('\n');
 export class CursorDesktopSession {
@@ -38,23 +38,43 @@ export class CursorDesktopSession {
     await this.client.start();
     const session = await this.client.openSession(this.sessionId);
     this.sessionId = this.client.sessionId;
-    this.models = cursorModels(session);
-    this.model = { provider: 'cursor', id: session.models?.currentModelId ?? this.model?.id ?? modelId ?? 'default' };
+    this.applyModelState(session);
+    this.model ??= { provider: 'cursor', id: modelId ?? 'default' };
     this.saveState();
     if (modelId && modelId !== this.model.id) await this.setModel(modelId);
+  }
+  applyModelState(state) {
+    this.modelConfig = cursorModelConfig(state);
+    this.models = cursorModels(state);
+    const id = cursorCurrentModel(state) ?? this.model?.id;
+    if (id) this.model = { provider: 'cursor', id, name: this.models.find(model => model.id === id)?.name ?? id };
   }
   async setModel(modelId) {
     if (this.streaming) throw new Error('Wait for Cursor to finish before switching models');
     if (!this.models.some(model => model.id === modelId)) throw new Error('This model is not available from Cursor CLI');
-    await this.client.request('session/set_model', { sessionId: this.sessionId, modelId });
-    this.model = { provider: 'cursor', id: modelId }; this.saveState();
+    if (this.modelConfig) {
+      const result = await this.client.request('session/set_config_option', { sessionId: this.sessionId, configId: this.modelConfig.id, value: modelId });
+      this.applyModelState(result);
+      if (this.model?.id !== modelId) throw new Error('Cursor did not apply the requested model');
+    } else {
+      await this.client.request('session/set_model', { sessionId: this.sessionId, modelId });
+      this.model = { provider: 'cursor', id: modelId, name: this.models.find(model => model.id === modelId)?.name ?? modelId };
+    }
+    this.saveState();
   }
   state() { return { sessionId: this.sessionId, sessionFile: this.file, isStreaming: this.streaming, model: this.model, thinkingLevel: 'off' }; }
   messages() { return this.entries.filter(e => e.type === 'message').map(e => e.message); }
   endMessage(message) { this.append({ type: 'message', message }); this.send({ type: 'message_end', message }); }
   notification({ method, params }) {
-    if (method !== 'session/update' || params?.sessionId !== this.sessionId || !this.streaming) return;
+    if (method !== 'session/update' || params?.sessionId !== this.sessionId) return;
     const u = params.update;
+    if (!u) return;
+    if (u.sessionUpdate === 'config_option_update') {
+      this.applyModelState(u); this.saveState();
+      this.send({ type: 'cursor_model_changed', model: this.model });
+      return;
+    }
+    if (!this.streaming) return;
     if (u.sessionUpdate === 'agent_message_chunk' || u.sessionUpdate === 'agent_thought_chunk') {
       if (u.content?.type !== 'text') return;
       const thinking = u.sessionUpdate === 'agent_thought_chunk';
@@ -78,16 +98,22 @@ export class CursorDesktopSession {
         const call = { type: 'toolCall', id, name, arguments: args };
         const index = this.assistant.content.length;
         this.assistant.content.push(call);
-        tool = { call, started: Date.now(), content: [] }; this.tools.set(id, tool);
+        tool = { call, index, started: Date.now(), content: [] }; this.tools.set(id, tool);
         this.send({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: index, toolCall: call } });
         this.send({ type: 'tool_execution_start', toolCallId: id, toolName: name, args });
+      }
+      if (u.rawInput || u.locations || u.title) {
+        Object.assign(tool.call.arguments, u.rawInput && typeof u.rawInput === 'object' ? u.rawInput : {});
+        if (u.locations?.[0]?.path && !tool.call.arguments.path) tool.call.arguments.path = u.locations[0].path;
+        if (u.title) tool.call.arguments.description = u.title;
+        this.send({ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: tool.index, toolCall: tool.call } });
       }
       if (u.content) tool.content = u.content.map(item => ({ type: 'text', text: item.type === 'content' ? textOf([item.content]) : item.type === 'diff' ? `${item.path}\n${item.newText ?? ''}` : JSON.stringify(item) }));
       if (u.rawOutput !== undefined && !tool.content.length) tool.content = [{ type: 'text', text: typeof u.rawOutput === 'string' ? u.rawOutput : JSON.stringify(u.rawOutput) }];
       if (u.status === 'completed' || u.status === 'failed') {
         tool.done = true; tool.error = u.status === 'failed';
         this.send({ type: 'tool_execution_end', toolCallId: id, result: { content: tool.content }, isError: tool.error, durationMs: Date.now() - tool.started });
-      } else this.send({ type: 'tool_execution_update', toolCallId: id, partialResult: { content: tool.content } });
+      } else if (!tool.done) this.send({ type: 'tool_execution_update', toolCallId: id, partialResult: { content: tool.content } });
     }
   }
   dialog(method, title, extra = {}) {
@@ -193,7 +219,7 @@ async function main() {
   if (args.includes('--catalog')) {
     // Opening an empty ACP session advertises account models; it sends no model prompt.
     client.on('request', message => client.reject(message.id, 'Model discovery is non-interactive. Run agent login first.'));
-    try { await client.start(); const session = await client.openSession(); process.stdout.write(JSON.stringify({ models: cursorModels(session), currentModelId: session.models?.currentModelId }) + '\n'); }
+    try { await client.start(); const session = await client.openSession(); process.stdout.write(JSON.stringify({ models: cursorModels(session), currentModelId: cursorCurrentModel(session) }) + '\n'); }
     finally { await client.close(); }
     return;
   }

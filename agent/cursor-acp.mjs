@@ -13,7 +13,13 @@ export function cursorEnvironment(source = process.env) {
   const keep = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM', 'CURSOR_API_KEY', 'CURSOR_AUTH_TOKEN'];
   return Object.fromEntries(keep.filter(key => source[key] !== undefined).map(key => [key, source[key]]));
 }
-export const cursorModels = result => (result?.models?.availableModels ?? []).map(m => ({ provider: 'cursor', id: m.modelId, name: m.name || m.modelId, reasoning: false, input: ['text', 'image'] })).filter(m => typeof m.id === 'string' && m.id);
+export const cursorModelConfig = result => result?.configOptions?.find(option => option.type === 'select' && (option.category === 'model' || option.id === 'model'));
+export const cursorCurrentModel = result => cursorModelConfig(result)?.currentValue ?? result?.models?.currentModelId;
+export function cursorModels(result) {
+  const config = cursorModelConfig(result);
+  const options = config ? (config.options ?? []).flatMap(option => option.options ?? [option]).map(option => ({ modelId: option.value, name: option.name })) : result?.models?.availableModels ?? [];
+  return options.map(m => ({ provider: 'cursor', id: m.modelId, name: m.name || m.modelId, reasoning: false, input: ['text', 'image'] })).filter(m => typeof m.id === 'string' && m.id);
+}
 
 export class CursorAcp extends EventEmitter {
   constructor({ command, cwd, spawnProcess = spawn, env = process.env }) {

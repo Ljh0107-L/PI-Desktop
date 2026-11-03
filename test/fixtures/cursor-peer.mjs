@@ -6,6 +6,8 @@ const send = message => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ..
 const result = (id, value) => send({ id, result: value });
 const models = [{ modelId: 'cursor-test-a', name: 'Cursor Test A' }, { modelId: 'cursor-test-b', name: 'Cursor Test B' }];
 let sessionId = 'cursor-fixture-session', modelId = models[0].modelId, turn, requestId = 10000;
+const configModels = process.argv.includes('--config-models');
+const modelState = () => configModels ? { configOptions: [{ id: 'model-choice', category: 'model', type: 'select', name: 'Model', currentValue: modelId, options: [{ group: 'fixture', name: 'Fixture', options: models.map(model => ({ value: model.modelId, name: model.name })) }] }] } : { models: { availableModels: models, currentModelId: modelId } };
 const pending = new Map();
 const update = update => send({ method: 'session/update', params: { sessionId, update } });
 const text = text => update({ sessionUpdate: 'agent_message_chunk', content: { type: 'text', text } });
@@ -21,8 +23,11 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
       sessionId = p.params.sessionId || sessionId;
       // A replay must not become a new assistant message in desktop history.
       if (p.method === 'session/load') text('REPLAY MUST BE IGNORED');
-      result(p.id, { sessionId, models: { availableModels: models, currentModelId: modelId } }); break;
-    case 'session/set_model': modelId = p.params.modelId; result(p.id, {}); break;
+      result(p.id, { sessionId, ...modelState() }); break;
+    case 'session/set_model':
+      if (configModels) { send({ id: p.id, error: { code: -32601, message: 'Use config options' } }); break; }
+      modelId = p.params.modelId; result(p.id, {}); break;
+    case 'session/set_config_option': modelId = p.params.value; result(p.id, modelState()); break;
     case 'session/prompt': {
       turn = p.id;
       const prompt = p.params.prompt.map(c => c.text || '').join('');

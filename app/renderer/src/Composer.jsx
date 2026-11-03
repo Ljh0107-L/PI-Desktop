@@ -425,7 +425,7 @@ export function ComposerBar({ session }) {
         {(cursorEnabled || cursor) && (isNew
           ? <Trigger width={220} label="Agent" className="engine-trigger" menu={close => <><MenuItem label="Pi" checked={!cursor} onClick={() => { setDraft({ engine: 'pi' }); close(); }} /><MenuItem label="Cursor CLI" checked={cursor} disabled={!cursorEnabled} onClick={() => { setDraft({ engine: 'cursor' }); close(); }} /></>}><span>{cursor ? 'Cursor CLI' : 'Pi'}</span></Trigger>
           : <span className="muted engine-label">{cursor ? 'Cursor CLI' : 'Pi'}</span>)}
-        {cursor ? <Trigger width={340} label="Model" className="model-trigger" menu={close => <CursorModelMenu environmentId={environmentId} sessionId={session?.id} value={model} onChange={changeModel} close={close} />}><span className="strong">{model?.id ?? 'Cursor default'}</span></Trigger> : catalog.length || model
+        {cursor ? <Trigger width={340} label="Model" className="model-trigger" menu={close => <CursorModelMenu environmentId={environmentId} sessionId={session?.id} value={model} onChange={changeModel} close={close} />}><span className="strong">{model?.name ?? model?.id ?? 'Cursor default'}</span></Trigger> : catalog.length || model
           ? <Trigger width={320} label="Model" className="model-trigger" menu={close => <ModelMenu value={model} onChange={changeModel} close={close} />}>
               <span className="strong">{modelLabel(model, catalog)}</span>
             </Trigger>

@@ -9,12 +9,12 @@ import { CursorDesktopSession } from '../agent/pidesk-cursor.mjs';
 import { branchMessages } from '../app/main/session-manager.mjs';
 import { shellQuote } from '../core/transports.mjs';
 
-function fixture(t) {
+function fixture(t, { configModels = false } = {}) {
   const cwd = mkdtempSync(join(tmpdir(), 'pidesk-cursor-'));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
   const command = join(cwd, 'mock cursor');
   const peer = join(dirname(fileURLToPath(import.meta.url)), 'fixtures/cursor-peer.mjs');
-  writeFileSync(command, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(peer)} "$@"\n`);
+  writeFileSync(command, `#!/bin/sh\nexec ${shellQuote(process.execPath)} ${shellQuote(peer)} ${configModels ? '--config-models ' : ''}"$@"\n`);
   chmodSync(command, 0o700);
   const file = join(cwd, 'history/session.jsonl');
   const events = [];
@@ -51,6 +51,17 @@ test('official ACP initializes, advertises models, switches and streams exactly 
   await assert.rejects(f.desktop.setModel('missing'), /not available/);
   const entries = readFileSync(f.file, 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(branchMessages(entries, entries.at(-1).id), messages);
+});
+
+test('Cursor model config options support grouped models and the standard setter', { timeout: 15000 }, async t => {
+  const f = fixture(t, { configModels: true });
+  await f.desktop.start('cursor-test-b');
+  assert.equal(f.desktop.models.length, 2);
+  assert.equal(f.desktop.state().model.id, 'cursor-test-b');
+  await f.desktop.setModel('cursor-test-a');
+  assert.equal(f.desktop.state().model.name, 'Cursor Test A');
+  f.desktop.prompt('config model'); await f.desktop.turn;
+  assert.match(f.desktop.messages().at(-1).content[0].text, /cursor-test-a/);
 });
 
 test('Cursor history resumes the same native session and ignores session/load replay', { timeout: 15000 }, async t => {

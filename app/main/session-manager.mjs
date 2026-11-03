@@ -660,6 +660,7 @@ export class SessionManager extends EventEmitter {
     runtime.lastUsed = Date.now();
     if (event.type === 'agent_start') { runtime.streaming = true; this.emit('status', { id: record.id, status: runtime.status, streaming: true }); }
     if (event.type === 'agent_settled') { runtime.streaming = false; this.#save(record, { lastActiveAt: Date.now() }); this.emit('status', { id: record.id, status: runtime.status, streaming: false }); }
+    if (record.engine === 'cursor' && event.type === 'cursor_model_changed' && event.model?.provider === 'cursor') this.#save(record, { model: event.model });
     if (record.engine === 'cursor' && event.type === 'cursor_questions_cleared') {
       runtime.questions.clear(); this.emit('questions-cleared', { id: record.id });
     }
@@ -824,7 +825,7 @@ export class SessionManager extends EventEmitter {
       if (provider !== 'cursor') throw new Error('Select a Cursor model for this session');
       const session = await this.ensureStarted(id);
       await session.setModel(provider, modelId);
-      this.#save(record, { model: { provider, id: modelId } });
+      this.#save(record, { model: (await session.state()).model });
       return;
     }
     let runtime = this.runtimes.get(id);

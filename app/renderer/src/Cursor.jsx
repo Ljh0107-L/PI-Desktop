@@ -49,7 +49,7 @@ export function CursorModelMenu({ environmentId, sessionId, value, onChange, clo
     <div className="menu-scroll">
       {!state && <div className="menu-empty"><Spinner /> Loading Cursor models…</div>}
       {state?.error && <div className="menu-empty error">{state.error}</div>}
-      {state?.models && <MenuSection title="Cursor CLI">{state.models.filter(m => `${m.name} ${m.id}`.toLowerCase().includes(query.toLowerCase())).map(m => <MenuItem key={m.id} label={m.name} detail={m.name !== m.id ? m.id : null} checked={(value?.id ?? state.currentModelId) === m.id} onClick={() => { onChange({ provider: 'cursor', id: m.id }); close(); }} />)}</MenuSection>}
+      {state?.models && <MenuSection title="Cursor CLI">{state.models.filter(m => `${m.name} ${m.id}`.toLowerCase().includes(query.toLowerCase())).map(m => <MenuItem key={m.id} label={m.name} detail={m.name !== m.id ? m.id : null} checked={(value?.id ?? state.currentModelId) === m.id} onClick={() => { onChange({ provider: 'cursor', id: m.id, name: m.name }); close(); }} />)}</MenuSection>}
       {state?.models?.length === 0 && <div className="menu-empty">This Cursor CLI did not advertise models. Update the CLI and check your login.</div>}
     </div>
     <div className="menu-foot"><MenuItem icon="refresh" label="Refresh models" onClick={() => setVersion(v => v + 1)} /><MenuItem icon="settings" label="Cursor SDK settings…" onClick={() => { close(); openSettings(true, 'cursor'); }} /></div>
