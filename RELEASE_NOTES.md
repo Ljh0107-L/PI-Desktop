@@ -2,7 +2,7 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## Unreleased — Generation-only TPS
+## 0.1.26 — Generation-only TPS
 
 - **No request-average fallback.** Usage measures only source-observed first→last generation time, excluding TTFT, tool execution and completion trailers. The first chunk's estimated share of output is excluded too, rather than dividing already-arrived tokens by the remaining window.
 - **Reasoning and answer windows match their tokens.** Fully streamed reasoning counts once. Hidden, summarized or redacted reasoning uses a separate **Answer generation** window and excludes reasoning tokens; unknown answer counts are explicitly estimated. An answer window spanning interleaved thinking is unavailable rather than mixing reasoning time with answer tokens.
@@ -11,7 +11,7 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 New counters require a newly started Pi process after updating; kept-alive processes are not force-restarted. Existing histories remain readable, but missing generation timing cannot be reconstructed.
 
-## 0.1.25 — Recover output-limited subagents and expose the bundled runtime
+## Included from 0.1.25 — Recover output-limited subagents and expose the bundled runtime
 
 - **Output limits are not process crashes.** Subagents now identify `length` as the model response-token limit (reasoning included), retain per-response output/reasoning counts and the configured cap, and label the failure **Output limit**. Hidden-only exhaustion still produces an actionable diagnostic. Unexpected reasoning on a model configured with `reasoning: false` is reported, not silently reconfigured.
 - **One safe, bounded recovery.** A length-truncated response always ends its low-level loop. The child may recover once with guidance to use smaller complete operations, preserving earlier successful tool results, model/thinking settings and the original deadline. Only the exact truncated turn is removed from its in-memory model context. A second limit stops clearly; no unlimited retries or larger hidden budgets. Clipped tool calls never execute and appear as **not executed**, not as running edits. Recovery remains best-effort when a gateway spends the whole cap on hidden reasoning.
