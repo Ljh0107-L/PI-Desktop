@@ -2,7 +2,16 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## 0.1.30 — Managed Cursor SDK, without agent/Grok collisions
+## 0.1.31 — Cursor authentication without a remote keychain
+
+- **API-key auth stays in memory inside Cursor.** Supplied API keys/auth tokens select the official CLI's `memory` credential store. This avoids macOS login-keychain access in SSH sessions and avoids enabling plaintext CLI credential persistence. The desktop's saved key remains encrypted and is supplied again when a Cursor process restarts.
+- **Actual SSH verification.** GitHub CI now uploads the real pinned Cursor package through the actual SSH installer and initializes its ACP server over SSH without a TTY, credentials or an inference request. This caught the keychain requirement that mock-only tests could not expose. Local official CLI startup, alias preservation, checksum checks and normal local/SSH UI flows remain covered.
+- **Bounded shutdown.** Cursor/SSH shutdown closes inherited pipes after the grace period, so detached helpers or an SSH control master cannot leave the desktop waiting indefinitely after the direct process exits.
+- **Automatic setup included.** No manual Cursor CLI install is needed: leave the advanced path blank, enter the API key and check models. Local/SSH private installations and the agent/Grok collision protection from 0.1.30 are included below.
+
+The authentication policy applies to newly started/restarted Cursor processes; running work is not force-stopped and existing CLI credential caches are not deleted. If an earlier generic `agent` entry pointed to Grok or another program, update first and then rotate the Cursor API key as a precaution.
+
+## Included from 0.1.30 — Managed Cursor SDK, without agent/Grok collisions
 
 - **No manual CLI installation.** Enable Cursor SDK, enter the API key, and leave the advanced path blank. Pi downloads and verifies the official Cursor package into its private local directory. Enabled managed SDKs are also prepared when connecting SSH hosts, with the package downloaded on the Mac and uploaded over SSH. Download/upload progress is shown and healthy installs are reused.
 - **Do not touch global aliases.** The upstream shell installer is not executed because it replaces `~/.local/bin/agent`. Pi's installation leaves Grok, global agent commands and shell profiles unchanged. Cursor's self-updater is disabled; the tested runtime version and per-platform size/SHA-256 are pinned in the desktop.
