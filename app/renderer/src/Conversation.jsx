@@ -58,6 +58,7 @@ function describeCall(call) {
   if (call.__trace?.status === 'skipped') return { subject: `${call.name} — not executed`, title: 'Output token limit: incomplete tool arguments were not executed.' };
   const a = call.arguments ?? {};
   const path = a.path ?? a.file_path ?? '';
+  if (call.name.startsWith('cursor_')) return { subject: a.description || call.name.slice(7), title: path || JSON.stringify(a) };
   switch (call.name) {
     case 'subagent': return { verb: 'Subagents', subject: (a.tasks ?? []).map(t => t.name).join(' · '), title: 'Delegated tasks on this session’s machine' };
     case 'bash': return a.description?.trim() ? { subject: a.description.trim(), title: a.command } : { subject: shortCommand(a.command), title: a.command, raw: true };
@@ -98,7 +99,7 @@ function ToolCall({ call, tool }) {
   const status = tool?.status ?? 'pending';
   const failed = ['error', 'cancelled', 'timed_out'].includes(status);
   const output = textOf(tool?.result);
-  const filePath = trace?.path ?? (['read', 'edit', 'write'].includes(call.name) && !failed ? (call.arguments?.path ?? call.arguments?.file_path) : null);
+  const filePath = trace?.path ?? (['read', 'edit', 'write', 'cursor_edit'].includes(call.name) && !failed ? (call.arguments?.path ?? call.arguments?.file_path) : null);
   const hunks = trace ? [] : call.name === 'edit' ? editHunks(call.arguments) : call.name === 'write' ? [{ oldText: null, newText: String(call.arguments?.content ?? '') }] : [];
   const stats = hunks.length && status !== 'error' ? changeStats({ hunks }) : null;
   return (
@@ -245,7 +246,7 @@ function QuestionCard({ sessionId, question }) {
   return (
     <div className="question-card" role="group" aria-label="Question from Pi">
       <div className="question-title">{question.title}</div>
-      {question.method === 'confirm' && question.message && <div className="question-message">{question.message}</div>}
+      {question.message && <div className="question-message">{question.message}</div>}
       {options.length > 0 && <div className="question-options">
         {options.map((option, i) => (
           <button key={option} className="question-option" disabled={busy} onClick={() => send({ value: option })}>

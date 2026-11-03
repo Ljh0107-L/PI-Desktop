@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -51,6 +53,15 @@ test('official ACP initializes, advertises models, switches and streams exactly 
   await assert.rejects(f.desktop.setModel('missing'), /not available/);
   const entries = readFileSync(f.file, 'utf8').trim().split('\n').map(JSON.parse);
   assert.deepEqual(branchMessages(entries, entries.at(-1).id), messages);
+});
+
+test('catalog entry point works through symlinks, including macOS /tmp SSH installations', { timeout: 15000 }, async t => {
+  const f = fixture(t);
+  const adapter = join(dirname(fileURLToPath(import.meta.url)), '../agent/pidesk-cursor.mjs');
+  const link = join(f.cwd, 'cursor-adapter.mjs');
+  symlinkSync(adapter, link);
+  const { stdout } = await promisify(execFile)(process.execPath, [link, '--catalog', '--cwd', f.cwd, '--command', f.command], { timeout: 10000 });
+  assert.equal(JSON.parse(stdout).models.length, 2);
 });
 
 test('Cursor model config options support grouped models and the standard setter', { timeout: 15000 }, async t => {
@@ -111,6 +122,18 @@ test('Cursor abort settles a turn, rejects overlaps and leaves the connection re
   assert.equal(f.desktop.messages().at(-1).stopReason, 'stop');
   await assert.rejects(f.desktop.request('clone'), /not available/);
   assert.throws(() => f.desktop.prompt('/goal pretend'), /not available/);
+});
+
+test('cancelling a pending Cursor permission clears desktop and relay question state', { timeout: 15000 }, async t => {
+  const f = fixture(t); await f.desktop.start();
+  let requested;
+  const question = new Promise(resolve => { requested = resolve; });
+  f.desktop.send = event => { f.events.push(structuredClone(event)); if (event.type === 'extension_ui_request') requested(event); };
+  f.desktop.prompt('permission'); await question;
+  await f.desktop.abort();
+  assert.equal(f.desktop.dialogs.size, 0);
+  assert.ok(f.events.some(event => event.type === 'cursor_questions_cleared'));
+  assert.equal(f.desktop.streaming, false);
 });
 
 test('Cursor EOF is an error, never successful completion', { timeout: 15000 }, async t => {

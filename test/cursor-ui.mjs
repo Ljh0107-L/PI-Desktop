@@ -26,6 +26,7 @@ try {
   await page.getByLabel('Cursor CLI executable').fill(command);
   await page.getByRole('button', { name: 'Check connection and models', exact: true }).click();
   await page.locator('.cursor-model-list', { hasText: '2 models available' }).waitFor({ timeout: 90000 });
+  assert.ok(await page.locator('.cursor-settings .row-meta').evaluateAll(nodes => nodes.every(node => getComputedStyle(node).whiteSpace === 'normal' && node.scrollWidth <= node.clientWidth + 1)), 'Cursor setup instructions must wrap instead of being clipped');
   await shot(page, '/tmp/pidesk-e2e/shots', 'cursor-sdk-settings');
   await page.getByRole('button', { name: 'Back to app', exact: true }).click();
   for (const environmentId of ['local', 'ssh:pidesk-test']) {
@@ -60,8 +61,9 @@ try {
     await page.locator('.cursor-model-menu .menu-item', { hasText: 'Cursor Test A' }).click();
     await send('tool');
     await page.locator('.session-main .markdown', { hasText: 'Cursor (cursor-test-a): 回复 tool' }).waitFor(); await idle();
-    await page.getByRole('button', { name: 'Files', exact: true }).click();
-    await page.locator('.fp-tree-row.file', { hasText: /^cursor-output.md$/ }).click();
+    await page.locator('.tool-group.work .tool-group-head').last().click();
+    await page.locator('[data-tool-id="cursor-write"] .tool-call-head').click();
+    await page.locator('[data-tool-id="cursor-write"] .step-open', { hasText: 'cursor-output.md' }).click();
     await page.locator('.fp-markdown h1', { hasText: 'Cursor output' }).waitFor();
     await page.getByRole('button', { name: 'Close files', exact: true }).click();
     await send('permission');
@@ -91,7 +93,7 @@ try {
 } catch (error) {
   await shot(page, '/tmp/pidesk-e2e/shots', 'zz-cursor-failure').catch(() => {});
   console.error(error);
-  console.error(await page.locator('.toasts, .conn-banner').allInnerTexts().catch(() => []));
+  console.error(await page.locator('.toasts, .conn-banner, .cursor-model-menu .error').allInnerTexts().catch(() => []));
   process.exitCode = 1;
 } finally {
   for (const id of ids) await page.evaluate(id => window.pidesk.invoke('deleteSession', id), id).catch(() => {});

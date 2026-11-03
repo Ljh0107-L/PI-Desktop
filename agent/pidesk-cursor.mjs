@@ -1,7 +1,7 @@
 // Cursor CLI runs as a distinct agent behind Pi Desktop's existing durable relay.
 // Only the desktop event envelope is adapted. Cursor owns context, tools and auth.
-import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { CursorAcp, cursorCurrentModel, cursorModelConfig, cursorModels } from './cursor-acp.mjs';
@@ -219,10 +219,14 @@ async function main() {
   const cwd = value('--cwd') || process.cwd();
   const client = new CursorAcp({ command: value('--command'), cwd });
   if (args.includes('--catalog')) {
+    // Discovery is also cancellable when its parent process enforces a deadline.
+    // Cursor has its own process group, so killing only this adapter would leak it.
+    const stop = () => { void client.close().finally(() => process.exit(0)); };
+    process.once('SIGTERM', stop); process.once('SIGINT', stop);
     // Opening an empty ACP session advertises account models; it sends no model prompt.
     client.on('request', message => client.reject(message.id, 'Model discovery is non-interactive. Run agent login first.'));
     try { await client.start(); const session = await client.openSession(); process.stdout.write(JSON.stringify({ models: cursorModels(session), currentModelId: cursorCurrentModel(session) }) + '\n'); }
-    finally { await client.close(); }
+    finally { await client.close(); process.off('SIGTERM', stop); process.off('SIGINT', stop); }
     return;
   }
   const send = message => process.stdout.write(JSON.stringify(message) + '\n');
@@ -250,4 +254,4 @@ async function main() {
   process.stdin.on('end', shutdown);
   client.on('closed', () => { if (!desktop.streaming) process.exit(1); else desktop.turn?.finally(() => process.exit(1)); });
 }
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => { console.error(error.message); process.exitCode = 1; });
+if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) main().catch(error => { console.error(error.message); process.exitCode = 1; });
