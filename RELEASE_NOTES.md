@@ -2,7 +2,17 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## 0.1.32 — Correct Cursor API-key routing and legacy Pi controls
+## 0.1.33 — A compact Cursor setup and your own model shortlist
+
+- **Less setup text.** Cursor settings are now one card: On/Off, API key, selected models, machine, and one collapsed Advanced row. The long explanatory paragraphs are gone; required information appears only when it matters.
+- **Choose a shortlist, not the whole catalogue.** The first model load opens a searchable checklist. Tick the few models you actually use; the conversation model menu shows only those. Unselected models no longer flood the picker.
+- **Fast reopening.** The advertised model list is cached and reused across menus, app restarts and local/SSH sessions. Menus open from the cached shortlist without launching Cursor. A refresh replaces the cache only after a successful load; check connection still performs a fresh query.
+- **Safer loading state.** Cached models remain usable while a background refresh runs, with Done no longer blocked. Saving a new key clears stale account models while retaining your chosen model shortlist. Changing the shortlist does not invalidate the cache.
+- **Regression coverage.** Electron tests verify the compact layout stays readable, only selected models reach the conversation menu, the chosen subset survives key rotation, and loading/removal flows remain correct. Local/SSH sessions, tools, permissions, cancellation, restart and the real official CLI/API-key routing tests all pass in GitHub CI.
+
+No tests, builds or Cursor launches were run on the user's workstation. Existing Pi conversations and saved keys remain unchanged.
+
+## Included from 0.1.32 — Correct Cursor API-key routing and legacy Pi controls
 
 - **Do not invoke browser login for API keys.** The official Cursor CLI recognizes supplied API keys/auth tokens and existing CLI credentials during startup. Pi no longer unconditionally calls ACP `authenticate(cursor_login)`: that method checks browser-login credentials and could enter an interactive login flow even when an API key was already supplied, producing a generic `Invalid params` error.
 - **Legacy Pi sessions stay Pi.** Conversations without an engine field now explicitly display as Pi. Their model menu, reasoning controls and slash commands never inherit a Cursor selection from the unrelated new-conversation draft. Selecting Cursor for a new chat does not convert an existing Pi conversation.
