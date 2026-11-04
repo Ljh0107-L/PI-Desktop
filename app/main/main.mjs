@@ -14,6 +14,7 @@ import { Updater } from './updater.mjs';
 import { Store } from './store.mjs';
 import { UsageLedger } from './usage.mjs';
 import { stageExtensions } from './extensions.mjs';
+import { listCustomModels, resolveProviderBaseUrl } from './custom-providers.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const piPackage = join(root, 'node_modules/@earendil-works/pi-coding-agent');
@@ -37,30 +38,6 @@ let store, manager, window, usage;
 // Hosts set up before Connections existed count as added.
 const migrateConnections = () => { for (const v of Object.values(store?.settings.environments ?? {})) if (v.root && v.added === undefined) v.added = true; };
 const environments = () => (migrateConnections(), listEnvironments({ sshConfig: process.env.PIDESK_SSH_CONFIG, customHosts: store?.settings.customHosts ?? [], state: store?.settings.environments ?? {} }));
-
-async function fetchRemoteModels({ api: format, baseUrl }, apiKey) {
-  const base = String(baseUrl ?? '').replace(/\/+$/, '');
-  if (!/^https?:\/\//.test(base)) throw new Error('Enter the base URL first.');
-  const anthropic = format === 'anthropic-messages';
-  const urls = anthropic ? [`${base}/v1/models`, `${base}/models`] : [`${base}/models`];
-  const headers = anthropic ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', authorization: `Bearer ${apiKey}` } : { authorization: `Bearer ${apiKey}` };
-  let lastError;
-  for (const url of urls) {
-    try {
-      const res = await fetch(url, { headers, signal: AbortSignal.timeout(15000) });
-      if (!res.ok) { lastError = new Error(`${res.status} ${res.statusText} from ${url}`); continue; }
-      const body = await res.json();
-      const list = Array.isArray(body) ? body : body.data ?? body.models ?? [];
-      return list.map(m => typeof m === 'string' ? { id: m } : {
-        id: m.id ?? m.name?.replace(/^models\//, ''),
-        name: m.display_name ?? m.displayName ?? undefined,
-        contextWindow: m.context_length ?? m.context_window ?? m.inputTokenLimit ?? undefined,
-        maxTokens: m.max_output_tokens ?? m.outputTokenLimit ?? m.top_provider?.max_completion_tokens ?? undefined,
-      }).filter(m => m.id).sort((a, b) => a.id.localeCompare(b.id));
-    } catch (error) { lastError = error; }
-  }
-  throw new Error(`Couldn't list models: ${lastError?.message ?? 'no response'}`);
-}
 
 // Resolve and inspect paths on the session's own machine, including remote ~/ paths.
 async function sessionFilePreview(id, operation, rel = '') {
@@ -165,12 +142,14 @@ const api = {
     const apiKey = key || store.getKey(draft.id);
     if (!apiKey) throw new Error('Enter the API key first.');
     if (draft.kind === 'builtin') return manager.builtinModels(draft.id, apiKey);
-    return fetchRemoteModels(draft, apiKey);
+    return listCustomModels(draft, apiKey);
   },
-  saveProvider(provider, key) {
+  async saveProvider(provider, key) {
+    // With or without /v1: an OpenAI-compatible URL is kept as entered unless only the other form serves the API.
+    const baseUrl = provider.kind === 'custom' ? await resolveProviderBaseUrl(provider, key || store.getKey(provider.id)) : provider.baseUrl;
     const providers = store.settings.providers;
     const index = providers.findIndex(p => p.id === provider.id);
-    const clean = { id: provider.id, name: provider.name, kind: provider.kind, api: provider.api, baseUrl: provider.baseUrl, models: provider.models, headers: provider.headers, enabledModels: provider.enabledModels?.length ? provider.enabledModels : undefined };
+    const clean = { id: provider.id, name: provider.name, kind: provider.kind, api: provider.api, baseUrl, models: provider.models, headers: provider.headers, enabledModels: provider.enabledModels?.length ? provider.enabledModels : undefined };
     if (index >= 0) providers[index] = clean; else providers.push(clean);
     if (key) store.setKey(provider.id, key);
     store.saveSettings();

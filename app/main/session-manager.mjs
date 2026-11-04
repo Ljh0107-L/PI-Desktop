@@ -10,6 +10,7 @@ import { PiSession } from '../../core/pi-session.mjs';
 import { closeSshMux, egressEnv, localRelayTransport, localTransport, relaySpawnSpec, shellQuote, sshRelayTransport } from '../../core/transports.mjs';
 import { startEgressProxy, hostPortOf } from '../../core/egress-proxy.mjs';
 import { listRelaySessions, prepareRemote, runSsh, stopRelaySession } from './remote-setup.mjs';
+import { providerBaseUrl } from './custom-providers.mjs';
 
 const titleFrom = text => { const line = text.trim().replace(/^\/goal\s+/, '').split('\n')[0].replace(/\s+/g, ' '); return line.length > 60 ? line.slice(0, 57) + '…' : line || 'New session'; };
 
@@ -138,7 +139,8 @@ export class SessionManager extends EventEmitter {
       const apiKey = this.store.getKey(provider.id);
       if (!apiKey && provider.kind === 'builtin') return [];
       const entry = { id: provider.id, apiKey: apiKey ?? undefined };
-      if (provider.kind === 'custom') Object.assign(entry, { name: provider.name, api: provider.api, baseUrl: provider.baseUrl, models: provider.models, headers: provider.headers });
+      // The base its SDK needs (e.g. an Anthropic base saved with /v1), for providers saved before too.
+      if (provider.kind === 'custom') Object.assign(entry, { name: provider.name, api: provider.api, baseUrl: providerBaseUrl(provider.api, provider.baseUrl), models: provider.models, headers: provider.headers });
       // A built-in provider with a chosen model list replaces its catalog with exactly those models.
       else if (provider.models?.length) entry.models = provider.models;
       return [entry];

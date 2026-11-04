@@ -25,6 +25,8 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
     let body = '';
     for await (const chunk of req) body += chunk;
     const payload = JSON.parse(body);
+    // Like a real server, an empty request (Pi Desktop checking the route) is a 400, not a reply.
+    if (!Array.isArray(payload.messages)) { res.writeHead(400, { 'Content-Type': 'application/json' }).end('{"error":{"message":"messages is required"}}'); return; }
     const provider = match[1];
     const auth = req.headers.authorization ?? '';
     const system = (payload.messages ?? []).filter(m => m.role === 'system' || m.role === 'developer')
