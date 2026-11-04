@@ -2,6 +2,10 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.1.40 — New conversations on this Mac start with No folder
+
+- **No folder by default on this Mac.** A new conversation here no longer starts in the most recent folder; pick a folder from the folder menu, where recent folders are still listed. A new conversation on an SSH host still starts in that host's most recent folder.
+
 ## 0.1.39 — Base URLs with or without /v1
 
 - **Custom endpoints accept the base URL with or without `/v1`.** An Anthropic-compatible URL ending in `/v1` sent requests to `/v1/v1/messages`, because the SDK adds `/v1/messages` itself; the `/v1` is now dropped, also for providers saved before. For OpenAI-compatible endpoints the version belongs in the URL, but servers differ (OpenAI serves only `/v1/…`, Perplexity only the root), so saving checks which form the server answers on and adds or removes `/v1` only when just the other form works. A pasted endpoint URL (`…/v1/messages`, `…/chat/completions`, `…/responses`) works too, and *Choose models* tries both forms.
