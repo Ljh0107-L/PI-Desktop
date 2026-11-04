@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { EffortTrigger, MenuItem, MenuSection, Modal, Spinner, Trigger, baseName, envIcon, shortPath } from './ui.jsx';
-import { api, captureComposerDraft, clearQueued, getState, notify, openSettings, recoverComposerDraft, restoreComposerDraft, setComposerDraft, setDraft, setEnvironments, takeComposerDraft, useStore } from './store.js';
+import { api, captureComposerDraft, clearQueued, defaultFolder, getState, notify, openSettings, recoverComposerDraft, restoreComposerDraft, setComposerDraft, setDraft, setEnvironments, takeComposerDraft, useStore } from './store.js';
 import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerDraft as takeDraft, restoreComposerDraft as restoreDraft, recoverComposerDraft as recoverDraft } from './composer-draft.js';
 import { cachedDir, listDir, prefetchDir } from './dirs.js';
 
@@ -409,8 +409,7 @@ export function ComposerBar({ session }) {
   const prep = envStatus[environmentId];
 
   const changeEnv = id => {
-    const recents = getState().settings?.recentFolders?.[id] ?? [];
-    setDraft({ environmentId: id, cwd: recents[0] ?? null });
+    setDraft({ environmentId: id, cwd: defaultFolder(getState().settings, id) });
     if (id !== 'local') api('prepareEnvironment', id);
   };
   const changeModel = m => isNew ? setDraft({ model: m }) : api('setModel', session.id, m.provider, m.id).catch(e => notify(e.message, 'error'));

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from './Icons.jsx';
 import { baseName } from './ui.jsx';
-import { newSession, openPalette, openSession, openSettings, pickRecent, useStore } from './store.js';
+import { defaultFolder, newSession, openPalette, openSession, openSettings, pickRecent, useStore } from './store.js';
 
 const TABS = ['All', 'Sessions', 'Projects', 'Environments'];
 
@@ -35,7 +35,7 @@ export function Palette() {
     }
     if (kind === 'Environments' || (kind === 'All' && q)) {
       const items = environments.filter(e => match(`${e.label} ${e.detail ?? ''}`)).slice(0, kind === 'All' ? 4 : 100)
-        .map(e => ({ key: e.id, icon: e.kind === 'ssh' ? 'terminal' : 'laptop', label: e.label, detail: e.kind === 'ssh' ? e.detail : 'Local', hint: 'New session', run: () => { newSession(); pickRecent(e.id, recentFolders[e.id]?.[0] ?? null); } }));
+        .map(e => ({ key: e.id, icon: e.kind === 'ssh' ? 'terminal' : 'laptop', label: e.label, detail: e.kind === 'ssh' ? e.detail : 'Local', hint: 'New session', run: () => { newSession(); pickRecent(e.id, defaultFolder({ recentFolders }, e.id)); } }));
       if (items.length) out.push({ title: 'Environments', items });
     }
     if (kind === 'All') {

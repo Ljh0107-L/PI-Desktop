@@ -650,6 +650,15 @@ const localRelay = JSON.parse(execFileSync(process.execPath, [join(root, 'agent/
 check('quitting stops this Mac\'s relay and its Pis: nothing keeps running in the background', localRelay.daemon === false, JSON.stringify(localRelay).slice(0, 160));
 ({ app, page } = await launch({ userData: profile, env }));
 try {
+  await page.locator('.folder-trigger').waitFor();
+  const draftNow = () => page.evaluate(() => { const s = window.__pideskState(); return { draft: s.draft, recent: s.settings.recentFolders?.[s.draft.environmentId] ?? [] }; });
+  const onHost = await draftNow();
+  check('a new conversation on an SSH host starts in its most recent folder', onHost.draft.environmentId.startsWith('ssh:') && onHost.draft.cwd === onHost.recent[0], JSON.stringify(onHost));
+  await page.click('.env-trigger');
+  await page.click('.menu-item:has-text("This computer")');
+  const onMac = await draftNow();
+  check('a new conversation on this Mac starts with No folder, not its most recent folder',
+    onMac.draft.environmentId === 'local' && onMac.draft.cwd === null && onMac.recent.length > 0 && (await page.locator('.folder-trigger').innerText()).includes('No folder'), JSON.stringify(onMac));
   const openAt = Date.now();
   await page.locator('.session-row', { hasText: 'hello from the server' }).click();
   await waitText('.markdown', 'Tool result: after-quit', 90000);

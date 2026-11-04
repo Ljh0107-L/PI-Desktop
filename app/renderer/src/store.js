@@ -16,6 +16,9 @@ function saveTiming(id, message) {
   try { localStorage.setItem(TIMING_KEY, JSON.stringify(timingStore)); } catch { /* full: speed just won't persist */ }
 }
 
+// A new conversation on this Mac starts with No folder; on an SSH host, in its most recent folder.
+export const defaultFolder = (settings, environmentId) => environmentId === 'local' ? null : settings?.recentFolders?.[environmentId]?.[0] ?? null;
+
 const listeners = new Set();
 const deleting = new Set(); // Suppress stale session-list events while deletion is being acknowledged.
 let state = {
@@ -151,12 +154,12 @@ export async function bootstrap() {
   set({
     ready: true, settings: boot.settings, environments: boot.environments, sessions: boot.sessions, home: boot.home, piVersion: boot.piVersion,
     questions: Object.fromEntries(boot.sessions.map(s => [s.id, s.pendingQuestions ?? []])),
-    draft: { environmentId: d.environmentId ?? 'local', cwd: boot.settings.recentFolders?.[d.environmentId ?? 'local']?.[0] ?? null, model: d.model, thinkingLevel: d.thinkingLevel },
+    draft: { environmentId: d.environmentId ?? 'local', cwd: defaultFolder(boot.settings, d.environmentId ?? 'local'), model: d.model, thinkingLevel: d.thinkingLevel },
   });
   loadCatalog();
   api('resumeRemote').catch(() => {}); // re-attach SSH sessions still running on their hosts
   // A remembered environment that no longer exists (removed host, other SSH config) falls back to this computer.
-  if (!state.environments.some(e => e.id === state.draft.environmentId)) set(s => ({ draft: { ...s.draft, environmentId: 'local', cwd: s.settings.recentFolders?.local?.[0] ?? null } }));
+  if (!state.environments.some(e => e.id === state.draft.environmentId)) set(s => ({ draft: { ...s.draft, environmentId: 'local', cwd: defaultFolder(s.settings, 'local') } }));
   else if (state.draft.environmentId !== 'local') api('prepareEnvironment', state.draft.environmentId);
 }
 
