@@ -4,21 +4,21 @@ import hljs from 'highlight.js/lib/common';
 import { Icon } from './Icons.jsx';
 import { MenuItem, Markdown, Popover, Spinner, useResizable } from './ui.jsx';
 import { changeStats, hunkLines } from './diffs.js';
-import { api, closeFile, notify, openFile, set as setStore, setFilePaneOpen, useStore } from './store.js';
+import { api, closeFile, downloadFile, notify, openFile, set as setStore, setFilePaneOpen, useStore } from './store.js';
 
 const LANGS = { js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript', py: 'python', sh: 'bash', zsh: 'bash', bash: 'bash',
   yml: 'yaml', yaml: 'yaml', toml: 'ini', ini: 'ini', cfg: 'ini', json: 'json', rs: 'rust', go: 'go', c: 'c', h: 'c', cc: 'cpp', cpp: 'cpp', hpp: 'cpp', cu: 'cpp',
   java: 'java', kt: 'kotlin', swift: 'swift', rb: 'ruby', php: 'php', css: 'css', scss: 'scss', less: 'less', html: 'xml', xml: 'xml', svg: 'xml', sql: 'sql',
   lua: 'lua', r: 'r', pl: 'perl', diff: 'diff', patch: 'diff', makefile: 'makefile', mk: 'makefile', md: 'markdown', graphql: 'graphql' };
 const extOf = path => { const name = path.split('/').pop().toLowerCase(); return name === 'makefile' ? 'makefile' : name.includes('.') ? name.split('.').pop() : ''; };
-const iconFor = name => {
+export const iconFor = name => {
   const ext = extOf(name);
   if (['md', 'txt', 'rst'].includes(ext)) return 'fileText';
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'].includes(ext)) return 'fileImage';
   if (LANGS[ext]) return 'fileCode';
   return 'fileAny';
 };
-const sizeLabel = n => n < 1024 ? `${n} B` : n < 1 << 20 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
+export const sizeLabel = n => n < 1024 ? `${n} B` : n < 1 << 20 ? `${(n / 1024).toFixed(1)} KB` : `${(n / 1048576).toFixed(1)} MB`;
 const joinRel = (dir, name) => dir ? `${dir}/${name}` : name;
 
 // Folder listings per session, so expanding the tree twice doesn't refetch.
@@ -35,12 +35,23 @@ function useListing(sessionId, rel, open, version) {
   return state;
 }
 
+// Saves the file to this Mac; the button spins while the file is transferred.
+export function DownloadButton({ sessionId, path, className = 'tool-button', label }) {
+  const [busy, setBusy] = useState(false);
+  return <button className={className} disabled={busy} title="Download to this Mac" aria-label={`Download ${path.split('/').pop()}`}
+    onClick={async e => { e.stopPropagation(); setBusy(true); try { await downloadFile(sessionId, path); } finally { setBusy(false); } }}>
+    {busy ? <Spinner size={13} /> : <Icon name="download" size={15} />}{label}
+  </button>;
+}
+
 function TreeDir({ sessionId, rel, depth, active, version }) {
   const listing = useListing(sessionId, rel, true, version);
   const [expanded, setExpanded] = useState({});
+  const [menu, setMenu] = useState(null); // { path, anchor } of a right-clicked file
   if (!listing) return <div className="fp-tree-row muted" style={{ paddingLeft: 12 + depth * 14 }}><Spinner size={11} /></div>;
   if (listing.error) return <div className="fp-tree-row error" style={{ paddingLeft: 12 + depth * 14 }}>{listing.error}</div>;
-  return listing.entries.map(entry => {
+  const close = () => setMenu(null);
+  return <>{listing.entries.map(entry => {
     const path = joinRel(rel, entry.name);
     if (entry.dir) {
       const open = expanded[entry.name] ?? !!active?.startsWith(path + '/'); // reveal the open file
@@ -54,11 +65,17 @@ function TreeDir({ sessionId, rel, depth, active, version }) {
       );
     }
     return (
-      <button key={path} className={`fp-tree-row file ${active === path ? 'active' : ''}`} style={{ paddingLeft: 8 + depth * 14 + 18 }} onClick={() => openFile(sessionId, path)} title={path}>
+      <button key={path} className={`fp-tree-row file ${active === path ? 'active' : ''}`} style={{ paddingLeft: 8 + depth * 14 + 18 }} onClick={() => openFile(sessionId, path)} title={path}
+        onContextMenu={e => { e.preventDefault(); setMenu({ path, anchor: { current: e.currentTarget } }); }}>
         <Icon name={iconFor(entry.name)} size={15} className="fp-file-icon" /><span className="fp-name">{entry.name}</span>
       </button>
     );
-  });
+  })}
+  {menu && <Popover anchor={menu.anchor} open onClose={close} width={200} placement="bottom-start">
+    <MenuItem icon="fileText" label="Open" onClick={() => { close(); openFile(sessionId, menu.path); }} />
+    <MenuItem icon="download" label="Download" onClick={() => { close(); downloadFile(sessionId, menu.path); }} />
+    <MenuItem icon="copy" label="Copy path" onClick={() => { close(); navigator.clipboard.writeText(menu.path); notify('Path copied'); }} />
+  </Popover>}</>;
 }
 
 function CodeView({ text, ext }) {
@@ -96,6 +113,7 @@ function Preview({ sessionId, path, refreshKey }) {
       <div className="fp-crumbs">
         <span className="fp-crumb-path">{crumbs.map((c, i) => <span key={i} className={i === crumbs.length - 1 ? 'last' : ''}>{c}</span>)}</span>
         {file?.kind === 'text' && ext === 'md' && <button className={`tool-button ${source ? 'on' : ''}`} onClick={() => setSource(s => !s)} title={source ? 'Show preview' : 'Show source'} aria-label="Toggle source"><Icon name="code" size={16} /></button>}
+        {file && <DownloadButton sessionId={sessionId} path={file.path ?? path} />}
       </div>
       <div className="fp-content" ref={scroller}>
         {error && <div className="fp-empty error"><Icon name="alert" size={15} /> {error}</div>}
@@ -179,6 +197,7 @@ export function FilePane({ session }) {
           <button ref={menuRef} className="tool-button" onClick={() => setMenu(m => !m)} title="More" aria-label="More file actions"><Icon name="more" size={16} /></button>
           <Popover anchor={menuRef} open={menu} onClose={() => setMenu(false)} width={220} placement="bottom-end">
             <MenuItem icon="refresh" label="Refresh" onClick={() => { setMenu(false); setVersion(v => v + 1); }} />
+            {state.active && <MenuItem icon="download" label="Download" onClick={() => { setMenu(false); downloadFile(session.id, state.active); }} />}
             <MenuItem icon="copy" label={state.active ? 'Copy file path' : 'Copy folder path'} onClick={() => { setMenu(false); navigator.clipboard.writeText(target); notify('Path copied'); }} />
             {local && <MenuItem icon="externalLink" label="Reveal in Finder" onClick={() => { setMenu(false); api('openPath', target); }} />}
             {state.tabs.length > 0 && <MenuItem icon="x" label="Close all tabs" onClick={() => { setMenu(false); state.tabs.forEach(t => closeFile(session.id, t)); }} />}

@@ -72,13 +72,28 @@ export const api = (method, ...args) => window.pidesk.invoke(method, ...args);
 const transcriptOf = id => state.transcripts[id] ?? emptyTranscript();
 const setTranscript = (id, t) => set(s => ({ transcripts: { ...s.transcripts, [id]: t } }));
 
-export function notify(message, level = 'info') {
+// action: an optional { label, run } button on the toast, which then stays a little longer.
+export function notify(message, level = 'info', action = null) {
   // The same message twice in a row just refreshes the existing toast.
   (window.__pideskNoticeLog ??= []).push(`${level}: ${message}`);
   if (state.notices.some(n => n.message === message)) return;
-  const notice = { id: Math.random().toString(36).slice(2), message, level };
+  const notice = { id: Math.random().toString(36).slice(2), message, level, action };
   set(s => ({ notices: [...s.notices, notice].slice(-3) }));
-  setTimeout(() => set(s => ({ notices: s.notices.filter(n => n.id !== notice.id) })), 6000);
+  setTimeout(() => dismissNotice(notice.id), action ? 10000 : 6000);
+}
+export const dismissNotice = id => set(s => ({ notices: s.notices.filter(n => n.id !== id) }));
+
+// Save a file from the session's machine to this Mac (the main process asks where).
+export async function downloadFile(sessionId, path) {
+  const name = path.split('/').filter(Boolean).pop() ?? path;
+  try {
+    const saved = await api('downloadFile', sessionId, path);
+    if (saved) notify(`Downloaded ${saved.path.split('/').pop()}`, 'info', { label: 'Show in Finder', run: () => api('showInFolder', saved.path) });
+    return saved;
+  } catch (error) {
+    notify(`Couldn't download ${name}: ${error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')}`, 'error');
+    return null;
+  }
 }
 
 window.pidesk.subscribe(({ channel, payload }) => {

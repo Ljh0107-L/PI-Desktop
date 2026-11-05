@@ -20,6 +20,7 @@
 //    Pi as such (PIDESK_PROJECTLESS), a prompt section tells the model how to use it, as Codex does.
 import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
+import { stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { Type } from 'typebox';
@@ -496,6 +497,38 @@ export default function pideskBridge(pi) {
       const answer = options.length ? await ctx.ui.select(params.question, options) : await ctx.ui.input(params.question, '');
       if (answer === undefined || answer === null || answer === '') return text('The user dismissed the question without answering.');
       return text(`The user answered: ${answer}`);
+    },
+  });
+
+  // ---------------------------------------------------------------- files for the user
+  // Finished files the model hands over: shown in the conversation as cards with Open and Download,
+  // which saves them to the user's Mac, also from an SSH host.
+  pi.registerTool({
+    name: 'present_files',
+    label: 'Present files',
+    description: 'Show files to the user as cards they can open or download to their own computer. Use it for a finished file the user asked for or will want to keep (a report, an export, a generated image, an archive, a build artifact) once it is written. Not for files you only read, scratch files, or source files you merely edited.',
+    promptSnippet: 'present_files: give the user finished files to open or download',
+    promptGuidelines: ['When you create a file the user asked for or will want to keep, call present_files with its path once it is complete, instead of only naming the path: the files may be on another machine than the user, and this is how they get them.'],
+    parameters: Type.Object({
+      paths: Type.Array(Type.String({ description: 'Path of a file, relative to the working directory or absolute' }), { minItems: 1, maxItems: 20 }),
+      caption: Type.Optional(Type.String({ maxLength: 300, description: 'One short sentence shown above the files' })),
+    }),
+    async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      const files = [], problems = [];
+      for (const given of params.paths ?? []) {
+        const path = given === '~' || given.startsWith('~/') ? join(homedir(), given.slice(2)) : resolve(ctx?.cwd ?? process.cwd(), given);
+        try {
+          const info = await stat(path);
+          if (!info.isFile()) problems.push(`${given}: not a file`);
+          else if (!files.some(file => file.path === path)) files.push({ path, name: basename(path), size: info.size });
+        } catch (error) { problems.push(`${given}: ${error.code === 'ENOENT' ? 'not found' : error.message}`); }
+      }
+      if (!files.length) throw new Error(`Nothing to present. ${problems.join('; ')}`);
+      const listed = files.map(file => `${file.name} (${file.path})`).join(', ');
+      return {
+        content: [{ type: 'text', text: `The user now sees ${files.length === 1 ? 'this file' : `these ${files.length} files`} with Open and Download buttons: ${listed}.${problems.length ? ` Not presented: ${problems.join('; ')}.` : ''}` }],
+        details: { kind: 'pidesk-files', caption: params.caption?.trim() || undefined, files },
+      };
     },
   });
 }

@@ -36,7 +36,11 @@ const mock = await startMockLlm({ chunkDelay: 25 });
 const attachFile = join(work, 'attach-notes.txt');
 writeFileSync(attachFile, 'notes for Pi\n');
 const defaultWorkspace = join(work, 'Pi');
-const env = { PIDESK_SSH_CONFIG: opts['ssh-config'], PIDESK_TEST_PICK_FOLDER: localProject, PIDESK_TEST_PICK_FILES: attachFile, PIDESK_DEFAULT_WORKSPACE: defaultWorkspace };
+// Downloads land here instead of behind a save dialog.
+const downloads = join(work, 'downloads');
+rmSync(downloads, { recursive: true, force: true }); mkdirSync(downloads, { recursive: true });
+const BINARY = Buffer.from([...Array(256).keys(), 0, 10, 13, 255]);
+const env = { PIDESK_SSH_CONFIG: opts['ssh-config'], PIDESK_TEST_PICK_FOLDER: localProject, PIDESK_TEST_PICK_FILES: attachFile, PIDESK_DEFAULT_WORKSPACE: defaultWorkspace, PIDESK_TEST_SAVE_DIR: downloads };
 // 1×1 PNG
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 const profile = join(work, 'profile');
@@ -637,6 +641,25 @@ try {
   await page.locator('.fp-tree-row', { hasText: 'survived.txt' }).click();
   await page.locator('.fp-source', { hasText: 'survived' }).waitFor({ timeout: 30000 });
   check('file preview reads files on the SSH host', true);
+
+  // ---- downloads to this Mac: a file from the host's file pane, and files the agent hands over
+  await page.locator('.fp-crumbs .tool-button[aria-label="Download survived.txt"]').click();
+  const downloaded = page.locator('.toast', { hasText: 'Downloaded survived.txt' });
+  await downloaded.waitFor({ timeout: 30000 });
+  check('the file pane downloads a file from the SSH host to this Mac', readFileSync(join(downloads, 'survived.txt'), 'utf8') === 'survived\n');
+  check('a finished download offers Show in Finder', await downloaded.locator('.toast-action', { hasText: 'Show in Finder' }).count() === 1);
+  await page.click('.fp-actions .tool-button[aria-label="Close files"]');
+  writeFileSync(join(remoteProject, 'export.bin'), BINARY);
+  await send('[[present:export.bin]]');
+  const card = mainTranscript().locator('.file-card', { hasText: 'export.bin' });
+  await card.locator('.file-card-download').waitFor({ timeout: 30000 });
+  check('present_files shows the file as a card with its size', (await card.innerText()).includes(`${BINARY.length} B`) && await mainTranscript().locator('.file-cards-caption', { hasText: 'Files for you' }).count() === 1);
+  await card.locator('.file-card-download').click();
+  await page.locator('.toast', { hasText: 'Downloaded export.bin' }).waitFor({ timeout: 30000 });
+  check('a presented binary file downloads byte for byte from the SSH host', existsSync(join(downloads, 'export.bin')) && Buffer.compare(readFileSync(join(downloads, 'export.bin')), BINARY) === 0);
+  await card.locator('.file-card-main').click();
+  await page.locator('.fp-preview .fp-empty', { hasText: 'Binary file' }).waitFor({ timeout: 30000 });
+  check('a file card opens the file in the file pane', true);
   await page.click('.fp-actions .tool-button[aria-label="Close files"]');
 
   // ---- fork and delete from the session's right-click menu
@@ -708,6 +731,7 @@ try {
   check('after a restart, a conversation shows its history without waiting for Pi to start', remoteOpenMs < (process.env.CI ? 3000 : 1500), `${remoteOpenMs} ms (SSH)`);
   await page.locator('.session-row').first().waitFor();
   check('sessions restored after restart', await page.locator('.session-row').count() === 2);
+  check('a presented file is still a card after an app restart', await mainTranscript().locator('.file-card', { hasText: 'export.bin' }).count() === 1);
   await page.waitForFunction(() => { const s = window.__pideskState(), session = s.sessions.find(row => row.id === s.activeId); return session?.status === 'connected' && !session.streaming; }, undefined, { timeout: 90000 });
   check('single-task clearing survives an app restart in the sidebar and delegation card',
     await mainTranscript().locator('.subagent-task-row', { hasText: 'Inspect cwd' }).count() === 0 &&

@@ -22,7 +22,7 @@ const CODING_TOOLS = ['read', 'write', 'edit', 'bash', 'grep', 'find', 'ls'];
 const EXPLORE_TOOLS = ['read', 'grep', 'find', 'ls', 'bash'];
 // The parent's own tools: a fork keeps their declarations (so its requests share the parent's prompt
 // cache) but cannot use them.
-const PARENT_ONLY = new Set(['subagent', 'subagent_message', 'subagent_stop', 'ask_user', 'get_goal', 'update_goal']);
+const PARENT_ONLY = new Set(['subagent', 'subagent_message', 'subagent_stop', 'ask_user', 'get_goal', 'update_goal', 'present_files']);
 const BUILT_IN_TYPES = new Set(['general', 'explore', 'fork']);
 const ACTIVE = new Set(['queued', 'running', 'retrying']);
 export const isActiveAgent = agent => ACTIVE.has(agent?.status);
@@ -160,7 +160,7 @@ const TYPE_PROMPTS = {
 - Answer the question you were asked with evidence: file paths with line numbers and the key lines. Say what you didn't find or couldn't confirm.`,
 };
 const forkDirective = (name, task) => `You are a fork of the agent in this conversation, started for one task. You have the whole conversation above, but the main agent carries on without you: do only this task, then end with a report for the main agent. It sees only your final message, not your tool calls.
-Starting agents, asking the user and managing the goal aren't available to you: put questions and blockers in your report.
+Starting agents, asking the user, managing the goal and presenting files aren't available to you: put questions, blockers and the paths of files for the user in your report.
 
 Your task (${name}):
 ${task}`;
@@ -421,7 +421,7 @@ export function createSubagentTool({
         const state = entry.current;
         state?.signal.throwIfAborted();
         if (PARENT_ONLY.has(tool.name)) {
-          return { content: [{ type: 'text', text: `${tool.name} isn't available to agents: put questions and blockers in your report instead.` }], details: {}, isError: true };
+          return { content: [{ type: 'text', text: `${tool.name} isn't available to agents: put questions, blockers and the paths of files for the user in your report instead.` }], details: {}, isError: true };
         }
         // Apply the default after Pi's normal validation (which treats a null optional,
         // non-nullable field as omitted). Explicit numeric values survive.

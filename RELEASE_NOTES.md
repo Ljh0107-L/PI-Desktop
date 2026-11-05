@@ -2,6 +2,11 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.1.44 — Downloads
+
+- **Download files from the file pane.** A file open in the file pane has a Download button, and the tree's right-click menu has Download too. It saves the file to this Mac through a save dialog that starts in Downloads, also from an SSH host, where the file is streamed byte for byte (any size, any content). An interrupted transfer never leaves a partial file under the chosen name. When it finishes, a notice offers Show in Finder.
+- **Files the model hands you.** A new `present_files` tool lets the model give you finished files (a report, an export, a generated image, an archive) as cards in the conversation, like Claude: click a card to open the file, or Download to save it. The model is told to use it for deliverables, not for scratch files or files it only read. Cards stay after a restart; agents report file paths and the main agent presents them.
+
 ## 0.1.43 — Agents that work in the background
 
 - **Agents run in the background.** Starting an agent no longer stops the conversation until it finishes: the call returns at once, the model carries on (or ends its turn), and each agent's report arrives later as a message that starts its next turn. Reports that come in while the model is busy wait for its turn to end; after you press Stop they are kept but start nothing. Asking to wait is still possible, and an agent that runs past the wait carries on in the background instead of being killed. There is no batch time limit any more; only an agent whose model stops responding for 10 minutes is stopped.

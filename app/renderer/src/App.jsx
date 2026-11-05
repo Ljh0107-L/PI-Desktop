@@ -11,7 +11,7 @@ import { TerminalPanel } from './TerminalPanel.jsx';
 import { Palette } from './Palette.jsx';
 import { MenuItem, Modal, Popover, Spinner } from './ui.jsx';
 import { emptyTranscript } from './transcript.js';
-import { api, bootstrap, closeConfirm, set as setStore, getState, newSession, notify, openFile, openPalette, openSettings, sendPrompt, setDraft, setFilePaneOpen, startSession, toggleRightPanel, toggleSidebar, useStore } from './store.js';
+import { api, bootstrap, closeConfirm, dismissNotice, set as setStore, getState, newSession, notify, openFile, openPalette, openSettings, sendPrompt, setDraft, setFilePaneOpen, startSession, toggleRightPanel, toggleSidebar, useStore } from './store.js';
 
 // The session's goal (/goal): objective, state, and pause / resume / clear.
 function GoalBanner({ session }) {
@@ -169,7 +169,8 @@ export function App() {
   if (!ready) return <div className="app loading" />;
   const pending = activeId === 'pending';
   const session = sessions.find(s => s.id === activeId) ?? (pending ? { id: 'pending', title: 'New session', status: 'connecting', phase: 'starting', environmentId: 'local', cwd: '', streaming: true } : null);
-  const toasts = <div className="toasts">{notices.map(n => <div key={n.id} className={`toast ${n.level}`}><Icon name={n.level === 'error' ? 'alert' : 'check'} size={15} /> {n.message}</div>)}</div>;
+  const toasts = <div className="toasts">{notices.map(n => <div key={n.id} className={`toast ${n.level}`}><Icon name={n.level === 'error' ? 'alert' : 'check'} size={15} /> <span className="toast-text">{n.message}</span>
+    {n.action && <button className="toast-action" onClick={() => { dismissNotice(n.id); n.action.run(); }}>{n.action.label}</button>}</div>)}</div>;
   if (settingsOpen) return <div className="app"><SettingsPage />{toasts}</div>;
   return (
     <div className="app">

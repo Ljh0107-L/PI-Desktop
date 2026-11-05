@@ -2,7 +2,8 @@ import { createContext, useCallback, useContext, useEffect, useLayoutEffect, use
 import { Icon } from './Icons.jsx';
 import { Markdown, Spinner } from './ui.jsx';
 import { changesOf, displayBlocks, formatTokens, isAbortText, toolSummary } from './transcript.js';
-import { api, editMessage, notify, openChanges } from './store.js';
+import { api, editMessage, notify, openChanges, openFile } from './store.js';
+import { DownloadButton, iconFor, sizeLabel } from './FilePane.jsx';
 import { changeStats, hunkLines } from './diffs.js';
 import { Composer } from './Composer.jsx';
 
@@ -398,6 +399,33 @@ function WorkingRow({ session, transcript }) {
 }
 
 const NO_QUESTIONS = [];
+// Files the agent handed over with present_files: open one in the file pane, or save it to this Mac.
+function FileCards({ sessionId, call, tool }) {
+  const details = tool?.result?.details;
+  const files = details?.kind === 'pidesk-files' && Array.isArray(details.files) ? details.files : null;
+  if (tool?.status === 'error') {
+    const text = (tool.result?.content ?? []).filter(c => c.type === 'text').map(c => c.text).join('\n');
+    return <div className="block-error"><Icon name="alert" size={15} /> {text || 'The files could not be shown.'}</div>;
+  }
+  // Until the result arrives: the paths the model named, without sizes.
+  const shown = files ?? (Array.isArray(call.arguments?.paths) ? call.arguments.paths : []).map(path => ({ path: String(path), name: String(path).split('/').pop(), pending: true }));
+  if (!shown.length) return null;
+  return (
+    <section className="file-cards" data-call-id={call.id}>
+      {details?.caption && <div className="file-cards-caption">{details.caption}</div>}
+      {shown.map(file => (
+        <div key={file.path} className="file-card">
+          <button className="file-card-main" disabled={file.pending || !sessionId} onClick={() => openFile(sessionId, file.path)} title={file.path}>
+            <Icon name={iconFor(file.name)} size={18} className="file-card-icon" />
+            <span className="file-card-text"><span className="file-card-name">{file.name}</span><span className="file-card-meta">{file.pending ? 'Preparing…' : sizeLabel(file.size)}</span></span>
+          </button>
+          {!file.pending && sessionId && <DownloadButton sessionId={sessionId} path={file.path} className="file-card-download" label={<span>Download</span>} />}
+        </div>
+      ))}
+    </section>
+  );
+}
+
 export function Transcript({ session, transcript, questions = NO_QUESTIONS, readOnly = false, onOpenFile, renderSubagents, renderAgentReport, copyText }) {
   const scroller = useRef(null);
   const stick = useRef(true);
@@ -468,6 +496,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             case 'work': return <WorkGroup key={block.key} items={block.items} tools={transcript.tools} live={!!transcript.live} />;
             case 'tools': return <ToolGroup key={block.key} calls={block.calls} tools={transcript.tools} live={!!transcript.live} />;
             case 'subagents': return renderSubagents?.(block);
+            case 'files': return <FileCards key={block.key} sessionId={readOnly ? null : session?.id} call={block.call} tool={transcript.tools[block.call.id]} />;
             case 'agentReport': return renderAgentReport?.(block) ?? null;
             case 'ask': return transcript.tools[block.call.id]?.status === 'done' ? <AskBlock key={block.key} call={block.call} tool={transcript.tools[block.call.id]} /> : null;
             case 'bash': return <pre key={block.key} className="tool-output">$ {block.message.command}{'\n'}{block.message.output}</pre>;

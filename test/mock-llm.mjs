@@ -133,6 +133,15 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
       finish('tool_calls');
       return;
     }
+    // [[present:a.txt,b.png]]: hand the user files with present_files.
+    const presentMatch = /\[\[present:([^\]]+)\]\]/.exec(userText);
+    if (presentMatch && last.role !== 'tool') {
+      const paths = presentMatch[1].split(',').map(s => s.trim()).filter(Boolean);
+      send({ role: 'assistant', content: '' });
+      send({ tool_calls: [{ index: 0, id: 'call_files' + requests.length, type: 'function', function: { name: 'present_files', arguments: JSON.stringify({ paths, caption: 'Files for you' }) } }] });
+      finish('tool_calls');
+      return;
+    }
     if (askMatch && last.role !== 'tool') {
       const options = askMatch[2] ? askMatch[2].split(',').map(s => s.trim()).filter(Boolean) : undefined;
       const args = JSON.stringify({ question: askMatch[1].trim(), ...(options ? { options } : {}) });

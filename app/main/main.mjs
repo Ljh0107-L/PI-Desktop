@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { listEnvironments } from './environments.mjs';
 import { listRemoteDir, runSsh } from './remote-setup.mjs';
 import { decodeRemoteFilePreview, filePreview, remoteFilePreviewScript } from './file-preview.mjs';
+import { downloadLocal, downloadRemote } from './file-download.mjs';
 import { execFile } from 'node:child_process';
 import { shellQuote } from '../../core/transports.mjs';
 import { SessionManager } from './session-manager.mjs';
@@ -49,6 +50,23 @@ async function sessionFilePreview(id, operation, rel = '') {
   const { node } = await manager.prepare(record.environmentId);
   const output = await runSsh(env, remoteFilePreviewScript(node, operation, record.cwd, rel), { timeout: operation === 'read' ? 60000 : 30000 });
   return decodeRemoteFilePreview(output);
+}
+
+// Save a file from the session's machine to this Mac, through a save dialog that starts in Downloads.
+async function downloadSessionFile(id, rel) {
+  const record = manager.record(id);
+  const env = manager.env(record.environmentId);
+  const name = String(rel).split('/').filter(Boolean).pop() || 'download';
+  let target;
+  if (process.env.PIDESK_TEST_SAVE_DIR) target = join(process.env.PIDESK_TEST_SAVE_DIR, name);
+  else {
+    const choice = await dialog.showSaveDialog(window, { defaultPath: join(app.getPath('downloads'), name) });
+    if (choice.canceled || !choice.filePath) return null;
+    target = choice.filePath;
+  }
+  if (env.kind === 'local') return downloadLocal(record.cwd, rel, target);
+  const { node } = await manager.prepare(record.environmentId);
+  return downloadRemote(env, node, record.cwd, rel, target);
 }
 
 const BUILTIN_PROVIDERS = {
@@ -229,6 +247,8 @@ const api = {
   // File preview (Claude-style): browse and read files in a session's folder, local or over SSH.
   listFiles: (id, rel = '') => sessionFilePreview(id, 'list', rel),
   readFile: (id, rel) => sessionFilePreview(id, 'read', rel),
+  downloadFile: (id, rel) => downloadSessionFile(id, rel),
+  showInFolder: path => shell.showItemInFolder(path),
 };
 
 ipcMain.handle('pidesk:invoke', async (_event, method, ...args) => {
