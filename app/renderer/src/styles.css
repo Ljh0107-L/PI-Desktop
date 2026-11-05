@@ -750,7 +750,9 @@ a[href], .markdown a { cursor: pointer; }
 .attachment-remove { position: absolute; top: -6px; right: -6px; width: 20px; height: 20px; border-radius: 50%; display: grid; place-items: center; background: #3a3a3a; border: 0.5px solid var(--border-strong); color: var(--text); opacity: 0; transition: opacity .12s; }
 .attachment:hover .attachment-remove { opacity: 1; }
 .slash-menu { position: absolute; left: 0; right: 0; bottom: calc(100% + 8px); max-height: 320px; overflow: auto; padding: 6px; border-radius: 14px; background: rgba(38, 38, 40, .96); backdrop-filter: blur(20px); border: 0.5px solid var(--border-strong); box-shadow: 0 16px 40px rgba(0, 0, 0, .45); z-index: 20; }
-.slash-item { display: flex; align-items: baseline; gap: 12px; width: 100%; height: 36px; padding: 0 12px; border-radius: 8px; text-align: left; }
+/* Baseline-aligned name and description, centred in the row by equal padding (a fixed height with
+   baseline alignment left the text at the top of the row). */
+.slash-item { display: flex; align-items: baseline; gap: 12px; width: 100%; min-height: 36px; padding: 8px 12px; line-height: 20px; border-radius: 8px; text-align: left; }
 .slash-item.on { background: rgba(255, 255, 255, .08); }
 .slash-name { font-size: 14px; color: var(--text); font-weight: 500; flex-shrink: 0; }
 .slash-desc { font-size: 13.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
