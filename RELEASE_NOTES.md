@@ -2,6 +2,10 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.1.42 — Math in replies
+
+- **LaTeX math renders.** Formulas in replies and Markdown previews are typeset with KaTeX: `$…$` and `\(…\)` inline, `$$…$$` and `\[…\]` as display math. Before, they showed as raw TeX, and Markdown even turned `\[ … \]` into plain brackets. Prices such as `$5 and $10`, escaped `\$`, and code stay text; a formula that does not parse shows its source in red. Wide formulas scroll sideways, and the fonts ship with the app, so math also renders offline.
+
 ## 0.1.41 — An aligned command menu
 
 - **The / command menu is aligned.** In the menu that opens when you type `/` (for example `/goal`), a command's name and description sat at the top of their row; they are now centred in it.

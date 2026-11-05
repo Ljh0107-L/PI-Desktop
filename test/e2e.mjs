@@ -654,8 +654,18 @@ try {
   const draftNow = () => page.evaluate(() => { const s = window.__pideskState(); return { draft: s.draft, recent: s.settings.recentFolders?.[s.draft.environmentId] ?? [] }; });
   const onHost = await draftNow();
   check('a new conversation on an SSH host starts in its most recent folder', onHost.draft.environmentId.startsWith('ssh:') && onHost.draft.cwd === onHost.recent[0], JSON.stringify(onHost));
-  await page.click('.env-trigger');
-  await page.click('.menu-item:has-text("This computer")');
+  // Right after a restart sessions and hosts are still being restored; retry if the menu misses a click.
+  for (let attempt = 1; ; attempt++) {
+    try {
+      await page.click('.env-trigger', { timeout: 5000 });
+      await page.locator('.popover .menu-item', { hasText: 'This computer' }).first().click({ timeout: 3000 });
+      break;
+    } catch (error) {
+      if (attempt === 4) throw new Error(`could not pick This computer from the environment menu: ${error.message.split('\n')[0]}`);
+      await page.keyboard.press('Escape').catch(() => {});
+      await page.waitForTimeout(500);
+    }
+  }
   const onMac = await draftNow();
   check('a new conversation on this Mac starts with No folder, not its most recent folder',
     onMac.draft.environmentId === 'local' && onMac.draft.cwd === null && onMac.recent.length > 0 && (await page.locator('.folder-trigger').innerText()).includes('No folder'), JSON.stringify(onMac));

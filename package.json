@@ -1,12 +1,12 @@
 {
   "name": "pi-desktop",
-  "version": "0.1.41",
+  "version": "0.1.42",
   "description": "Claude Desktop-style app for the Pi agent harness: sessions on this Mac and SSH hosts, any model",
   "scripts": {
     "test:sshd": "sh test/sshd.sh",
     "test:protocol": "node test/protocol.mjs --ssh-host pidesk-test --ssh-config /tmp/pidesk-sshd/ssh_config",
     "test:relay": "node test/relay.mjs",
-    "test:backend": "node --test test/backend.test.mjs test/custom-providers.test.mjs test/stream-recovery.test.mjs test/updater.test.mjs test/session-groups.test.mjs test/subagent.test.mjs test/subagent-ui.test.mjs test/connection-startup.test.mjs test/tps.test.mjs test/metrics.test.mjs test/subagent-history.test.mjs test/subagent-transcript.test.mjs test/subagent-presentation.test.mjs test/runtime-env.test.mjs test/subagent-recovery.test.mjs test/file-preview.test.mjs test/file-paths.test.mjs test/session-engine.test.mjs test/composer-draft.test.mjs",
+    "test:backend": "node --test test/backend.test.mjs test/custom-providers.test.mjs test/markdown-math.test.mjs test/stream-recovery.test.mjs test/updater.test.mjs test/session-groups.test.mjs test/subagent.test.mjs test/subagent-ui.test.mjs test/connection-startup.test.mjs test/tps.test.mjs test/metrics.test.mjs test/subagent-history.test.mjs test/subagent-transcript.test.mjs test/subagent-presentation.test.mjs test/runtime-env.test.mjs test/subagent-recovery.test.mjs test/file-preview.test.mjs test/file-paths.test.mjs test/session-engine.test.mjs test/composer-draft.test.mjs",
     "build": "vite build",
     "start": "vite build && electron .",
     "dev": "vite",
@@ -30,6 +30,7 @@
     "electron": "^45.2.1",
     "electron-builder": "^26.18.0",
     "highlight.js": "^11.12.0",
+    "katex": "0.19.0",
     "lucide-react": "^1.66.0",
     "marked": "^15.0.12",
     "playwright-core": "^1.64.1",

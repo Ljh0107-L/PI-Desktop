@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import hljs from 'highlight.js/lib/common';
+import 'katex/dist/katex.min.css';
+import { mathExtension, withMath } from './markdown-math.js';
 import { Icon } from './Icons.jsx';
 import { api, openFile } from './store.js';
 import { resolveMarkdownReference } from './file-paths.js';
@@ -120,12 +122,13 @@ export const looksLikePath = text => text.length < 240 && !/\s/.test(text) && !/
   && /^(~|\.{1,2})?\/?[\w.@+-]+(\/[\w.@+-]+)*\/?$/.test(text) && (text.includes('/') ? /[\w-]/.test(text.split('/').pop() || 'x') : FILE_EXT.test(text) || /^(Makefile|Dockerfile|LICENSE|CMakeLists\.txt)$/.test(text));
 renderer.codespan = ({ text }) => looksLikePath(text.replace(/&amp;/g, '&')) ? `<code class="file-ref" data-path="${text.replace(/"/g, '&quot;')}">${text}</code>` : `<code>${text}</code>`;
 marked.setOptions({ gfm: true, breaks: false, renderer });
+marked.use(mathExtension);
 DOMPurify.addHook('afterSanitizeAttributes', node => { if (node.tagName === 'A') { node.setAttribute('target', '_blank'); node.setAttribute('rel', 'noreferrer'); } });
 
 export function Markdown({ text, streaming, sessionId, documentPath, refreshKey }) {
   const root = useRef(null);
   const html = useMemo(() => {
-    const clean = DOMPurify.sanitize(marked.parse(text ?? ''), { USE_PROFILES: { html: true }, FORBID_ATTR: ['srcset'] });
+    const clean = withMath(() => marked.parse(text ?? ''), html => DOMPurify.sanitize(html, { USE_PROFILES: { html: true }, FORBID_ATTR: ['srcset'] }));
     return documentPath !== undefined ? prepareFileMarkdown(clean, documentPath) : clean;
   }, [text, documentPath]);
   useEffect(() => {

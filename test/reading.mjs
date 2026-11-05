@@ -119,6 +119,17 @@ export async function checkReading({ app, page, id }) {
     assert.equal(await page.locator('.usage-speed-value b').innerText(), '~83.3', 'incomplete answer timing estimates all 500 output tokens ÷ the 6 s response, marked as an estimate');
     assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Generation (estimated)');
     assert.equal(await page.locator('.usage').getByText('Request avg', { exact: true }).count(), 0);
+
+    step('LaTeX math renders with its fonts');
+    await send([{ type: 'message_end', message: { role: 'assistant', timestamp: stamp + 6, usage: { output: 20 }, durationMs: 1000,
+      content: [{ type: 'text', text: 'Two projections:\n\n\\[ 5120 \\rightarrow 1280 \\rightarrow 64\\times512 \\]\n\nand inline $\\sqrt{d_k}$, while $5 and $10 stay text.' }] } }]);
+    const math = page.locator('.markdown').filter({ hasText: 'Two projections' });
+    await math.locator('.katex-display').waitFor();
+    assert.equal(await math.locator('.katex').count(), 2, 'one display and one inline formula');
+    assert.ok((await math.innerText()).includes('$5 and $10'), 'prices are not formulas');
+    // The renderer's CSP allows fonts from 'self' only: a font inlined as a data: URI would fail to load.
+    const fonts = await page.evaluate(async () => { await document.fonts.ready; return [...document.fonts].filter(f => f.family.startsWith('KaTeX')).map(f => f.status); });
+    assert.ok(fonts.includes('loaded') && !fonts.includes('error'), `KaTeX fonts load: ${fonts.join(',')}`);
   } catch (error) {
     await page.screenshot({ path: `/tmp/pidesk-e2e/shots/zz-reading-${label.replace(/\W+/g, '-')}.png` }).catch(() => {});
     const dom = await page.locator('.transcript-inner').innerHTML().catch(() => '');
