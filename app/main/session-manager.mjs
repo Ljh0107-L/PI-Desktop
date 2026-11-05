@@ -61,6 +61,8 @@ export function branchMessages(entries, leafId) {
   const out = [];
   for (const e of path) {
     if (e.type === 'message' && e.message) out.push(e.message.stopReason === 'error' && omitted.get(e.id) ? { ...e.message, __retryOmitted: true } : e.message);
+    // Extension messages (agent reports, goal prompts), as Pi gives them to the model.
+    else if (e.type === 'custom_message') out.push({ role: 'custom', customType: e.customType, content: e.content, display: e.display, details: e.details, timestamp: Date.parse(e.timestamp) || 0 });
     else if (e.type === 'compaction') out.push({ role: 'compactionSummary', summary: e.summary, tokensBefore: e.tokensBefore, timestamp: Date.parse(e.timestamp) || 0 });
   }
   return out;
@@ -68,6 +70,7 @@ export function branchMessages(entries, leafId) {
 
 // Conversations from the removed Cursor CLI engine remain readable from their history file, and deletable.
 const CURSOR_REMOVED = 'Cursor CLI was removed from Pi Desktop; this conversation is read-only.';
+const ACTIVE_AGENT = new Set(['queued', 'running', 'retrying']);
 
 // Process lifecycle: a Pi is kept running while it may be needed soon, and stopped when it is not.
 const IDLE_STOP_MS = 20 * 60 * 1000; // an idle Pi nobody has looked at for this long is stopped
@@ -594,6 +597,8 @@ export class SessionManager extends EventEmitter {
     const info = session.attachInfo;
     const processKey = info?.pid && info?.startedAt ? `${info.pid}:${info.startedAt}` : null;
     const sameProcess = processKey && runtime.providerProcess === processKey;
+    // Agents live inside a Pi process: another process means the known ones are gone.
+    if (!sameProcess && runtime.agents?.size) { runtime.agents = new Map(); this.emit('agents', { id: record.id, agents: [] }); }
     // Only skip registration when this exact relay process already acknowledged these providers.
     // App restarts, missing/changed process identity, and changed keys still force a sync.
     // A previous transport may still have a provider command in flight on this same Pi.
@@ -669,6 +674,18 @@ export class SessionManager extends EventEmitter {
     if (request.method === 'setStatus' && request.statusKey === 'pidesk-goal') {
       try { runtime.goal = request.statusText ? JSON.parse(request.statusText) : null; } catch { runtime.goal = null; }
       this.emit('goal', { id: record.id, goal: runtime.goal });
+    }
+    // Live state of the agents running in this Pi (newest wins: the relay may replay older lines).
+    if (request.method === 'setStatus' && request.statusKey === 'pidesk-agents' && request.statusText) {
+      let agents = [];
+      try { agents = JSON.parse(request.statusText).agents ?? []; } catch { return; }
+      runtime.agents ??= new Map();
+      for (const agent of agents) {
+        if (!agent?.id) continue;
+        const known = runtime.agents.get(agent.id);
+        if (!known || (agent.updatedAt ?? 0) >= (known.updatedAt ?? 0)) runtime.agents.set(agent.id, agent);
+      }
+      this.emit('agents', { id: record.id, agents: [...runtime.agents.values()] });
     }
   }
 
@@ -909,7 +926,8 @@ export class SessionManager extends EventEmitter {
     return this.prewarm({ environmentId: record.environmentId, cwd: record.cwd, model: record.model, thinkingLevel: record.thinkingLevel, noFolder: record.noFolder });
   }
   #idle(runtime) {
-    return runtime.status === 'connected' && !runtime.streaming && !runtime.starting && !runtime.questions.size && runtime.goal?.status !== 'active';
+    return runtime.status === 'connected' && !runtime.streaming && !runtime.starting && !runtime.questions.size && runtime.goal?.status !== 'active'
+      && ![...(runtime.agents?.values() ?? [])].some(agent => ACTIVE_AGENT.has(agent.status)); // background agents keep it busy
   }
   // Stop Pis that are idle and either unused for IDLE_STOP_MS or beyond MAX_IDLE_PER_ENV on their machine.
   // A stopped session restarts on its next use; its history stays readable from the session file.
@@ -1054,6 +1072,19 @@ export class SessionManager extends EventEmitter {
   }
 
   goal(id) { return this.runtimes.get(id)?.goal ?? null; }
+  agents(id) { return [...(this.runtimes.get(id)?.agents?.values() ?? [])]; }
+  // The inspector's controls, handled by the bridge's /pidesk-agents command (not recorded in history).
+  async stopAgent(id, agentId) {
+    const runtime = this.runtimes.get(id);
+    if (runtime?.status !== 'connected' || !runtime.agents?.has(agentId)) throw new Error('This agent is not running in this session.');
+    await runtime.session.prompt(`/pidesk-agents stop ${agentId}`);
+  }
+  async messageAgent(id, agentId, text) {
+    const runtime = this.runtimes.get(id);
+    if (runtime?.status !== 'connected' || !runtime.agents?.has(agentId)) throw new Error('This agent is no longer available in this session.');
+    if (!String(text ?? '').trim()) return;
+    await runtime.session.prompt(`/pidesk-agents message ${agentId} ${Buffer.from(String(text)).toString('base64')}`);
+  }
 
   // Disconnect from a session. Both local and SSH relays keep Pi running unless explicitly stopped.
   async close(id) {

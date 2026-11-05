@@ -125,6 +125,19 @@ export function usageOf(messages) {
   const speeds = [];
   let speedCalls = 0;
   for (const m of messages) {
+    if (Array.isArray(m.details?.agentRuns)) {
+      // Agent runs add usage, not main-model generation time/TPS. Each run is reported by exactly one
+      // message: the call that waited for it, a subagent_message reply, or the agent's report.
+      for (const run of m.details.agentRuns) {
+        const r = run?.usage;
+        if (!r) continue;
+        u.input += nonnegative(r.input); u.cacheRead += nonnegative(r.cacheRead); u.cacheWrite += nonnegative(r.cacheWrite);
+        u.output += nonnegative(r.output); u.cost += nonnegative(r.cost?.total);
+        if (Number.isFinite(r.reasoning) && r.reasoning >= 0) { u.reasoningReported = true; u.reasoning += r.reasoning; }
+        u.calls += nonnegative(run.turns);
+      }
+      continue;
+    }
     if (m.role === 'toolResult' && m.toolName === 'subagent' && m.usage) {
       // Parallel child calls add usage, not main-model generation time/TPS.
       u.input += nonnegative(m.usage.input); u.cacheRead += nonnegative(m.usage.cacheRead); u.cacheWrite += nonnegative(m.usage.cacheWrite);
@@ -330,6 +343,13 @@ export function displayBlocks(t) {
       else { flush(); blocks.push({ kind: 'break', key: `x${mi}` }); }
       return;
     }
+    // A background agent's report: a compact row; the reply that follows answers it.
+    if (message.role === 'custom' && message.customType === 'pidesk-agent') {
+      const key = message.details?.key ?? mi;
+      flush(); closeTurn(); turnKey = `agent:${key}`;
+      blocks.push({ kind: 'agentReport', key: `agent-report:${key}`, agent: message.details?.agent ?? null });
+      return;
+    }
     if (message.role === 'custom' && message.customType === 'pidesk-subagent-notice') {
       flush(); blocks.push({ kind: 'notice', key: message.id ?? `notice:${mi}`, text: String(message.content ?? '') }); return;
     }
@@ -412,8 +432,11 @@ export function outputs(t) {
   const seen = new Map();
   const all = t.live ? [...t.messages, t.live] : t.messages;
   for (const message of all) {
-    if (message.role === 'toolResult' && message.toolName === 'subagent') {
-      for (const r of message.details?.results ?? []) for (const f of r.files ?? []) {
+    // Files that agents wrote: from the call that waited for them, or from their later reports.
+    const agents = message.role === 'toolResult' && message.toolName === 'subagent' ? message.details?.results ?? []
+      : (message.role === 'custom' && message.customType === 'pidesk-agent') || (message.role === 'toolResult' && message.toolName === 'subagent_message') ? [message.details?.agent].filter(Boolean) : null;
+    if (agents) {
+      for (const r of agents) for (const f of r.files ?? []) {
         if (typeof f.path === 'string') { seen.delete(f.path); seen.set(f.path, { path: f.path, tool: f.tool }); }
       }
       continue;

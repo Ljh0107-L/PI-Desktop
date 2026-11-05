@@ -59,6 +59,8 @@ export function subagentTranscript(task = {}) {
     // only for malformed/older steps without IDs; it never depends on changing text/time.
     const part = `step:${step.id ?? `ordinal:${omitted + index}`}`;
     if (step.type === 'notice') { notice(part, text(step.text), step.at); return; }
+    // A message sent to the agent after its task: from the coordinating agent, or from the user.
+    if (step.type === 'input') { messages.push({ id: id(part), role: 'user', content: step.from === 'user' ? text(step.text) : `From the coordinating agent:\n${text(step.text)}`, timestamp: timestamp(step.at) }); return; }
     if (step.type === 'message') {
       const body = text(step.text), error = text(step.error);
       const recoveredLimit = task.status === 'completed' && task.lengthRecoveries > 0 && step.stopReason === 'length';

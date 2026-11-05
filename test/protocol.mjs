@@ -155,7 +155,7 @@ try {
     check(`[${session.id}] delegated file is on the session machine and cwd`, existsSync(join(cwd, 'subagent-result.txt')) && readFileSync(join(cwd, 'subagent-result.txt'), 'utf8') === 'created by subagent');
     const childRequests = mock.requests.slice(before).filter(r => r.subagent);
     check(`[${session.id}] subagents inherit current provider credentials`, childRequests.length >= 4 && childRequests.every(r => r.provider === 'mock-beta' && r.model === 'beta-1' && r.authorization === `Bearer ${keys.beta}`));
-    check(`[${session.id}] delegation guidance reaches the parent prompt`, mock.requests.slice(before).some(r => !r.subagent && r.system.includes('independent context windows')));
+    check(`[${session.id}] delegation guidance and agent types reach the parent prompt`, mock.requests.slice(before).some(r => !r.subagent && r.system.includes('work in their own context windows') && r.system.includes('Agent types')));
     const runtimeCheck = await run(session, '[[subagents-runtime]]');
     const runtimeResult = runtimeCheck.tools.find(t => t.toolName === 'subagent')?.result?.details?.results?.[0];
     const runtimeOutput = runtimeResult?.steps.find(s => s.name === 'bash')?.output ?? '';

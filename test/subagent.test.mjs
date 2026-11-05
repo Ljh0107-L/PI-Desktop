@@ -41,11 +41,13 @@ function context(produce = async () => reply()) {
   return { ctx, requests, toolCalls, peak: () => peak };
 }
 const tasks = n => Array.from({ length: n }, (_, i) => ({ name: `task-${i}`, task: `Inspect assigned part ${i}; no edits or tests.` }));
-const run = (controller, c, taskList = tasks(1), signal, update) => controller.tool.execute('parent-tool', { tasks: taskList, context: 'Only work in the assigned scope.' }, signal, update, c.ctx);
+const run = (controller, c, taskList = tasks(1), signal, update, extra = {}) => controller.tool.execute('parent-tool', { tasks: taskList, context: 'Only work in the assigned scope.', background: false, ...extra }, signal, update, c.ctx);
 
-test('isolated contexts inherit model, effort, constraints and permitted coding tools', async () => {
+test('fresh agents get their brief, project instructions, model and effort, not the parent conversation', async () => {
   const c = context();
   const controller = createSubagentTool();
+  controller.setPromptOptions({ appendSystemPrompt: 'User rule: never push.', contextFiles: [{ path: '/workspace/AGENTS.md', content: 'Project rule: CI only.' }],
+    sections: { runtime: 'Runtime availability is not permission to run tests.', subagents: 'COORDINATOR-ONLY GUIDANCE' } });
   const result = await run(controller, c, tasks(2));
   assert.equal(result.isError, false);
   assert.equal(result.details.results.length, 2);
@@ -54,20 +56,23 @@ test('isolated contexts inherit model, effort, constraints and permitted coding 
     assert.equal(request.model.id, model.id);
     assert.equal(request.options.reasoning, 'high');
     const text = JSON.stringify(request.transcript);
-    assert.ok(text.includes('Do not run local tests'));
-    assert.ok(text.includes('do not launch GUI'));
-    assert.ok(!text.includes('PRIVATE_PARENT_ASSISTANT_HISTORY'));
+    assert.ok(text.includes('Only work in the assigned scope.'), 'the shared context of the brief');
+    assert.ok(text.includes('User rule: never push.') && text.includes('Project rule: CI only.'), 'user and project instructions');
+    assert.ok(text.includes('<runtime>') && text.includes('Runtime availability is not permission'), 'the session\'s runtime note');
+    assert.ok(!text.includes('COORDINATOR-ONLY GUIDANCE'), 'delegation guidance is for the coordinator');
+    assert.ok(text.includes('You are a Pi Desktop subagent, not the coordinating assistant.'));
+    for (const parent of ['Do not run local tests', 'do not launch GUI', 'PRIVATE_PARENT_ASSISTANT_HISTORY']) assert.ok(!text.includes(parent), `${parent} is the parent's, not the agent's`);
     const names = request.transcript.messages[0].toolsAdded.map(t => t.name);
     assert.deepEqual(names.sort(), ['bash', 'read', 'write']);
   }
   assert.equal(result.usage.totalTokens, 36);
-  assert.ok(SUBAGENT_PROMPT.includes('do NOT get separate worktrees'));
-  assert.ok(SUBAGENT_PROMPT.includes('all applicable user constraints'));
+  assert.ok(SUBAGENT_PROMPT.includes('every user instruction that applies'));
+  assert.ok(SUBAGENT_PROMPT.includes('isolation to "worktree"'));
 });
 
 test('one concurrency pool applies across simultaneous batches; results retain task order', async () => {
   const c = context(async () => { await sleep(25); return reply(); });
-  const controller = createSubagentTool();
+  const controller = createSubagentTool({ concurrency: 3 });
   const [a, b] = await Promise.all([run(controller, c, tasks(6)), run(controller, c, tasks(4))]);
   assert.equal(c.peak(), 3);
   assert.ok([...a.details.results, ...b.details.results].every(r => r.status === 'completed'));
@@ -183,13 +188,24 @@ test('a late transient failure still retries without replaying completed tools',
   assert.equal(result.details.results[0].retries, 1);
 });
 
-test('removing the turn cap does not make an endless loop ignore the batch deadline', async () => {
+test('a wait that runs out hands the agent to the background instead of killing it', async () => {
+  const notices = [];
   const c = context(async request => { await sleep(1, undefined, { signal: request.options.signal }); return toolReply(); });
-  const result = await run(createSubagentTool({ defaultTimeoutMs: 30 }), c);
-  assert.ok(c.requests.length > 0);
-  assert.equal(result.isError, true);
-  assert.equal(result.details.results[0].status, 'timed_out');
-  assert.match(result.details.results[0].error, /timed out/);
+  const controller = createSubagentTool({ notify: (message, options) => notices.push({ message, options }) });
+  const result = await run(controller, c, tasks(1), undefined, undefined, { waitSeconds: 0.05 });
+  const child = result.details.results[0];
+  assert.equal(child.detached, true);
+  assert.ok(['queued', 'running', 'retrying'].includes(child.status));
+  assert.match(result.content[0].text, /still running in the background/);
+  assert.deepEqual(result.details.agentRuns, [], 'its usage is reported with its own report, not twice');
+  const before = c.requests.length;
+  await sleep(30);
+  assert.ok(c.requests.length > before, 'the agent keeps working after the wait');
+  assert.equal(controller.stop(child.id, 'Stopped by the user'), true);
+  for (let i = 0; i < 100 && !notices.length; i++) await sleep(10);
+  assert.equal(notices.length, 1, 'a detached agent reports when it ends');
+  assert.equal(notices[0].message.details.agent.status, 'cancelled');
+  assert.match(notices[0].message.details.agent.error, /Stopped by the user/);
 });
 
 test('user stop still cancels a task after more than twelve turns', async () => {
@@ -206,9 +222,9 @@ test('user stop still cancels a task after more than twelve turns', async () => 
   assert.match(result.details.results[0].error, /User stopped long task/);
 });
 
-for (const reason of ['parent', 'shutdown', 'timeout']) test(`${reason} cancels active and queued subagents`, async () => {
+for (const reason of ['parent', 'shutdown']) test(`${reason} cancels active and queued subagents it waits for`, async () => {
   const c = context(async request => { await sleep(10000, undefined, { signal: request.options.signal }); return reply(); });
-  const controller = createSubagentTool({ defaultTimeoutMs: reason === 'timeout' ? 30 : 10000 });
+  const controller = createSubagentTool({ concurrency: 3 });
   const parent = new AbortController();
   const updates = [];
   const promise = run(controller, c, tasks(6), parent.signal, value => updates.push(value));
@@ -218,7 +234,7 @@ for (const reason of ['parent', 'shutdown', 'timeout']) test(`${reason} cancels 
   const result = await promise;
   assert.equal(result.isError, true);
   assert.equal(c.requests.length, 3, 'queued work must not start after cancellation');
-  assert.ok(result.details.results.every(r => r.status === (reason === 'timeout' ? 'timed_out' : 'cancelled')));
+  assert.ok(result.details.results.every(r => r.status === 'cancelled'));
   assert.equal(updates[0].details.results[0].status, 'queued', 'published snapshots must not mutate');
 });
 
@@ -227,10 +243,10 @@ test('pre-aborted work never starts; invalid batches fail before invoking a mode
   const result = await run(controller, c, tasks(2), parent.signal);
   assert.ok(result.details.results.every(r => r.status === 'cancelled'));
   assert.equal(c.requests.length, 0);
-  await assert.rejects(run(controller, c, []), /1–6/);
-  await assert.rejects(run(controller, c, tasks(7)), /1–6/);
+  await assert.rejects(run(controller, c, []), /1–8/);
+  await assert.rejects(run(controller, c, tasks(9)), /1–8/);
   for (const params of [undefined, null, {}, { context: 'not a task' }, { tasks: [null] }, { tasks: [{ name: ' ', task: 'work' }] }]) {
-    await assert.rejects(controller.tool.execute('invalid', params, undefined, undefined, c.ctx), /1–6/);
+    await assert.rejects(controller.tool.execute('invalid', params, undefined, undefined, c.ctx), /1–8/);
   }
   assert.equal(c.requests.length, 0);
 });

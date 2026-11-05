@@ -16,10 +16,17 @@ const entryOf = m => ({
   n: tokensOf(m.usage), i: m.usage.input ?? 0, o: m.usage.output ?? 0, cr: m.usage.cacheRead ?? 0, cw: m.usage.cacheWrite ?? 0, c: m.usage.cost?.total ?? 0, calls: m.__calls ?? 1,
 });
 const isReply = m => m?.role === 'assistant' && m.usage && tokensOf(m.usage) > 0;
+// Agent runs, each recorded once by whichever message reports it: the subagent call that waited for
+// it, a reply to subagent_message, or the agent's report message (pidesk-agent:<id>:<run>).
+const agentRuns = runs => runs.filter(r => r?.key && r.usage && tokensOf(r.usage) > 0).map(r => ({
+  role: 'assistant', responseId: r.key, timestamp: r.at, provider: r.provider, model: r.model, usage: r.usage, __calls: r.turns,
+}));
 const usageMessages = message => {
   if (isReply(message)) return [message];
+  if (Array.isArray(message?.details?.agentRuns)) return agentRuns(message.details.agentRuns);
+  // Results from before agents could continue: one record per agent.
   if (message?.role !== 'toolResult' || message.toolName !== 'subagent' || message.details?.kind !== 'pidesk-subagents') return [];
-  return (message.details.results ?? []).filter(r => r.id && r.usage && tokensOf(r.usage) > 0).map(r => ({
+  return (message.details.results ?? []).filter(r => r.id && r.usage && tokensOf(r.usage) > 0 && !['queued', 'running', 'retrying'].includes(r.status)).map(r => ({
     role: 'assistant', responseId: `pidesk-subagent:${r.id}`, timestamp: r.startedAt,
     provider: r.provider, model: r.model, usage: r.usage, __calls: r.turns,
   }));
@@ -84,7 +91,11 @@ export class UsageLedger {
         const entries = [];
         for (const line of (await readFile(path, 'utf8')).split('\n')) {
           if (!line.includes('"usage"')) continue;
-          try { const record = JSON.parse(line); if (record.type === 'message') entries.push(...usageMessages(record.message).map(entryOf)); } catch { /* torn line */ }
+          try {
+            const record = JSON.parse(line);
+            if (record.type === 'message') entries.push(...usageMessages(record.message).map(entryOf));
+            else if (record.type === 'custom_message') entries.push(...usageMessages({ role: 'custom', details: record.details }).map(entryOf));
+          } catch { /* torn line */ }
         }
         this.files.set(path, { mtimeMs, size, entries });
       } catch { /* unreadable file */ }

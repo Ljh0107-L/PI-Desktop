@@ -65,7 +65,8 @@ export function RightPanel({ session }) {
   const transcript = useStore(s => s.transcripts[session.id]);
   const stats = useStore(s => s.stats[session.id]);
   const selection = useStore(s => s.subagentSelection[session.id]);
-  const batches = useMemo(() => visibleSubagentBatches(subagentBatches(transcript), session.clearedSubagentIds), [transcript, session.clearedSubagentIds]);
+  const live = useStore(s => s.agents[session.id]);
+  const batches = useMemo(() => visibleSubagentBatches(subagentBatches(transcript, live), session.clearedSubagentIds), [transcript, live, session.clearedSubagentIds]);
   const batch = batches.find(b => b.callId === selection?.callId);
   const task = Number.isInteger(selection?.taskIndex) ? batch?.tasks.find(task => task.index === selection.taskIndex) : null;
   const [detailWidth, detailHandle] = useResizable('subagent-inspector', 480, 300, 680, 'left');

@@ -108,9 +108,20 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
       send({ role: 'assistant', content: '' });
       send({ tool_calls: [{ index: 0, id: 'call_sub' + requests.length, type: 'function', function: { name: 'subagent', arguments: JSON.stringify({
         tasks: [{ name: special[1] === 'runtime' ? 'Runtime check' : 'Output budget check', task }],
-        context: 'Offline CI fixture only. Preserve task constraints. Do not launch GUI or install packages.',
+        context: 'Offline CI fixture only. Preserve task constraints. Do not launch GUI or install packages.', background: false,
       }) } }] });
       finish('tool_calls'); return;
+    }
+    // Background agents (the default): the call returns at once and each report arrives as a message.
+    if (!subagent && /\[\[agents-(?:background|slow)\]\]/.test(userText) && last.role !== 'tool') {
+      const slow = userText.includes('[[agents-slow]]');
+      send({ role: 'assistant', content: '' });
+      send({ tool_calls: [{ index: 0, id: 'call_bg' + requests.length, type: 'function', function: { name: 'subagent', arguments: JSON.stringify({
+        tasks: [slow ? { name: 'Slow check', task: '[[bash:sleep 30 && echo never]]' } : { name: 'Background check', type: 'explore', task: '[[bash:sleep 1 && echo bg-done]]' }],
+        context: 'Offline CI fixture. Read-only; do not install packages.',
+      }) } }] });
+      finish('tool_calls');
+      return;
     }
     if (!subagent && /\[\[subagents(?:-slow|-background)?\]\]/.test(userText) && last.role !== 'tool') {
       send({ role: 'assistant', content: '' });
@@ -118,7 +129,7 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
       const tasks = slow || background
         ? [1, 2].map(i => ({ name: `Delayed task ${i}`, task: `[[bash:sleep ${background ? 6 : 3} && echo done > ${slow ? 'cancelled' : 'background'}-subagent-${i}.txt]]` }))
         : [{ name: 'Inspect cwd', task: '[[bash:pwd]]' }, { name: 'Write delegated file', task: '[[write:subagent-result.txt|created by subagent]]' }];
-      send({ tool_calls: [{ index: 0, id: 'call_sub' + requests.length, type: 'function', function: { name: 'subagent', arguments: JSON.stringify({ tasks, context: 'Only inspect cwd and write the assigned file. Do not run tests or open GUI applications.' }) } }] });
+      send({ tool_calls: [{ index: 0, id: 'call_sub' + requests.length, type: 'function', function: { name: 'subagent', arguments: JSON.stringify({ tasks, context: 'Only inspect cwd and write the assigned file. Do not run tests or open GUI applications.', background: false }) } }] });
       finish('tool_calls');
       return;
     }

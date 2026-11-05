@@ -981,6 +981,20 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 .subagent-clear { flex-shrink: 0; font-size: 12px; }
 .subagent-clear:disabled { opacity: .35; cursor: default; }
 .subagent-summary-head:disabled { cursor: default; }
+.subagent-summary-hint { padding: 0 12px 10px 37px; margin-top: -4px; color: var(--muted); font-size: 11px; }
+.subagent-stop { flex-shrink: 0; font-size: 12px; color: #ff7b72; }
+.subagent-inspector-worktree { display: flex; align-items: center; gap: 6px; padding: 0 8px 8px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.subagent-message { display: flex; align-items: flex-end; gap: 6px; padding: 8px 4px 12px; border-top: 1px solid var(--hairline); }
+.subagent-message textarea { flex: 1; min-height: 38px; max-height: 140px; resize: vertical; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: inherit; font: inherit; font-size: 13px; }
+.subagent-message .tool-button:disabled { opacity: .35; }
+/* A background agent's report: one quiet row in the conversation that opens its activity. */
+.agent-report { display: flex; align-items: center; gap: 8px; width: 100%; margin: 10px 0; padding: 8px 12px; border: 1px solid var(--hairline); border-radius: 10px; text-align: left; font-size: 12px; color: var(--muted); }
+.agent-report:hover:not(:disabled) { background: var(--surface); }
+.agent-report:disabled { cursor: default; }
+.agent-report-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-report-text b { color: var(--text); font-weight: 500; }
+.agent-report.completed > svg:first-child { color: #56d364; }
+.agent-report.failed > svg:first-child { color: #ff7b72; }
 .right-panel.subagent-inspector { position: relative; max-width: min(680px, 50vw); min-height: 0; overflow: visible; padding: 12px 10px 0; border-left: 1px solid var(--hairline); gap: 4px; }
 .subagent-inspector-head { display: flex; align-items: center; gap: 8px; min-height: 32px; padding: 0 4px; }
 .subagent-inspector-head b { flex: 1; min-width: 0; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

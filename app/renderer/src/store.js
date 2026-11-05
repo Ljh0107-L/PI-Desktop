@@ -28,6 +28,7 @@ let state = {
   transcripts: {},                          // session id -> transcript
   questions: {},
   goals: {},
+  agents: {},                               // session id -> { agent id -> live state from its Pi }
   confirm: null,                            // { title, message, action, run }                                // session id -> { objective, status, turns } | null
   files: {},                                // session id -> { tabs: [path], active }
   filePaneOpen: false,
@@ -107,6 +108,9 @@ window.pidesk.subscribe(({ channel, payload }) => {
       break;
     case 'goal':
       set(s => ({ goals: { ...s.goals, [payload.id]: payload.goal } }));
+      break;
+    case 'agents':
+      set(s => ({ agents: { ...s.agents, [payload.id]: Object.fromEntries((payload.agents ?? []).map(agent => [agent.id, agent])) } }));
       break;
     case 'status':
       set(s => ({ sessions: s.sessions.map(x => x.id === payload.id ? { ...x, status: payload.status, phase: Object.hasOwn(payload, 'phase') ? payload.phase : x.phase, streaming: payload.streaming ?? (payload.status === 'connected' ? x.streaming : false), statusMessage: payload.message, compacting: payload.compacting ?? x.compacting } : x) }));
@@ -216,6 +220,13 @@ export const setView = patch => set(patch);
 export function openSubagent(id, callId, taskIndex = null) {
   set(s => ({ subagentSelection: { ...s.subagentSelection, [id]: { callId, taskIndex } }, rightPanel: true, filePaneOpen: false, filePaneMax: false }));
 }
+// The inspector's controls for an agent running in this session's Pi.
+export function stopAgent(id, agentId) {
+  return api('stopAgent', id, agentId).catch(error => notify(error.message, 'error'));
+}
+export function messageAgent(id, agentId, text) {
+  return api('messageAgent', id, agentId, text).catch(error => { notify(error.message, 'error'); throw error; });
+}
 export function closeSubagent(id) {
   set(s => ({ subagentSelection: { ...s.subagentSelection, [id]: null } }));
 }
@@ -292,6 +303,7 @@ export async function openSession(id, { record = true } = {}) {
     setTranscript(id, { ...history, live: current.live, tools: { ...history.tools, ...current.tools } });
     refreshStats(id);
     api('goal', id).then(goal => set(s => ({ goals: { ...s.goals, [id]: goal ?? s.goals[id] ?? null } }))).catch(() => {});
+    api('agents', id).then(list => { if (list?.length) set(s => ({ agents: { ...s.agents, [id]: { ...Object.fromEntries(list.map(agent => [agent.id, agent])), ...s.agents[id] } } })); }).catch(() => {});
   } catch (error) {
     setTranscript(id, { ...transcriptOf(id), loaded: true, error: error.message });
   }
@@ -389,7 +401,7 @@ export async function deleteSession(id) {
   try {
     await api('deleteSession', id);
     const without = object => Object.fromEntries(Object.entries(object).filter(([key]) => key !== id));
-    set(s => ({ composerDrafts: without(s.composerDrafts), transcripts: without(s.transcripts), questions: without(s.questions), stats: without(s.stats), files: without(s.files), subagentSelection: without(s.subagentSelection),
+    set(s => ({ composerDrafts: without(s.composerDrafts), transcripts: without(s.transcripts), questions: without(s.questions), stats: without(s.stats), files: without(s.files), subagentSelection: without(s.subagentSelection), agents: without(s.agents),
       history: s.history.filter(v => v.activeId !== id), future: s.future.filter(v => v.activeId !== id) }));
   } catch (error) {
     // Don't silently lose the conversation or navigate away from whatever the user opened meanwhile.

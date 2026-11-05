@@ -1,64 +1,87 @@
-# Subagents
+# Agents (subagents)
 
-Pi Desktop 0.1.20 adds a model-callable `subagent` tool. Ask the parent agent to delegate work in ordinary language, for example:
+The coordinating agent can start agents that work in their own context windows and report back. Their main purpose is to keep the conversation's context on what matters: an agent may read tens of thousands of tokens of files and logs, but only its report enters the conversation. Independent work can also run in parallel.
 
-> Use two subagents to review the backend and renderer independently. Do not edit files, run local tests, or launch apps. Reconcile their findings and report the important issues.
+Ask in ordinary language, for example:
 
-For implementation, assign disjoint files and explicit constraints:
+> Have an explore agent find where sessions are restored after a restart and report the call path with file paths. Meanwhile, fix the typo in the README.
 
-> Delegate the documentation update and the isolated parser change to separate subagents. Tell each which files it owns. Do not change their files concurrently; review both results before integrating. Verification must run in CI, not on this computer.
+> Fork a side task: draft unit tests for the parser change we just made. Keep working on the renderer.
 
-## Tool contract
+> Use two agents in separate worktrees to try both approaches to the cache fix, then compare their diffs.
 
-```json
-{
-  "tasks": [
-    { "name": "Backend review", "task": "Review core/ and app/main/ for lifecycle bugs. Return paths and evidence. Read only; no tests." },
-    { "name": "Renderer review", "task": "Review app/renderer/ for state and UI bugs. Return paths and evidence. Read only; no tests." }
-  ],
-  "context": "Keep existing behavior. Do not run local tests or open GUI apps. Return blockers to the parent.",
-  "timeoutSeconds": 300
-}
+## Agent types
+
+| Type | Starts with | Tools |
+|---|---|---|
+| `general` (default) | its own prompt, the user's and the project's instructions (AGENTS.md and the like), the session's runtime notes, the working directory, and the brief | read, write, edit, bash, grep, find, ls |
+| `explore` | its own read-only prompt, the user's instructions, the runtime notes, and the brief (no project instruction files) | read, grep, find, ls, and bash for read-only commands |
+| `fork` | the whole conversation so far, with the coordinating agent's system prompt, tools and model | the same tools; starting agents, asking the user and the goal tools return an error |
+| custom | the body of its definition file, plus the user's and project's instructions | from its definition |
+
+A non-fork agent sees nothing of the conversation: the coordinating agent writes a brief with the goal, what is known or ruled out, the paths involved, the scope, every user instruction that applies, and what to report. A fork needs only the task. Because a fork declares exactly the coordinating agent's prompt and tools and continues its message history, its first request reuses the conversation's prompt cache.
+
+Every agent uses the session's model and reasoning effort unless a custom definition names others.
+
+## Running, reports, follow-ups
+
+- **Background by default.** The `subagent` call returns at once with each agent's id. When an agent finishes, its report arrives in the conversation as a message ("Automated message from Pi Desktop, not from the user…") that starts the coordinating agent's next turn if it is idle. If it is busy, reports wait until its turn ends; after a Stop they are recorded without starting a turn.
+- **Waiting.** `background: false` makes the call wait for the reports, up to `waitSeconds` (default 600). Agents still running then carry on in the background and report later; nothing is killed for taking long.
+- **Follow-ups.** `subagent_message { id, message }` continues an agent with its context intact. A finished agent starts another run; a working one reads the message within its current run. The last 24 finished agents stay available.
+- **Stop.** `subagent_stop { id }`, or **Stop** in the inspector, cancels an agent. A stopped agent cannot be continued.
+- **Limits.** Up to 8 tasks per call; up to 5 agents work at once per session, the rest queue. There is no time limit and no turn limit. An agent whose model gives no response for 10 minutes (while no tool is running) is stopped as stalled. Each report is bounded to about 8 KB.
+
+Reports are the agent's claims: the coordinating agent is told to check what matters before relying on them and to relay what matters to you. Delegation grants no extra permission; your restrictions apply to agents too.
+
+## Worktrees
+
+A task with `isolation: "worktree"` works in its own git worktree: `git worktree add -b pi-agent/<id> <git dir>/pi-worktrees/<id> HEAD`. It starts from the last commit, so uncommitted changes in the main checkout are not in it. The agent's file paths (relative, or absolute inside the main checkout) are mapped into the worktree, and its shell commands run there. The report gives the branch, the path, and how many files and commits changed; review and merge or copy the changes yourself. A worktree with no changes is removed together with its branch.
+
+## Custom agents
+
+Markdown files with YAML frontmatter, the same format as Claude Code's agents, in:
+
+1. `.pi/agents/` and `.claude/agents/` in the working directory and at the git root;
+2. `~/.pi/agents/` and `~/.claude/agents/`.
+
+The first definition of a name wins (project before user, `.pi` before `.claude`); the built-in names cannot be redefined.
+
+```markdown
+---
+name: reviewer
+description: Reviews a diff for bugs and risky changes. Use after non-trivial edits.
+tools: Read, Grep, Glob, Bash
+model: inherit
+effort: high
+---
+
+You review code changes. Run git diff, read the changed files, and list problems by severity
+with file paths and line numbers. Don't edit anything.
 ```
 
-- 1–6 tasks per call; up to 3 active model/tool loops across all calls in the parent session.
-- Calls wait for the batch. Use a later call for a dependent stage rather than treating this as a persistent chat/spawn-and-send API.
-- Each task gets the current model and thinking level, parent system instructions, bounded excerpts of user messages, explicit task/context, and its own new conversation. Parent assistant/tool history is not copied. Include all relevant constraints explicitly: very long user history is excerpted.
-- Coding tools are forwarded through the parent `ctx.executeTool()` pipeline, retaining validation, tool hooks and existing tool permissions. Only available `read`, `write`, `edit`, `bash`, `grep`, `find`, and `ls` tools can be exposed. This does not activate tools disabled in the parent.
-- Subagents cannot call `subagent`, `ask_user`, or goal tools. A blocker/question goes back to the parent.
-- Default batch deadline is 300 seconds, including queued tasks; callers can choose 1–900 seconds. Since 0.1.23 there is **no fixed model-turn limit**: useful tool/model work continues until a final answer, user stop, session shutdown or the batch deadline. Turns are displayed only as progress statistics. Each task still has at most two transient model retries; completed tools are not replayed to retry a failed model response.
-- Since 0.1.25, output-token exhaustion (`length`, including reasoning) allows **one separate, explicit recovery** with smaller complete operations under the original deadline. The model, thinking level and configured output cap are unchanged. Only the settled truncated response and its synthetic nonexecuted tool results are removed from the child context; earlier successful actions and aggregate usage remain. Repeated exhaustion fails with `failureKind: output_limit`, not a process-crash claim. Recovery is best-effort, not a promise that a gateway will honor reasoning controls.
-- Incomplete tool calls in an output-limited response are **not executed**, even if individual salvaged arguments look complete. Their trace is marked `skipped`, and `skippedToolCalls` distinguishes them from execution attempts. Each result records its last `stopReason` and bounded `lastResponse` usage diagnostics; thinking content is never exposed.
-- Compatible optional numeric-seconds `bash.timeout` fields default to **120 seconds** for child tools when omitted after Pi's normal argument validation (including optional non-nullable fields supplied as `null`, which Pi treats as omitted). Explicit numeric values are preserved; native bash still rejects zero/negative timeouts. Incompatible or required replacement schemas are not rewritten, and nullable replacement schemas retain their own contract. The overall batch deadline remains in force. Prefer bounded inspection of known paths rather than `find /`.
-- Session startup exposes the already-running Node via a fallback PATH entry and absolute `PI_NODE`. Electron uses a private wrapper forcing Node mode; SSH uses its actual Node binary. Existing PATH tools take precedence. This does not install npm/npx or authorize testing/builds/GUI launches; all user restrictions still apply.
-- Final output per child is bounded to about 8 KB and marked when truncated. Task failures, cancellation, timeouts and non-complete model responses remain explicit.
+- `name`, `description` (required): the description tells the coordinating agent when to use it; all custom agents are listed in its instructions.
+- `tools`: Claude Code names (Read, Write, Edit, MultiEdit, Bash, Grep, Glob, LS) or Pi names; default all coding tools. `disallowedTools` removes some.
+- `model`: `inherit` (default), `provider/id`, or a model id configured in Pi Desktop. Others (such as `sonnet`) fall back to the session's model, with a note in the agent's activity.
+- `effort`: `off`, `minimal`, `low`, `medium`, `high`, `xhigh` (`max` = `xhigh`).
+- `isolation: worktree`: always run in its own worktree.
+- `omitClaudeMd: true`: leave out the project's instruction files.
 
-## Desktop behavior
+## In the app
 
-Since 0.1.21, each delegation appears as a standalone, compact card in the main conversation, not inside a command group. The right panel contains Context, Usage and a Subagents list; the old Environment and Outputs cards are removed. This is only a UI change: it does not delete workspace files or the `outputs/` directory.
+- A delegation is a card in the conversation; while background agents work it says so. Each report is one row in the conversation, followed by the coordinating agent's reply; clicking it opens the agent.
+- Click a task in the card or in the right panel's Subagents list to open its activity: the brief, then its public messages and tool calls (the same renderer as the main conversation), messages sent to it later, its type and its worktree.
+- While an agent works, **Stop** cancels it. A message box under its activity sends it a message from you; it continues with its context and reports again.
+- Clear (in the list, or for one finished task) hides finished records; it never deletes the conversation, usage or files.
+- Agents run inside the session's Pi on the session's machine, with its provider connectivity and tool pipeline. On an SSH host they keep working while the desktop is disconnected or closed, and their reports start the next turn there. Agents on this Mac stop when you quit, like every local Pi. The idle sweep never stops a Pi whose agents are working.
+- If a session's Pi ends while its agents work, the next start records them as stopped; they can't be continued.
+- Agent token usage counts in the session's Usage and in Settings → Usage, once per run, and never feeds the main model's TPS.
 
-Since 0.1.23, click the plain **Subagents** heading to expand or collapse its list, just like Usage (keyboard Enter/Space works too). Collapsing does not cancel work or discard results; incoming progress does not force the list open. The heading has only a disclosure arrow, no leading fork icon or empty-state helper text.
+## Internals
 
-Click a task in the chat card or the right-hand list to open its execution inspector in the same panel. Since 0.1.24 it reuses the main conversation renderer: the assignment is a user-style message bubble, public text is ordinary Markdown, and adjacent tool calls form compact, collapsed work groups instead of separate large cards. Expand a group and tool row to inspect the recorded command/arguments, output, error and duration. File operations provide an **Open filename** link. The view is read-only: it does not let you edit the assignment or start an independent model chat.
+`agent/pidesk-subagent.mjs` holds the runtime and the prompts (`SUBAGENT_PROMPT` for the coordinating agent, the agent prompts, and the fork directive); the bridge registers the `subagent`, `subagent_message` and `subagent_stop` tools and adds the guidance, with the list of agent types, as a system-prompt section before each run. Coding tools go through the parent's `ctx.executeTool()` pipeline (validation, hooks, permissions). Bash timeouts default to 120 seconds when omitted. The execution trace keeps public text and tool steps only (at most 80 steps and 64 KiB per agent), never hidden thinking, credentials or inherited prompts. Output-limit recovery (once per run) and transient retries (twice per run) are unchanged from earlier versions.
 
-Bounded or malformed tool argument text is shown exactly as recorded, not reconstructed into a fake file diff. The same **Latest** scrolling/disclosure behavior as the main conversation keeps opened tools stable while activity changes. The inspector can be resized. New activity never opens or replaces a file pane automatically; closing a file preview returns to the selected task.
-
-The list's **Clear** button removes all currently finished records, and a finished task's detail header can clear just that task. Both require confirmation. Clearing hides task rows/inspection entries and leaves a neutral summary in the original delegation card; it is persisted as session-specific presentation metadata. It does **not** delete the original conversation/tool records, usage or workspace files, and is not a secure erase. Active/queued tasks remain visible and continue running. Failed persistence leaves records visible and reports an error. No model/SSH connection is needed just to save clearing metadata.
-
-The execution trace is saved in the final parent tool result, so completed tasks remain inspectable after reopening the parent conversation. Each child retains at most 80 steps and 64 KiB of trace JSON, with bounded command/output text; omitted records and truncated text are explicitly marked. Only public messages and tool text are recorded, not hidden thinking, provider credentials, inherited prompts, or image/base64 bodies. Old 0.1.20 tasks can still show their saved result, but cannot reconstruct a trace that was never recorded.
-
-Child-model token usage contributes to the session totals and Usage ledger; it does not get divided by the main model's generation window to inflate TPS. Subagents do not create sidebar conversations, app windows or extra Pi subprocesses.
-
-Each subagent runs on the same machine as the parent. SSH sessions delegate on the SSH host using its existing provider connectivity. Disconnecting or quitting the desktop does not cancel the parent relay's work. Stop cancels active and queued subagents; session shutdown also signals cancellation.
-
-## Boundaries
-
-Independent context is **not** filesystem or OS isolation. Subagents share the parent's working directory and can use its available coding tools. Permission and user restrictions still apply; the prompts do not create a new sandbox. Assign disjoint files to concurrent writers and inspect results before integrating. The parent remains responsible for verification and the final answer.
-
-The built-in prompts are `SUBAGENT_PROMPT` and `CHILD_PROMPT` in `agent/pidesk-subagent.mjs`; the bridge injects delegation guidance as a structured system-prompt section before each run. They cover useful task selection, context transfer, user restrictions, shared-file coordination and verification.
-
-There is no separate durable child-session service in this version. If the parent Pi process crashes, its in-memory child contexts stop with it. Final batch results already written to the parent's session file can be reopened; an in-flight batch is not guaranteed to recover even if one of its subtasks had finished. Existing Pi processes kept alive across a desktop update retain the old bridge until replaced. Start a new conversation to use the new extension without stopping ongoing work.
+Live state reaches the desktop as the `pidesk-agents` status line (throttled to one update a second, and resent every 30 seconds while agents work); reports are `pidesk-agent` custom messages saved in the session file; each run's usage is reported exactly once as `details.agentRuns`.
 
 ## CI coverage
 
-`test/subagent.test.mjs` exercises isolated contexts, inherited constraints, concurrent batches, parent tool forwarding, successful work beyond 12 turns, late retry without duplicate tool execution, deadline/user cancellation, usage and output persistence. Protocol tests delegate with real Pi locally and through SSH; Electron E2E covers uploaded SSH extension dependencies, result cards, Outputs and the absence of extra windows/conversations. These suites run in GitHub CI; no local test application is needed.
+`test/agents.test.mjs`: background reports and their re-sending after a Stop cleared Pi's queue, follow-ups during and after a run, stop, the fork's prompt-cache prefix, explore tools, custom definitions, worktrees in a real git repository, interrupted agents, live publishing. `test/agents-desktop.test.mjs`: history, the idle sweep, usage, the merged view. `test/subagent*.test.mjs`: trace bounds, retries, output-limit recovery, cancellation. The Electron E2E covers delegation cards, the inspector, clearing, SSH drops, a background report starting the next turn, and messaging and stopping an agent from the inspector.

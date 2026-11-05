@@ -2,6 +2,15 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.1.43 — Agents that work in the background
+
+- **Agents run in the background.** Starting an agent no longer stops the conversation until it finishes: the call returns at once, the model carries on (or ends its turn), and each agent's report arrives later as a message that starts its next turn. Reports that come in while the model is busy wait for its turn to end; after you press Stop they are kept but start nothing. Asking to wait is still possible, and an agent that runs past the wait carries on in the background instead of being killed. There is no batch time limit any more; only an agent whose model stops responding for 10 minutes is stopped.
+- **Right context for each agent.** `explore` agents search and read without changing anything; `general` agents have the coding tools; a `fork` starts from the whole conversation with the same prompt, tools and model, so it needs no briefing and reuses the conversation's prompt cache. Fresh agents now get their brief, your instructions and the project's instruction files, instead of the coordinating agent's whole system prompt and an excerpt of every message you sent. Custom agents can be defined as Markdown files in `.pi/agents` or `.claude/agents` (Claude Code's format: tools, model, effort, isolation).
+- **Follow-ups and Stop.** The model can send an agent more instructions and it continues with its context; it can also stop one. In the agent's activity panel you can stop it, or send it a message yourself.
+- **Worktrees.** An agent can work in its own git worktree on its own branch, so parallel writers don't touch your checkout; its report says what changed, and a worktree without changes is removed.
+- **Better delegation guidance.** The model is told when delegating pays (searches, independent parallel work, context-heavy side tasks) and when it doesn't, how to brief an agent, not to redo delegated work or guess results, and to verify reports before relying on them.
+- Agent usage is counted once per run in Usage and Settings → Usage. Messages from extensions, such as these reports, now also appear after a conversation is reopened. The idle sweep never stops a Pi whose agents are working.
+
 ## 0.1.42 — Math in replies
 
 - **LaTeX math renders.** Formulas in replies and Markdown previews are typeset with KaTeX: `$…$` and `\(…\)` inline, `$$…$$` and `\[…\]` as display math. Before, they showed as raw TeX, and Markdown even turned `\[ … \]` into plain brackets. Prices such as `$5 and $10`, escaped `\$`, and code stay text; a formula that does not parse shows its source in red. Wide formulas scroll sideways, and the fonts ship with the app, so math also renders offline.

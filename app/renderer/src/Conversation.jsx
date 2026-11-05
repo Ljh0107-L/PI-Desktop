@@ -61,6 +61,8 @@ function describeCall(call) {
   if (call.name.startsWith('cursor_')) return { subject: a.description || call.name.slice(7), title: path || JSON.stringify(a) };
   switch (call.name) {
     case 'subagent': return { verb: 'Subagents', subject: (a.tasks ?? []).map(t => t.name).join(' · '), title: 'Delegated tasks on this session’s machine' };
+    case 'subagent_message': return { verb: 'Messaged agent', subject: a.message ?? '', detail: a.id, title: a.message };
+    case 'subagent_stop': return { verb: 'Stopped agent', subject: a.id ?? '' };
     case 'bash': return a.description?.trim() ? { subject: a.description.trim(), title: a.command } : { subject: shortCommand(a.command), title: a.command, raw: true };
     case 'read': return { verb: 'Read', subject: baseOf(path), title: path };
     case 'write': return { verb: 'Wrote', subject: baseOf(path), title: path };
@@ -396,7 +398,7 @@ function WorkingRow({ session, transcript }) {
 }
 
 const NO_QUESTIONS = [];
-export function Transcript({ session, transcript, questions = NO_QUESTIONS, readOnly = false, onOpenFile, renderSubagents, copyText }) {
+export function Transcript({ session, transcript, questions = NO_QUESTIONS, readOnly = false, onOpenFile, renderSubagents, renderAgentReport, copyText }) {
   const scroller = useRef(null);
   const stick = useRef(true);
   const scrollIntent = useRef(false);
@@ -466,6 +468,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             case 'work': return <WorkGroup key={block.key} items={block.items} tools={transcript.tools} live={!!transcript.live} />;
             case 'tools': return <ToolGroup key={block.key} calls={block.calls} tools={transcript.tools} live={!!transcript.live} />;
             case 'subagents': return renderSubagents?.(block);
+            case 'agentReport': return renderAgentReport?.(block) ?? null;
             case 'ask': return transcript.tools[block.call.id]?.status === 'done' ? <AskBlock key={block.key} call={block.call} tool={transcript.tools[block.call.id]} /> : null;
             case 'bash': return <pre key={block.key} className="tool-output">$ {block.message.command}{'\n'}{block.message.output}</pre>;
             case 'error': return <div key={block.key} className="block-error"><Icon name="alert" size={15} /> {block.text}</div>;

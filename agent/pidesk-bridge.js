@@ -24,7 +24,7 @@ import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { Type } from 'typebox';
 import { createBashToolDefinition } from '@earendil-works/pi-coding-agent';
-import { createSubagentTool, SUBAGENT_PROMPT } from './pidesk-subagent.mjs';
+import { createSubagentTool } from './pidesk-subagent.mjs';
 
 function literalKey(key) {
   // Pi treats "$NAME" and "!command" specially; "$$" and a leading "$!" are the documented escapes.
@@ -304,9 +304,46 @@ export default function pideskBridge(pi) {
   };
   register(boot.providers);
 
-  const subagents = createSubagentTool();
-  pi.registerTool(subagents.tool);
+  // ---------------------------------------------------------------- agents
+  // Agents run inside this Pi. Their live state reaches the desktop as a status line; reports reach
+  // the coordinating agent as messages, sent when it is idle (see pidesk-subagent.mjs).
+  let agentUi = null, parentRunning = false;
+  const subagents = createSubagentTool({
+    notify: (message, options) => pi.sendMessage(message, options),
+    publish: payload => agentUi?.setStatus('pidesk-agents', payload),
+    isIdle: () => !parentRunning,
+    // A fork declares exactly the parent's tools, so its requests share the parent's prompt cache.
+    parentTools: () => {
+      const all = new Map(pi.getAllTools().map(tool => [tool.name, tool]));
+      return pi.getActiveTools().map(name => all.get(name)).filter(Boolean);
+    },
+  });
+  for (const tool of [subagents.tool, subagents.messageTool, subagents.stopTool]) pi.registerTool(tool);
+  pi.on('session_start', (_event, ctx) => {
+    agentUi = ctx.ui;
+    // Agents that were still running when this session's previous Pi ended: record that they stopped.
+    setTimeout(() => { try { subagents.restore(ctx.sessionManager.getBranch()); } catch { /* best effort */ } subagents.sync(); }, 0);
+  });
+  pi.on('agent_start', () => { parentRunning = true; });
+  pi.on('agent_settled', (event, ctx) => {
+    parentRunning = false;
+    agentUi = ctx?.ui ?? agentUi;
+    subagents.onSettled({ aborted: event.aborted, branch: ctx?.sessionManager?.getBranch?.() });
+  });
   pi.on('session_shutdown', () => subagents.shutdown());
+  // The desktop's controls: stop an agent, send it a message from the user, resend live state.
+  pi.registerCommand?.('pidesk-agents', {
+    description: 'Pi Desktop: stop, message or resync agents',
+    handler: async (args, ctx) => {
+      agentUi = ctx?.ui ?? agentUi;
+      const [verb, id, payload] = String(args ?? '').trim().split(/\s+/);
+      try {
+        if (verb === 'stop') subagents.stop(id, 'Stopped by the user');
+        else if (verb === 'message') subagents.message(id, Buffer.from(payload ?? '', 'base64').toString('utf8'), { from: 'user' }).promise.catch(() => {});
+        else subagents.sync();
+      } catch (error) { ctx?.ui?.notify?.(error.message, 'error'); }
+    },
+  });
 
   // Settings changed on the desktop (new key, model list…): re-register providers in this running Pi.
   // The payload is base64 JSON so keys never appear as readable text; extension commands are not
@@ -345,7 +382,8 @@ export default function pideskBridge(pi) {
     const note = options && projectlessNote(options.cwd);
     if (note) (options.sections ??= {}).projectless = note;
     if (options) {
-      (options.sections ??= {}).subagents = SUBAGENT_PROMPT;
+      subagents.setPromptOptions(options); // project instructions for agents that start fresh
+      (options.sections ??= {}).subagents = subagents.promptSection(options.cwd);
       options.sections.runtime = runtimeNote(runtime);
     }
   });

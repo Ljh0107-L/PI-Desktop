@@ -478,9 +478,10 @@ try {
   check('subagent work starts folded like the main conversation',
     await inspector().locator('.tool-group.work .tool-group-head').getAttribute('aria-expanded') === 'false' &&
     await inspector().locator('.tool-command, .tool-output').count() === 0);
-  check('the inspector is read only and leaves the main composer alone',
+  check('the inspector transcript is read only; its one input messages the agent and the main composer is untouched',
     await inspector().getByRole('button', { name: 'Edit message', exact: true }).count() === 0 &&
-    await inspector().locator('.composer, textarea').count() === 0 && await composer().count() === 1);
+    await inspector().locator('.composer').count() === 0 && await composer().count() === 1 &&
+    await inspector().locator('textarea').count() === await inspector().locator('.subagent-message textarea').count());
   check('completed subagent replies have the same copy action as main replies', await inspector().getByRole('button', { name: 'Copy reply', exact: true }).count() === 1);
   await S('08b1-subagent-conversation-folded');
   await inspector().locator('.tool-group.work .tool-group-head').click();
@@ -564,6 +565,36 @@ try {
   await page.locator('.session-row').nth(0).click();
   await waitText('.markdown', 'echo: remote run');
   check('two sessions ran concurrently and switching kept both', true);
+
+  // ---- background agents (on this Mac): the report starts the parent's next turn; the inspector messages and stops agents
+  await page.locator('.session-row').nth(1).click();
+  await waitNew('.session-main .markdown', 'echo: Automated message from Pi Desktop', () => send('[[agents-background]]'), 60000);
+  check('a background agent returns at once and its report starts the parent\'s next turn',
+    await mainTranscript().locator('.markdown', { hasText: 'Tool result: Started 1 agent in the background' }).count() >= 1 &&
+    await mainTranscript().locator('.agent-report.completed', { hasText: 'Background check' }).count() === 1);
+  await S('08e-agent-report');
+  await mainTranscript().locator('.agent-report.completed', { hasText: 'Background check' }).click();
+  await inspector().locator('.subagent-inspector-meta', { hasText: 'Completed' }).waitFor({ timeout: 15000 });
+  check('the report opens the agent, shown as an explore agent', (await inspector().locator('.subagent-inspector-meta').innerText()).includes('Explore'));
+  await waitNew('.session-main .markdown', 'echo: Automated message from Pi Desktop', async () => {
+    await inspector().getByLabel('Message this agent').fill('Say hi from the inspector');
+    await inspector().getByLabel('Message this agent').press('Enter');
+  }, 60000);
+  check('a message from the inspector continues the agent, which reports again',
+    (await inspector().locator('.user-bubble').allInnerTexts()).some(t => t.includes('Say hi from the inspector')) &&
+    (await inspector().locator('.markdown').allInnerTexts()).some(t => t.includes('echo: Message from the user, sent to you directly')));
+  await S('08f-agent-follow-up');
+  await page.getByRole('button', { name: 'Back to subagents' }).click();
+  await waitNew('.session-main .markdown', 'Tool result: Started 1 agent in the background', () => send('[[agents-slow]]'), 30000);
+  await mainTranscript().locator('.subagent-summary').last().locator('.subagent-task-row', { hasText: 'Slow check' }).click();
+  await inspector().locator('.subagent-inspector-meta', { hasText: 'Running' }).waitFor({ timeout: 30000 });
+  check('a running background agent says so in its delegation card', await mainTranscript().locator('.subagent-summary-hint').count() >= 1);
+  await inspector().getByRole('button', { name: 'Stop this agent', exact: true }).click();
+  await inspector().locator('.subagent-inspector-meta', { hasText: 'Cancelled' }).waitFor({ timeout: 30000 });
+  await mainTranscript().locator('.agent-report.cancelled', { hasText: 'Slow check' }).waitFor({ timeout: 30000 });
+  check('Stop in the inspector cancels a running agent, and the parent hears of it', true);
+  await page.getByRole('button', { name: 'Back to subagents' }).click();
+  await page.locator('.session-row').nth(0).click();
 
   // Stop a demonstrably in-flight response; a timed 3K echo can already finish before the click.
   await send('[[hold-for-stop]]');

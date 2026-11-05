@@ -39,13 +39,13 @@ function fixture(produce) {
   };
   return { ctx, requests, executions };
 }
-const run = (f, options = {}, signal, update, controller = createSubagentTool(options)) => controller.tool.execute('parent', { tasks: [{ name: 'Owned task', task: 'Implement only owned.txt incrementally; do not run local tests.' }], context: 'Keep all original constraints.' }, signal, update, f.ctx);
+const run = (f, options = {}, signal, update, controller = createSubagentTool(options)) => controller.tool.execute('parent', { tasks: [{ name: 'Owned task', task: 'Implement only owned.txt incrementally; do not run local tests.' }], context: 'Keep all original constraints.', background: false }, signal, update, f.ctx);
 const child = result => result.details.results[0];
 
 function assertRecoveryRequest(request) {
   assert.equal(text(request.transcript.messages.at(-1)), LENGTH_RECOVERY_PROMPT, 'must use explicit user recovery, not natural tool continuation');
   assert.equal(request.transcript.messages.at(-1).role, 'user');
-  assert.ok(JSON.stringify(request.transcript.messages).includes('Only assigned files'));
+  assert.ok(JSON.stringify(request.transcript.messages).includes('Keep all original constraints.'));
   assert.equal(request.model, model);
   assert.equal(request.model.maxTokens, 32768);
   assert.equal(request.model.reasoning, false);
@@ -198,7 +198,7 @@ for (const when of ['before response', 'recovery notice', 'during recovery']) te
   assert.equal(child(result).lengthRecoveries, when === 'before response' ? 0 : 1);
 });
 
-for (const duringRecovery of [false, true]) test(`batch deadline wins ${duringRecovery ? 'during' : 'before'} recovery`, async () => {
+for (const duringRecovery of [false, true]) test(`a model that stops answering is stopped ${duringRecovery ? 'during' : 'before'} recovery`, async () => {
   const f = fixture(async (request, n) => {
     if (!duringRecovery || n === 2) {
       try { await sleep(10000, undefined, { signal: request.options.signal }); }
@@ -206,13 +206,12 @@ for (const duringRecovery of [false, true]) test(`batch deadline wins ${duringRe
     }
     return length();
   });
-  const result = await run(f, { defaultTimeoutMs: 80 });
+  const result = await run(f, { stallMs: 80 });
   assert.equal(f.requests.length, duringRecovery ? 2 : 1);
-  assert.equal(child(result).status, 'timed_out');
-  assert.equal(child(result).failureKind, 'batch_timeout');
-  assert.match(child(result).error, /waiting on model/);
+  assert.equal(child(result).status, 'failed');
+  assert.equal(child(result).failureKind, 'stalled');
+  assert.match(child(result).error, /No response from the model/);
   assert.equal(child(result).lengthRecoveries, duringRecovery ? 1 : 0);
-  assert.ok(f.requests.every(r => r.options.timeoutMs === 80));
 });
 
 test('cancel during transport backoff after length prevents another request', async () => {
@@ -309,18 +308,24 @@ test('tool-local timeout is a failed tool result, not a batch timeout', async ()
   assert.ok(child(result).steps.some(s => s.type === 'tool' && s.status === 'failed'));
 });
 
-test('batch deadline identifies blocked tool with clipped safe summary, even after cleanup settles', async () => {
+test('a stop names the blocked tool with a clipped safe summary, even after cleanup settles', async () => {
   const f = fixture(async (_request, n) => n === 1 ? reply('toolUse', [call('bash', { command: 'RAW_SECRET_COMMAND', description: 'Scoped discovery token=SECRET https://secret.example ' + 'x'.repeat(500), timeout: 600 })]) : reply());
-  let settled = false;
+  let settled = false, started;
+  const running = new Promise(resolve => { started = resolve; });
   f.ctx.executeTool = async (_name, args, options) => {
     assert.equal(args.timeout, 600);
+    started();
     try { await sleep(10000, undefined, { signal: options.signal }); }
     finally { await sleep(10); settled = true; }
   };
-  const result = await run(f, { defaultTimeoutMs: 80 });
+  const controller = createSubagentTool();
+  const pending = run(f, {}, undefined, undefined, controller);
+  await running;
+  controller.stop(controller.agents()[0].id, 'Stopped by the user');
+  const result = await pending;
   assert.ok(settled);
-  assert.equal(child(result).failureKind, 'batch_timeout');
-  assert.match(child(result).error, /running bash \(Scoped discovery/);
+  assert.equal(child(result).failureKind, 'cancelled');
+  assert.match(child(result).error, /Stopped by the user while running bash \(Scoped discovery/);
   assert.doesNotMatch(child(result).error, /RAW_SECRET_COMMAND|SECRET|secret.example/);
   assert.ok(child(result).error.length < 400);
   assert.equal(f.requests.length, 1);
