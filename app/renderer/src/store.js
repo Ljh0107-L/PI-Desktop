@@ -43,7 +43,7 @@ let state = {
   paletteOpen: false,
   history: [], future: [],                  // back / forward navigation
   composerDrafts: {},                       // in-memory text/images per conversation; never written to settings
-  draft: { environmentId: 'local', cwd: null, model: null, thinkingLevel: 'medium' },
+  draft: { environmentId: 'local', cwd: null, model: null, thinkingLevel: 'medium', speed: 'standard' },
 };
 
 const set = patch => { state = { ...state, ...(typeof patch === 'function' ? patch(state) : patch) }; for (const l of listeners) l(); };
@@ -173,7 +173,7 @@ export async function bootstrap() {
   set({
     ready: true, settings: boot.settings, environments: boot.environments, sessions: boot.sessions, home: boot.home, piVersion: boot.piVersion,
     questions: Object.fromEntries(boot.sessions.map(s => [s.id, s.pendingQuestions ?? []])),
-    draft: { environmentId: d.environmentId ?? 'local', cwd: defaultFolder(boot.settings, d.environmentId ?? 'local'), model: d.model, thinkingLevel: d.thinkingLevel },
+    draft: { environmentId: d.environmentId ?? 'local', cwd: defaultFolder(boot.settings, d.environmentId ?? 'local'), model: d.model, thinkingLevel: d.thinkingLevel, speed: d.speed ?? 'standard' },
   });
   loadCatalog();
   api('resumeRemote').catch(() => {}); // re-attach SSH sessions still running on their hosts
@@ -349,11 +349,11 @@ export async function startSession(text, attachments = []) {
   const pendingId = 'pending';
   set({ view: 'session', activeId: pendingId, transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: [{ role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] } } });
   try {
-    const session = await api('createSession', { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel, prompt: text });
+    const session = await api('createSession', { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel, speed: draft.speed, prompt: text });
     set(s => ({ activeId: session.id, transcripts: { ...s.transcripts, [session.id]: { ...emptyTranscript(), loaded: true }, [pendingId]: undefined }, sessions: s.sessions.some(x => x.id === session.id) ? s.sessions : [session, ...s.sessions] }));
     warnIfNoImages(draft.model, attachments);
     await api('prompt', session.id, text, attachments);
-    api('updateDefaults', { environmentId: draft.environmentId, model: draft.model, thinkingLevel: draft.thinkingLevel }).then(setSettings);
+    api('updateDefaults', { environmentId: draft.environmentId, model: draft.model, thinkingLevel: draft.thinkingLevel, speed: draft.speed }).then(setSettings);
   } catch (error) {
     set({ view: 'new', activeId: null });
     throw error;

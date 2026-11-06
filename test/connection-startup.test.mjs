@@ -146,6 +146,7 @@ test('the staged bridge loads through Pi’s bundled modules, not a native impor
   const bridge = stageExtensions(resolve('agent'), ext);
   assert.equal(readFileSync(join(ext, 'package.json'), 'utf8'), EXTENSION_PACKAGE);
   assert.ok(existsSync(join(ext, 'pidesk-subagent.mjs')));
+  assert.ok(existsSync(join(ext, 'pidesk-speed.mjs')), 'the bridge imports it');
   for (const name of OBSOLETE_FILES) assert.ok(!existsSync(join(ext, name)), `${name} from the removed Cursor engine is not staged`);
   const staged = statSync(bridge).mtimeMs;
   stageExtensions(resolve('agent'), ext);
@@ -261,6 +262,23 @@ test('same-process reconnect skips provider/model/thinking mutations but refresh
   assert.equal(replacedCalls.filter(call => call.message?.startsWith('/pidesk-providers ')).length, 1);
   assert.equal(runtime.providerProcess, '123:999');
   assert.equal(runtime.providersVersion, manager.providersVersion);
+});
+
+test('a speed chosen while the desktop was away reaches the Pi that kept running, when it re-attaches', async t => {
+  const { manager, dir } = managerFixture(t);
+  const calls = fakeSessions(t);
+  const record = { id: 'session', environmentId: 'local', cwd: dir, thinkingLevel: 'medium' };
+  manager.store.sessions.push(record);
+  await manager.ensureStarted(record.id);
+  const runtime = manager.runtimes.get(record.id);
+  runtime.status = 'reconnecting'; // the connection dropped; Pi kept working in its relay
+  await manager.setSpeed(record.id, 'fast'); // saved only: nothing to send it to
+  assert.equal(record.speed, 'fast');
+  assert.equal(calls.length, 0);
+  await manager.ensureStarted(record.id);
+  const configs = calls.filter(call => call.message?.startsWith('/pidesk-config '));
+  assert.deepEqual(configs.map(call => JSON.parse(Buffer.from(call.message.split(' ')[1], 'base64').toString('utf8'))), [{ subagents: 'limited', speed: 'fast' }]);
+  assert.ok(calls.indexOf(configs[0]) < calls.findIndex(call => call.message === '/goal'), 'before anything else runs');
 });
 
 test('providers changed during startup are synced, then concurrent edits share one update', async t => {

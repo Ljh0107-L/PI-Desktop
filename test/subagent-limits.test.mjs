@@ -95,14 +95,14 @@ test('a refused delegation shows its tasks as not started', () => {
 });
 
 test('Settings → Subagents reaches running Pis once, and new Pis in their boot record', async () => {
-  const store = { settings: { providers: [], defaults: { subagents: 'more' } }, getKey: () => null };
+  const store = { settings: { providers: [], defaults: { subagents: 'more' } }, sessions: [], getKey: () => null };
   const manager = new SessionManager({ store, environments: () => [], local: {} });
-  assert.deepEqual(manager.bootConfig(), { subagents: 'more' });
+  assert.deepEqual(manager.bootConfig(), { subagents: 'more', speed: 'standard' });
   const sent = [];
   manager.runtimes.set('s1', { status: 'connected', configKey: null, session: { prompt: async line => { sent.push(line); } } });
   manager.configChanged(); await new Promise(r => setTimeout(r, 0));
   manager.configChanged(); await new Promise(r => setTimeout(r, 0));
-  assert.deepEqual(sent, [`/pidesk-config ${Buffer.from(JSON.stringify({ subagents: 'more' })).toString('base64')}`], 'sent once, not again while unchanged');
+  assert.deepEqual(sent, [`/pidesk-config ${Buffer.from(JSON.stringify({ subagents: 'more', speed: 'standard' })).toString('base64')}`], 'sent once, not again while unchanged');
   store.settings.defaults.subagents = 'off';
   manager.configChanged(); await new Promise(r => setTimeout(r, 0));
   assert.equal(sent.length, 2);

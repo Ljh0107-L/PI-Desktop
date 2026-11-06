@@ -1,7 +1,7 @@
 // Pure regressions for GitHub CI. No app, model request or live relay required.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applyEvent, emptyTranscript, estimateTokens, fromHistory, speedDisplay, usageOf } from '../app/renderer/src/transcript.js';
+import { applyEvent, emptyTranscript, estimateTokens, fromHistory, MIN_SPEED_TOKENS, speedDisplay, speedReply, usageOf } from '../app/renderer/src/transcript.js';
 
 const timing = overrides => ({ source: 'agent', complete: true, start: 0, first: 1000, last: 2000, end: 2100,
   chars: 400, deltas: 3, weight: 100, firstWeight: 10, thinkingChars: 0, ...overrides });
@@ -255,4 +255,51 @@ test('CJK estimates are explicit and never change provider totals', () => {
   assert.equal(estimateTokens(text), 400);
   const u = usage({ usage: { output: 1 }, content: [{ type: 'text', text }], __timing: timing({ weight: 400, firstWeight: 40 }) });
   assert.equal(u.genOut, 360); assert.equal(u.output, 1); assert.equal(u.speedTokensEstimated, true);
+});
+
+// Timings of real streams (Pi Desktop's pipeline, November 2026). genStart is when the provider began
+// its output (the bridge records it from the raw stream): before hidden reasoning, but the span from
+// there also holds reading the prompt and summarizing the reasoning. gpt-6.1-sol's answer streamed at
+// 58 tok/s, its "reasoning" span at 32; at Ultrafast 850 against 59.
+test('hidden reasoning: the answer is timed, and the provider\'s start marker is only a fallback', () => {
+  // gpt-6.1-sol: reasoning item opened at 2694 ms, answer streamed 4285→10211, 435 output tokens (69 reasoning).
+  const sol = usage({ usage: { output: 435, reasoning: 69 }, content: [{ type: 'text', text: '中'.repeat(553) }],
+    __timing: timing({ start: 0, genStart: 2694, first: 4285, last: 10211, end: 10459, chars: 553, deltas: 360, weight: 553, firstWeight: 1,
+      answer: answerTiming({ first: 4285, last: 10211, chars: 553, deltas: 360, weight: 553, firstWeight: 1 }) }) });
+  assert.equal(sol.speedBasis, 'generation'); assert.equal(sol.speedScope, 'answer');
+  assert.ok(Math.abs(sol.tps - (366 * 552 / 553) / 5.926) < 1e-9, `${sol.tps}`); // 61.7, as the app showed before the marker
+  const display = speedDisplay(sol);
+  assert.equal(display.label, 'Answer generation'); assert.match(display.title, /generated at the same speed but cannot be timed/);
+  // One answer chunk after hidden reasoning (first === last): estimated from the marker, which errs low.
+  const oneChunk = usage({ usage: { output: 300, reasoning: 280 }, __timing: timing({ genStart: 500, first: 6500, last: 6500, end: 6600 }) });
+  estimate(oneChunk, 'start', 50);
+  assert.match(speedDisplay(oneChunk).title, /too short to time on its own/);
+  assert.match(speedDisplay(oneChunk).title, /real generation speed is higher/);
+});
+
+test('a relay that delivers the whole reply at once is estimated, not measured from the marker', () => {
+  // qwen3.8-27b via an Anthropic-compatible relay: 113 events in 16 ms after a 2 s wait.
+  const burst = usage({ usage: { output: 3460 }, content: [{ type: 'text', text: 'x'.repeat(660) }], durationMs: 2035,
+    __timing: timing({ start: 0, genStart: 2015, first: 2015, last: 2031, end: 2035, chars: 13016, deltas: 110, weight: 3254, firstWeight: 2 }) });
+  assert.equal(burst.speedBasis, 'response');
+  // A marker after the first chunk, or before the message started, is not trusted either.
+  for (const genStart of [7000, -1]) assert.notEqual(usage({ usage: { output: 300, reasoning: 280 }, __timing: timing({ genStart, first: 6500, last: 6500, end: 6600 }) }).speedBasis, 'start', `genStart ${genStart}`);
+});
+
+test('the Usage card times the latest reply long enough to time, not a few-token "done"', () => {
+  const long = message({ timestamp: 1, usage: { output: 400 }, content: [{ type: 'text', text: 'x'.repeat(1600) }], __timing: timing({ first: 500, last: 8500, end: 8600, chars: 1600 }) });
+  const done = message({ timestamp: 2, usage: { output: 7 }, content: [{ type: 'text', text: '已写入' }], durationMs: 1273, __timing: timing({ first: 1251, last: 1253, end: 1273, chars: 3, deltas: 1 }) });
+  assert.equal(speedReply([long, done]), long);
+  assert.equal(speedReply([long]), long);
+  assert.equal(speedReply([done]), done, 'nothing longer: the last reply');
+  assert.equal(MIN_SPEED_TOKENS, 64);
+  const shown = speedDisplay(usageOf([long]), { earlier: true });
+  assert.equal(shown.value, '~45.0'); assert.match(shown.title, /the last one was too short, or arrived in bursts/); // 360 tokens after the first chunk over 8 s
+  // A burst of tool-call arguments (deepseek-flash: 118 tokens in 0.3 s, estimated) yields to the measured
+  // generation before it; another model's replies never stand in for this one's.
+  const burst = message({ timestamp: 3, usage: { output: 118 }, content: [{ type: 'toolCall', name: 'write', arguments: { content: 'x'.repeat(400) } }], __timing: timing({ first: 500, last: 790, deltas: 3, firstWeight: undefined }) });
+  assert.equal(usageOf([burst]).speedBasis, 'window');
+  assert.equal(speedReply([long, burst]), long);
+  const other = message({ timestamp: 4, model: 'other-model', usage: { output: 7 }, __timing: timing({ first: 100, last: 101 }) });
+  assert.equal(speedReply([long, other]), other, 'the last model has nothing to time: its own last reply');
 });

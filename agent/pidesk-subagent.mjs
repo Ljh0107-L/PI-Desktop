@@ -345,6 +345,7 @@ export function createSubagentTool({
   concurrency = 5, retryDelayMs = 1000, stallMs = 10 * 60 * 1000, maxRetained = 24, defaultWaitSeconds = 600, heartbeatMs = 30000,
   notify, publish, isIdle, parentTools, home,
   agentLimit = null, // overrides the Settings limit on new agents per request (tests of concurrency)
+  speed = null,      // the conversation's speed (pidesk-speed.mjs createSpeed), for agents' requests too
 } = {}) {
   const pool = new Pool(concurrency);
   const lifetime = new AbortController();
@@ -513,6 +514,22 @@ export function createSubagentTool({
     return entry;
   }
 
+  // The conversation's speed on this agent's request; its message is priced at that speed when it
+  // ends (onAgentEvent). The agent loop's own hooks don't run for agents.
+  function atSpeed(entry, options) {
+    return {
+      onPayload: async (payload, model) => {
+        const changed = await options?.onPayload?.(payload, model);
+        entry.speedRequest = speed.request(model, changed ?? payload);
+        return entry.speedRequest?.payload ?? changed;
+      },
+      onProviderStreamEvent: async (data, model) => {
+        await options?.onProviderStreamEvent?.(data, model);
+        entry.speedRequest?.event(data);
+      },
+    };
+  }
+
   function createAgent(entry) {
     return new Agent({
       initialState: { systemPrompt: entry.systemPrompt, model: entry.model, thinkingLevel: entry.thinkingLevel, tools: entry.tools, messages: entry.messages },
@@ -525,7 +542,8 @@ export function createSubagentTool({
       streamFn: (m, context, options) => {
         const signal = entry.current?.signal ?? lifetime.signal;
         signal.throwIfAborted();
-        return entry.ctx.modelRegistry.streamSimple(m, context, { ...options,
+        entry.speedRequest = null;
+        return entry.ctx.modelRegistry.streamSimple(m, context, { ...options, ...(speed ? atSpeed(entry, options) : {}),
           signal: AbortSignal.any([signal, ...(options?.signal ? [options.signal] : [])]), cacheRetention: 'long', maxRetries: 0 });
       },
       // No turn cap. Yield so even an immediately resolving provider/tool loop services
@@ -549,6 +567,7 @@ export function createSubagentTool({
       recordSubagentStep(record, { id: messageId, type: 'message', status: 'running', text: record.output });
     }
     if (event.type === 'message_end' && event.message.role === 'assistant') {
+      if (entry.speedRequest) { Object.assign(event.message, entry.speedRequest.finish(event.message)); entry.speedRequest = null; }
       record.turns++; state.turns++;
       addUsage(record.usage, event.message.usage); addUsage(state.usage, event.message.usage);
       record.output = clip(messageText(event.message));

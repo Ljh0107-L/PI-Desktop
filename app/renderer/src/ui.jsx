@@ -90,6 +90,18 @@ export function EffortTrigger({ levels, value, onChange, disabled, title }) {
   </Trigger>;
 }
 
+// Fast / Ultrafast processing under the composer, for models that offer it. `speeds`: [{ value, label, detail }].
+export function SpeedTrigger({ speeds, value, onChange, note }) {
+  const current = speeds.find(speed => speed.value === value) ?? speeds[0];
+  return <Trigger width={250} label="Speed" className={`speed-trigger ${value !== 'standard' ? 'on' : ''}`} title={`Speed: ${current.label}`}
+    menu={close => <MenuSection title="Speed">
+      {speeds.map(speed => <MenuItem key={speed.value} label={speed.label} detail={speed.detail} checked={value === speed.value} onClick={() => { onChange(speed.value); close(); }} />)}
+      {note && <div className="menu-note">{note}</div>}
+    </MenuSection>}>
+    <Icon name="bolt" size={14} />{value !== 'standard' && <span>{current.label}</span>}
+  </Trigger>;
+}
+
 // A chip that opens a popover; used for the selectors under the composer.
 export function Chip({ icon, label, title, children, width = 300, placement = 'top-start', disabled, className = '' }) {
   const anchor = useRef(null);

@@ -26,6 +26,7 @@ import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:pa
 import { Type } from 'typebox';
 import { createBashToolDefinition } from '@earendil-works/pi-coding-agent';
 import { createSubagentTool } from './pidesk-subagent.mjs';
+import { createSpeed } from './pidesk-speed.mjs';
 
 function literalKey(key) {
   // Pi treats "$NAME" and "!command" specially; "$$" and a leading "$!" are the documented escapes.
@@ -249,6 +250,11 @@ export function registerMetrics(pi, clock = () => performance.timeOrigin + perfo
     // Ordinary registry background calls have no agent hooks; the SDK exposes no request id.
     if (!active || event.provider !== active.provider || event.model !== active.model || event.api !== active.api) return;
     const data = event.data;
+    // When the provider began its output, by its own marker: the first output item of an OpenAI
+    // response (a reasoning item, before any hidden reasoning) or the first Anthropic content block.
+    // Every output token comes after it, but so do reading the prompt and summarizing the reasoning,
+    // so the renderer estimates from it only when the answer is too short to time on its own.
+    if (active.genStart == null && ['response.output_item.added', 'content_block_start'].includes(data?.type)) active.genStart = clock();
     const marker = data?.usage?.cursor2api ?? data?.message?.usage?.cursor2api ?? data?.response?.usage?.cursor2api;
     const cursor = marker && ['upstream', 'estimated'].includes(marker.source);
     const summary = /^response\.reasoning_summary_(?:text|part)\.(?:added|delta|done)$/.test(data?.type ?? '');
@@ -271,11 +277,32 @@ export function registerMetrics(pi, clock = () => performance.timeOrigin + perfo
     return { message: { ...message,
       ...(t.provenance ? { __usageProvenance: t.provenance } : {}),
       __timing: { source: 'agent', complete: true, start: t.start, first: t.first, last: t.last, end,
+        ...(t.genStart != null ? { genStart: t.genStart } : {}),
         chars: t.chars, deltas: t.deltas, weight: t.weight, firstWeight: t.firstWeight,
         answer: { ...t.answer }, thinkingChars: t.thinkingChars,
         think: t.thinkStart == null ? null : (t.thinkEnd ?? end) - t.thinkStart },
     } };
   });
+}
+
+// The composer's Speed (pidesk-speed.mjs) on the agent's own requests: the body gets the faster
+// tier, and the finished message records the speed asked for, sent and reported, with its cost at
+// that speed. Like the metrics, one request at a time, matched by provider and model.
+export function registerSpeed(pi, speed) {
+  let request = null;
+  pi.on('before_provider_request', (event, ctx) => {
+    request = speed.request(ctx?.model, event.payload);
+    return request?.payload;
+  });
+  pi.on('provider_stream_event', event => {
+    if (request && event.provider === request.provider && event.model === request.model) request.event(event.data);
+  });
+  pi.on('message_end', ({ message }) => {
+    if (!request || message?.role !== 'assistant' || message.provider !== request.provider || message.model !== request.model) return;
+    const done = request; request = null;
+    return { message: done.finish(message) };
+  });
+  return speed;
 }
 
 export default function pideskBridge(pi) {
@@ -304,6 +331,8 @@ export default function pideskBridge(pi) {
     }
   };
   register(boot.providers);
+  // Settings sent with the boot record and by /pidesk-config: the conversation's speed.
+  const speed = registerSpeed(pi, createSpeed({ speed: boot.config?.speed }));
 
   // ---------------------------------------------------------------- agents
   // Agents run inside this Pi. Their live state reaches the desktop as a status line; reports reach
@@ -313,6 +342,7 @@ export default function pideskBridge(pi) {
     notify: (message, options) => pi.sendMessage(message, options),
     publish: payload => agentUi?.setStatus('pidesk-agents', payload),
     isIdle: () => !parentRunning,
+    speed, // agents' requests go at the conversation's speed too
     // A fork declares exactly the parent's tools, so its requests share the parent's prompt cache.
     parentTools: () => {
       const all = new Map(pi.getAllTools().map(tool => [tool.name, tool]));
@@ -357,13 +387,15 @@ export default function pideskBridge(pi) {
     },
   });
 
-  // Desktop settings that shape this Pi's behaviour (for now Settings → Subagents), as base64 JSON.
+  // Desktop settings that shape this Pi's behaviour (Settings → Subagents, the conversation's
+  // speed), as base64 JSON.
   pi.registerCommand?.('pidesk-config', {
     description: 'Pi Desktop: apply settings',
     handler: async args => {
       try {
         const next = JSON.parse(Buffer.from(String(args ?? '').trim(), 'base64').toString('utf8'));
         if (next?.subagents) { subagents.setMode(next.subagents); applySubagentMode(); }
+        if (next?.speed) speed.set(next.speed);
         globalThis[BOOT] = { ...(globalThis[BOOT] ?? {}), config: { ...(globalThis[BOOT]?.config ?? {}), ...next } };
       } catch { process.stderr.write('pidesk: ignoring malformed settings\n'); }
     },

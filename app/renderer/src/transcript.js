@@ -110,6 +110,15 @@ function estimatedGeneration(m) {
   const reasoning = nonnegative(m.usage?.reasoning);
   const thinking = blocks.filter(b => b?.type === 'thinking').map(b => b.thinking ?? '').join('\n');
   const hiddenReasoning = reasoning > 0 && (m.__usageProvenance?.thinking === 'summary' || blocks.some(b => b?.type === 'thinking' && b.redacted) || estimateTokens(thinking) < reasoning * 0.5);
+  // Reasoning not seen as it was generated, but the provider marked when its output began (the
+  // bridge's genStart: OpenAI's first output item, Anthropic's first content block): every output
+  // token came after it. That span also holds reading the prompt and summarizing the reasoning
+  // (measured: about half the answer's rate at standard speed, a seventh at Ultrafast), so this errs
+  // low; still closer than the whole response. A relay's single burst is not a span of generation.
+  if ((hiddenReasoning || m.__usageProvenance?.thinking === 'summary') && time(t.genStart) && time(t.start) && time(t.first) && time(t.last) &&
+      t.start <= t.genStart && t.genStart <= t.first && t.last - t.genStart >= MIN_WINDOW_MS && !(t.chars / (t.last - t.genStart) > 20)) {
+    return { ms: t.last - t.genStart, out, estimated: inferTokens, scope: 'all', fallback: 'start', hiddenWork: false };
+  }
   if (!hiddenReasoning && time(t.first) && time(t.last) && t.last - t.first >= MIN_WINDOW_MS) {
     const firstShare = positive(t.weight) && positive(t.firstWeight) && t.firstWeight < t.weight ? t.firstWeight / t.weight
       : Number.isInteger(t.deltas) && t.deltas > 1 ? 1 / t.deltas : 0;
@@ -170,7 +179,7 @@ export function usageOf(messages) {
   const scope = pool.at(-1)?.scope;
   const samples = pool.filter(g => g.scope === scope);
   if (samples.length) {
-    u.speedBasis = measured.length ? 'generation' : samples.some(g => g.fallback === 'response') ? 'response' : 'window'; u.speedScope = scope;
+    u.speedBasis = measured.length ? 'generation' : samples.some(g => g.fallback === 'response') ? 'response' : samples.some(g => g.fallback === 'start') ? 'start' : 'window'; u.speedScope = scope;
     u.speedPartial = samples.length < speedCalls;
     for (const g of samples) {
       u.genMs += g.ms; u.genOut += g.out;
@@ -182,27 +191,59 @@ export function usageOf(messages) {
   return { ...u, prompt, cacheHit: u.cacheUnknown ? null : prompt ? u.cacheRead / prompt : null, tps: u.genMs ? u.genOut / (u.genMs / 1000) : null, durationMs: u.start != null && u.end != null ? u.end - u.start : null };
 }
 
-export function speedDisplay(usage) {
+// earlier: the speed comes from an earlier reply, because the last one was too short to time.
+export function speedDisplay(usage, { earlier = false } = {}) {
+  const from = earlier ? ' From an earlier reply of this model: the last one was too short, or arrived in bursts, to time.' : '';
   if (!Number.isFinite(usage.tps)) return { value: '—', label: 'Speed unavailable', title: 'This reply has no output or timing to estimate its speed from.' };
-  if (usage.speedBasis === 'response' || usage.speedBasis === 'window') {
+  if (['response', 'start', 'window'].includes(usage.speedBasis)) {
     const basis = usage.speedBasis === 'response'
       ? 'Estimated: output tokens ÷ the whole response time, because the output arrived in one burst or a single chunk (a buffering relay) or its reasoning was hidden. That time includes time to first token, so the real generation speed is at least this.'
-      : 'Estimated: output tokens after the first chunk ÷ the first→last output time seen by the desktop.';
+      : usage.speedBasis === 'start'
+        ? 'Estimated: output tokens, reasoning included, ÷ the time from when the provider began its output to the last token, because the answer was too short to time on its own. That time also holds reading the prompt and summarizing the hidden reasoning, so the real generation speed is higher.'
+        : 'Estimated: output tokens after the first chunk ÷ the first→last output time seen by the desktop.';
     return {
       value: `~${usage.tps >= 100 ? Math.round(usage.tps) : usage.tps.toFixed(1)}`,
       label: 'Generation (estimated)',
-      title: basis + (usage.speedTokensEstimated ? ' Token counts are estimated from the visible output; provider token totals remain unchanged.' : ' Uses provider-reported output counts.'),
+      title: basis + (usage.speedTokensEstimated ? ' Token counts are estimated from the visible output; provider token totals remain unchanged.' : ' Uses provider-reported output counts.') + from,
     };
   }
   const answer = usage.speedScope === 'answer';
   const title = 'Generation tokens after the first chunk ÷ first→last source-observed generation time. Excludes TTFT, tool execution and completion trailers. First-chunk tokens are allocated by text weights and excluded. Approximate, not server decode-only TPS; upstream buffering can affect it.';
-  const scope = answer ? ' Answer/tool output only: hidden or summarized reasoning tokens and time are excluded.' : ' Includes fully streamed reasoning once, not in addition to output.';
+  const scope = answer ? ' Measured on the answer and tool output: hidden or summarized reasoning is generated at the same speed but cannot be timed (the wait before the answer also holds reading the prompt and summarizing it), so its tokens and time are left out.' : ' Includes fully streamed reasoning once, not in addition to output.';
   const estimate = usage.speedTokensEstimated ? ' Token counts are estimated by the bridge or from visible text/tool arguments and reported or visible reasoning. Provider token totals remain unchanged.' : ' Uses provider-reported output counts; provider token totals remain unchanged.';
   return {
     value: `${usage.speedEstimated ? '~' : ''}${usage.tps >= 100 ? Math.round(usage.tps) : usage.tps.toFixed(1)}`,
     label: answer ? 'Answer generation' : 'Generation',
-    title: title + scope + estimate + (usage.speedPartial ? ' Only calls with usable timing and the same generation scope are included.' : ''),
+    title: title + scope + estimate + (usage.speedPartial ? ' Only calls with usable timing and the same generation scope are included.' : '') + from,
   };
+}
+
+// Replies shorter than this (a "done" after a tool call) are one or two chunks: their speed is noise.
+export const MIN_SPEED_TOKENS = 64;
+
+// The processing speed a reply ran at (the composer's Speed; the bridge records what was asked for,
+// sent and reported in __speed). Null for standard-speed replies that asked for nothing faster.
+const TIER = { standard: 'Standard', fast: 'Fast', ultrafast: 'Ultrafast' };
+export function speedTier(m) {
+  const s = m?.__speed;
+  if (!s || !TIER[s.requested]) return null;
+  const ran = TIER[s.used] ? s.used : s.sent;
+  const label = TIER[ran] ?? ran, asked = TIER[s.requested];
+  if (ran === s.requested) return ran === 'standard' ? null : { label, slower: false, title: `This reply ran at ${label} speed, billed at ${label} rates.` };
+  const why = s.sent !== s.requested
+    ? s.reason === 'resting' ? `${asked} was rate limited or at capacity a moment ago, so requests go at ${TIER[s.sent]} speed for a few minutes.` : `This model doesn't offer ${asked}.`
+    : `The provider ran it at ${label} speed, billed at ${label} rates.`;
+  return { label, slower: true, title: `Asked for ${asked}. ${why}` };
+}
+// The reply whose speed the Usage card shows, among the last model's replies: the latest measured
+// generation long enough to time, else the latest estimate of one, else the last reply. A burst of
+// tool-call arguments after a tool result is an estimate; the generation before it was measured.
+export function speedReply(replies) {
+  const last = replies.at(-1);
+  if (!last) return last;
+  const model = m => `${m.provider}\n${m.responseModel ?? m.model}`;
+  const long = replies.filter(m => model(m) === model(last) && (m.usage?.output ?? 0) >= MIN_SPEED_TOKENS && usageOf([m]).tps != null);
+  return [...long].reverse().find(m => usageOf([m]).speedBasis === 'generation') ?? long.at(-1) ?? last;
 }
 // Usage per finished turn (user message → the replies that followed), oldest first.
 export function turnUsages(messages) {

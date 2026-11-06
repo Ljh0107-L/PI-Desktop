@@ -11,6 +11,10 @@ import { closeSshMux, egressEnv, localRelayTransport, localTransport, relaySpawn
 import { startEgressProxy, hostPortOf } from '../../core/egress-proxy.mjs';
 import { listRelaySessions, prepareRemote, runSsh, stopRelaySession } from './remote-setup.mjs';
 import { providerBaseUrl } from './custom-providers.mjs';
+import { SPEEDS, speedOptions } from '../../agent/pidesk-speed.mjs';
+
+// A conversation record keeps a speed only when it isn't standard.
+const speedField = speed => SPEEDS.includes(speed) && speed !== 'standard' ? { speed } : {};
 
 const titleFrom = text => { const line = text.trim().replace(/^\/goal\s+/, '').split('\n')[0].replace(/\s+/g, ' '); return line.length > 60 ? line.slice(0, 57) + '…' : line || 'New session'; };
 
@@ -161,13 +165,16 @@ export class SessionManager extends EventEmitter {
     for (const key of [...this.spares.keys()]) this.#dropSpare(key);
     for (const runtime of this.runtimes.values()) if (runtime.status === 'connected') this.#syncProviders(runtime).catch(() => {});
   }
-  // Desktop settings a Pi applies itself (Settings → Subagents): in its boot record, then by command
-  // before the next prompt whenever they changed or the Pi started without them.
-  bootConfig() { return { subagents: this.store.settings.defaults?.subagents ?? 'limited' }; }
-  configChanged() { for (const runtime of this.runtimes.values()) if (runtime.status === 'connected') this.#syncConfig(runtime).catch(() => {}); }
-  async #syncConfig(runtime) {
+  // Desktop settings a Pi applies itself (Settings → Subagents, the conversation's speed): in its boot
+  // record, then by command whenever they changed or the Pi started without them.
+  bootConfig(record) { return { subagents: this.store.settings.defaults?.subagents ?? 'limited', speed: record?.speed ?? 'standard' }; }
+  configChanged() {
+    for (const [id, runtime] of this.runtimes) if (runtime.status === 'connected') this.#syncConfig(runtime, this.#recordOf(id)).catch(() => {});
+  }
+  #recordOf(id) { return this.store.sessions.find(s => s.id === id) ?? [...this.spares.values()].find(sp => sp.id === id)?.record; }
+  async #syncConfig(runtime, record) {
     const session = runtime?.session;
-    const key = JSON.stringify(this.bootConfig());
+    const key = JSON.stringify(this.bootConfig(record));
     if (!session || runtime.configKey === key) return;
     await session.prompt(`/pidesk-config ${Buffer.from(key).toString('base64')}`);
     if (runtime.session === session) runtime.configKey = key;
@@ -203,7 +210,7 @@ export class SessionManager extends EventEmitter {
         // Built-in providers can be narrowed to the models the user picked in Settings.
         const enabled = Object.fromEntries(this.store.settings.providers.filter(p => p.enabledModels?.length).map(p => [p.id, new Set(p.enabledModels)]));
         return models.filter(m => configured.has(m.provider) && (!enabled[m.provider] || enabled[m.provider].has(m.id)))
-          .map(m => ({ provider: m.provider, id: m.id, name: m.name ?? m.id, reasoning: !!m.reasoning, thinkingLevelMap: m.thinkingLevelMap, contextWindow: m.contextWindow, maxTokens: m.maxTokens, baseUrl: m.baseUrl, input: m.input }));
+          .map(m => ({ provider: m.provider, id: m.id, name: m.name ?? m.id, reasoning: !!m.reasoning, thinkingLevelMap: m.thinkingLevelMap, contextWindow: m.contextWindow, maxTokens: m.maxTokens, baseUrl: m.baseUrl, input: m.input, speeds: speedOptions(m) }));
       } finally { await session.stop(); }
     })();
     const cached = this.catalogCache;
@@ -340,7 +347,7 @@ export class SessionManager extends EventEmitter {
   // run; the first message then adopts it instead of waiting for SSH + Pi start-up. With No folder the
   // spare runs in the root and moves into the conversation's own directory when the first message names it.
   spares = new Map(); // `${environmentId}\n${cwd}` (or projectlessSpareKey) -> { id, record, timer }
-  async prewarm({ environmentId, cwd: chosen, model, thinkingLevel, noFolder }) {
+  async prewarm({ environmentId, cwd: chosen, model, thinkingLevel, speed, noFolder }) {
     if (!environmentId) return false;
     const env = this.environments().find(e => e.id === environmentId);
     if (!env || (env.kind === 'ssh' && !env.enabled)) return false;
@@ -350,7 +357,7 @@ export class SessionManager extends EventEmitter {
     for (const [k] of this.spares) if (k !== key) this.#dropSpare(k);
     const existing = this.spares.get(key);
     if (existing) { this.#armSpare(key, existing); return true; }
-    const record = { id: randomUUID(), title: 'New session', environmentId, environmentLabel: env.label, cwd, noFolder: (!chosen || noFolder) || undefined, model, thinkingLevel: thinkingLevel ?? 'medium', spare: true };
+    const record = { id: randomUUID(), title: 'New session', environmentId, environmentLabel: env.label, cwd, noFolder: (!chosen || noFolder) || undefined, model, thinkingLevel: thinkingLevel ?? 'medium', ...speedField(speed), spare: true };
     const spare = { id: record.id, record };
     this.spares.set(key, spare);
     this.#armSpare(key, spare);
@@ -432,7 +439,7 @@ export class SessionManager extends EventEmitter {
     if (result?.cancelled) throw new Error('Moving the pre-warmed Pi was cancelled.');
   }
 
-  async create({ environmentId, cwd: chosen, model, thinkingLevel, prompt }) {
+  async create({ environmentId, cwd: chosen, model, thinkingLevel, speed, prompt }) {
     const env = this.env(environmentId);
     const noFolder = !chosen;
     const cwd = noFolder ? await this.#projectlessDir(env, prompt) : chosen;
@@ -445,10 +452,10 @@ export class SessionManager extends EventEmitter {
     if (spare) {
       this.spares.delete(spareKey);
       clearTimeout(spare.timer);
-      try { return await this.#adopt(spare.record, fields, { model, thinkingLevel }); }
+      try { return await this.#adopt(spare.record, fields, { model, thinkingLevel, speed }); }
       catch { await this.#stopSpare(spare); } // the warm Pi failed or could not move: start a fresh one below
     }
-    const record = { id: randomUUID(), ...fields, model, thinkingLevel: thinkingLevel ?? 'medium', createdAt: Date.now(), updatedAt: Date.now() };
+    const record = { id: randomUUID(), ...fields, model, thinkingLevel: thinkingLevel ?? 'medium', ...speedField(speed), createdAt: Date.now(), updatedAt: Date.now() };
     this.#add(record);
     await this.ensureStarted(record.id);
     return this.#view(record);
@@ -461,7 +468,7 @@ export class SessionManager extends EventEmitter {
   }
   // Take over a pre-warmed Pi. No folder: it runs in the root, so it first moves into the conversation's
   // directory; that starts a fresh session there, so the model and effort are compared against Pi's state.
-  async #adopt(spareRecord, fields, { model, thinkingLevel }) {
+  async #adopt(spareRecord, fields, { model, thinkingLevel, speed }) {
     const session = await this.ensureStarted(spareRecord.id, spareRecord);
     let current = { model: spareRecord.model, thinkingLevel: spareRecord.thinkingLevel };
     if (fields.noFolder) {
@@ -479,7 +486,10 @@ export class SessionManager extends EventEmitter {
         ? session.setModel(wantModel.provider, wantModel.id).catch(error => this.emit('notice', { id: record.id, level: 'warning', message: error.message })) : null,
       wantLevel && wantLevel !== current.thinkingLevel ? session.request('set_thinking_level', { level: wantLevel }).catch(() => {}) : null,
     ]);
-    this.#save(record, { model: wantModel, thinkingLevel: wantLevel });
+    // A speed other than the spare's reaches its Pi with the first prompt (#syncConfig).
+    const wantSpeed = speedField(speed ?? record.speed);
+    if (!wantSpeed.speed) delete record.speed;
+    this.#save(record, { model: wantModel, thinkingLevel: wantLevel, ...wantSpeed });
     return this.#view(record);
   }
   #current(record, runtime) { return !runtime.closing && this.runtimes.get(record.id) === runtime; }
@@ -539,7 +549,7 @@ export class SessionManager extends EventEmitter {
   async #start(record, runtime) {
     const env = this.env(record.environmentId);
     const bootVersion = this.providersVersion;
-    const boot = { providers: this.bootProviders(), config: this.bootConfig() };
+    const boot = { providers: this.bootProviders(), config: this.bootConfig(record) };
     const piArgs = record.piSessionFile ? ['--session', record.piSessionFile] : [];
     let session;
     if (env.kind === 'local') {
@@ -602,14 +612,16 @@ export class SessionManager extends EventEmitter {
   async #configureSession(record, runtime, session, bootVersion, bootConfigKey) {
     runtime.lastSeq = session.lastSeq;
     const created = !!session.attachInfo?.created;
-    // A Pi this desktop just started has its boot settings; one that kept running may not.
-    runtime.configKey = created ? bootConfigKey : null;
     runtime.autoReconnect = true;
     const state = session.initialState ?? await session.state();
     runtime.streaming = !!state.isStreaming;
     const info = session.attachInfo;
     const processKey = info?.pid && info?.startedAt ? `${info.pid}:${info.startedAt}` : null;
     const sameProcess = processKey && runtime.providerProcess === processKey;
+    // A Pi this desktop just started has its boot settings, and the same process still has what we
+    // sent it; another one that kept running may not.
+    if (created) runtime.configKey = bootConfigKey;
+    else if (!sameProcess) runtime.configKey = null;
     // Agents live inside a Pi process: another process means the known ones are gone.
     if (!sameProcess && runtime.agents?.size) { runtime.agents = new Map(); this.emit('agents', { id: record.id, agents: [] }); }
     // Only skip registration when this exact relay process already acknowledged these providers.
@@ -626,6 +638,8 @@ export class SessionManager extends EventEmitter {
     runtime.providerProcess = processKey;
     await this.#syncProviders(runtime);
     if (!created) {
+      // A Pi that kept running without us may be mid-run with older settings (a speed changed meanwhile).
+      await this.#syncConfig(runtime, record).catch(() => {});
       session.prompt('/goal').catch(() => {}); // re-publish the goal of a Pi that kept running without us
     }
     if (created) {
@@ -716,7 +730,7 @@ export class SessionManager extends EventEmitter {
       interrupted = true;
     }
     await this.#syncProviders(this.runtimes.get(id));
-    await this.#syncConfig(this.runtimes.get(id)).catch(() => {});
+    await this.#syncConfig(this.runtimes.get(id), record).catch(() => {});
     // The first message names the conversation at once (its first line), and the model then suggests a
     // better title, as Claude does; a title the user set by hand is never replaced.
     let nameIt = null;
@@ -870,6 +884,15 @@ export class SessionManager extends EventEmitter {
     if (runtime?.status === 'connected') await runtime.session.request('set_thinking_level', { level });
     this.#save(record, { thinkingLevel: level });
   }
+  // Fast or Ultrafast processing (the composer's Speed). A running Pi applies it from its next request.
+  async setSpeed(id, speed) {
+    if (!SPEEDS.includes(speed)) throw new Error(`Unknown speed: ${speed}`);
+    const record = this.record(id);
+    if (speed === 'standard') delete record.speed;
+    this.#save(record, speedField(speed));
+    const runtime = this.runtimes.get(id);
+    if (runtime?.status === 'connected') await this.#syncConfig(runtime, record);
+  }
 
 
 
@@ -937,7 +960,7 @@ export class SessionManager extends EventEmitter {
   async warmFolder(id) {
     const record = this.store.sessions.find(s => s.id === id);
     if (!record || record.archived || record.engine === 'cursor') return false;
-    return this.prewarm({ environmentId: record.environmentId, cwd: record.cwd, model: record.model, thinkingLevel: record.thinkingLevel, noFolder: record.noFolder });
+    return this.prewarm({ environmentId: record.environmentId, cwd: record.cwd, model: record.model, thinkingLevel: record.thinkingLevel, speed: record.speed, noFolder: record.noFolder });
   }
   #idle(runtime) {
     return runtime.status === 'connected' && !runtime.streaming && !runtime.starting && !runtime.questions.size && runtime.goal?.status !== 'active'
@@ -1013,7 +1036,7 @@ export class SessionManager extends EventEmitter {
     const env = this.env(source.environmentId);
     const fields = {
       title: `${source.title} (fork)`, environmentId: source.environmentId, environmentLabel: env.label, cwd: source.cwd,
-      project: source.project, noFolder: source.noFolder, model: source.model, thinkingLevel: source.thinkingLevel,
+      project: source.project, noFolder: source.noFolder, model: source.model, thinkingLevel: source.thinkingLevel, ...speedField(source.speed),
       createdAt: Date.now(), updatedAt: Date.now(),
     };
     const key = `${source.environmentId}\n${source.cwd}`;

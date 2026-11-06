@@ -12,7 +12,7 @@ const CURSOR_KEY_ID = 'sdk:cursor';
 
 const DEFAULT_SETTINGS = {
   providers: [],
-  defaults: { model: null, thinkingLevel: 'medium', environmentId: 'local', subagents: 'limited' },
+  defaults: { model: null, thinkingLevel: 'medium', speed: 'standard', environmentId: 'local', subagents: 'limited' },
   environments: {},
   customHosts: [],
   recentEnvironments: [],

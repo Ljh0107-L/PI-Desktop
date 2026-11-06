@@ -100,9 +100,10 @@ export async function checkReading({ app, page, id }) {
     await send([{ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: 1, toolCall: { ...call, id: 'second-reading-call' } } }]);
     assert.equal(await page.locator('.work-body .step-markdown', { hasText: 'A thought to inspect' }).count(), 1);
     await send([{ type: 'message_end', message: { ...thinking, content: [{ type: 'text', text: 'Untimed history' }], usage: { output: 10 } } }]);
-    // Without source timing the call gets its own estimate (or none), never the previous call's speed.
-    assert.notEqual(await page.locator('.usage-speed-value b').innerText(), '~180', 'untimed call must not inherit a previous speed');
-    assert.ok(['Generation (estimated)', 'Speed unavailable'].includes(await page.locator('.usage-speed-kind').innerText()));
+    // A 10-token reply can't be timed: the card keeps the model's last measured generation, and says so.
+    assert.equal(await page.locator('.usage-speed-value b').innerText(), '~180', 'a too-short reply shows the earlier measured speed');
+    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Generation');
+    assert.match(await page.locator('.usage-speed-metric').getAttribute('title'), /From an earlier reply of this model/);
 
     step('hidden reasoning uses answer-only generation');
     const answerWindow = { first: stamp + 4000, last: stamp + 5000, chars: 400, deltas: 3, weight: 100, firstWeight: 10 };
@@ -113,11 +114,13 @@ export async function checkReading({ app, page, id }) {
     assert.equal(await page.locator('.usage-speed-value b').innerText(), '~90.0', 'answer TPS uses (500 − 400) × 90%, not all 500 billed output tokens');
     assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Answer generation');
 
-    step('hidden reasoning without first-answer-chunk evidence is estimated');
+    step('a reply with incomplete timing yields to the measured one before it');
     await send([{ type: 'message_end', message: { ...hiddenAnswer, timestamp: stamp + 5,
       __timing: { ...hiddenAnswer.__timing, answer: { ...answerWindow, firstWeight: undefined } } } }]);
-    assert.equal(await page.locator('.usage-speed-value b').innerText(), '~83.3', 'incomplete answer timing estimates all 500 output tokens ÷ the 6 s response, marked as an estimate');
-    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Generation (estimated)');
+    // Its own speed would only be estimated (500 tokens ÷ the 6 s response): the card keeps the measured one.
+    assert.equal(await page.locator('.usage-speed-value b').innerText(), '~90.0', 'the measured answer generation of the reply before');
+    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Answer generation');
+    assert.match(await page.locator('.usage-speed-metric').getAttribute('title'), /From an earlier reply of this model/);
     assert.equal(await page.locator('.usage').getByText('Request avg', { exact: true }).count(), 0);
 
     step('LaTeX math renders with its fonts');

@@ -342,7 +342,7 @@ test('summary reasoning with unknown reasoning usage estimates answer tokens, no
   assert.equal(usage.speedScope, 'answer'); assert.equal(usage.speedTokensEstimated, true);
 });
 
-test('answer output resumed after summarized or redacted thinking has no numeric TPS', () => {
+test('answer output resumed after summarized or redacted thinking has no measured TPS', () => {
   for (const kind of ['summary', 'native-summary', 'redacted']) {
     for (const resumedType of ['text_delta', 'toolcall_delta']) {
       const f = fixture(), message = { ...(kind === 'native-summary' ? nativeAnthropic() : msg()), durationMs: 600000, content: [
@@ -366,14 +366,16 @@ test('answer output resumed after summarized or redacted thinking has no numeric
       assert.equal(result.__timing.answer.interrupted, true);
       assert.equal(result.__timing.answer.last - result.__timing.answer.first, 200000);
       assert.equal(result.__timing.interrupted, undefined, 'the root stream is not an answer-only sample');
-      // An interrupted answer window is never measured; the speed is a whole-response estimate.
-      assert.equal(usage.speedBasis, 'response'); assert.equal(usage.genMs, 600000);
+      // An interrupted answer window is never measured. The speed is an estimate: from Anthropic's
+      // content block, which marked when output began, else over the whole response.
+      const basis = kind === 'native-summary' ? 'start' : 'response';
+      assert.equal(usage.speedBasis, basis); assert.equal(usage.genMs, kind === 'native-summary' ? 200000 : 600000);
       assert.equal(usage.output, 180); assert.equal(usage.reasoning, 80);
       assert.equal(speedDisplay(usage).label, 'Generation (estimated)');
       const persisted = JSON.parse(JSON.stringify(result));
       assert.equal(persisted.__timing.answer.interrupted, true);
-      assert.equal(usageOf(fromHistory([persisted]).messages).speedBasis, 'response');
-      assert.equal(usageOf(applyEvent(emptyTranscript(), { type: 'message_end', message: persisted }).messages).speedBasis, 'response');
+      assert.equal(usageOf(fromHistory([persisted]).messages).speedBasis, basis);
+      assert.equal(usageOf(applyEvent(emptyTranscript(), { type: 'message_end', message: persisted }).messages).speedBasis, basis);
     }
   }
 });
@@ -496,4 +498,29 @@ test('turn/session resets and replacing an unfinished call discard all counters 
     assert.deepEqual(result.__timing.answer, { first: null, last: null, chars: 0, deltas: 0, weight: 0, firstWeight: 0 });
     assert.equal(usageOf([result]).speedBasis, 'response', 'no measured window survives the reset');
   }
+});
+
+test('the bridge records when the provider began its output: the first output item or content block', () => {
+  for (const [api, first, later] of [
+    ['openai-responses', { type: 'response.output_item.added', item: { type: 'reasoning' } }, { type: 'response.output_item.added', item: { type: 'message' } }],
+    ['anthropic-messages', { type: 'content_block_start', content_block: { type: 'thinking', thinking: '' } }, { type: 'content_block_start', content_block: { type: 'text', text: '' } }],
+  ]) {
+    const f = fixture(), message = { ...msg(), api, usage: { output: 500, reasoning: 300 } };
+    f.time(100); f.emit('message_start', { message });
+    f.time(150); raw(f, message, { type: 'response.created' }); // not output yet
+    f.time(400); raw(f, message, first);
+    f.time(3000); raw(f, message, later);
+    delta(f, message, 3000, 'x'.repeat(200)); delta(f, message, 5400, 'x'.repeat(200));
+    const result = finish(f, message, 5500);
+    assert.equal(result.__timing.genStart, 400, api);
+    // The answer streamed long enough to time: its own rate, not the span from the marker.
+    const usage = usageOf([result]);
+    assert.equal(usage.speedBasis, 'generation', api); assert.equal(usage.speedScope, 'answer', api);
+  }
+  // Chat Completions streams reasoning visibly: no marker, the visible window as before.
+  const f = fixture(), message = msg();
+  f.emit('message_start', { message });
+  raw(f, message, { object: 'chat.completion.chunk', choices: [{ delta: { reasoning_content: 'x' } }] });
+  delta(f, message, 1000, 'x'.repeat(200)); delta(f, message, 2000, 'x'.repeat(200));
+  assert.equal(finish(f, message, 2100).__timing.genStart, undefined);
 });

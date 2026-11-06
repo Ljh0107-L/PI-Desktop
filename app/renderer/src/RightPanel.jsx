@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { useResizable } from './ui.jsx';
-import { formatTokens, speedDisplay, usageOf } from './transcript.js';
+import { formatTokens, MIN_SPEED_TOKENS, speedDisplay, speedReply, speedTier, usageOf } from './transcript.js';
 import { useStore } from './store.js';
 import { subagentBatches, visibleSubagentBatches } from './subagent-state.js';
 import { SubagentDetail, SubagentList } from './Subagents.jsx';
@@ -29,11 +29,15 @@ function UsageCard({ transcript }) {
   const lastMessage = messages.at(-1);
   const last = usageOf([lastMessage]);
   const total = usageOf(transcript.messages);
+  // Speed: the latest reply long enough to time. A few-token reply after a tool call is noise.
+  const speedMessage = speedReply(messages);
+  const timed = speedMessage === lastMessage ? last : usageOf([speedMessage]);
   // Compare like with like: no mixing providers/models, answer-only/full generation scopes,
   // or estimated and reported token numerators in one unlabelled trend.
-  const recent = messages.slice(-14).filter(m => m.provider === lastMessage.provider && (m.responseModel ?? m.model) === (lastMessage.responseModel ?? lastMessage.model))
-    .map(m => usageOf([m])).filter(u => u.tps != null && u.speedBasis === last.speedBasis && u.speedScope === last.speedScope && u.speedTokensEstimated === last.speedTokensEstimated).map(u => u.tps);
-  const speed = speedDisplay(last); // Missing timing must not resurrect the previous call's speed.
+  const recent = messages.slice(-14).filter(m => m.provider === speedMessage.provider && (m.responseModel ?? m.model) === (speedMessage.responseModel ?? speedMessage.model) && (m.usage?.output ?? 0) >= MIN_SPEED_TOKENS)
+    .map(m => usageOf([m])).filter(u => u.tps != null && u.speedBasis === timed.speedBasis && u.speedScope === timed.speedScope && u.speedTokensEstimated === timed.speedTokensEstimated).map(u => u.tps);
+  const speed = speedDisplay(timed, { earlier: speedMessage !== lastMessage });
+  const tier = speedTier(speedMessage);
   const peak = Math.max(...recent, 1);
   const rows = [
     ['Input', last.input + last.cacheWrite, total.input + total.cacheWrite],
@@ -47,7 +51,7 @@ function UsageCard({ transcript }) {
         <div className="usage-speed">
           <div className="usage-speed-metric" title={speed.title}>
             <div className="usage-speed-value"><b>{speed.value}</b><span>tok/s</span></div>
-            <span className="usage-speed-kind">{speed.label}</span>
+            <span className="usage-speed-kind">{speed.label}{tier && <span className={`usage-speed-tier ${tier.slower ? 'slower' : ''}`} title={tier.title}>{tier.label}</span>}</span>
           </div>
           <div className="spark" aria-hidden="true">{recent.map((v, i) => <span key={i} style={{ height: `${Math.max(8, v / peak * 100)}%` }} />)}</div>
         </div>

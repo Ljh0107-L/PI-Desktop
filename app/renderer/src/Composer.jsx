@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
-import { EffortTrigger, MenuItem, MenuSection, Modal, Spinner, Trigger, baseName, envIcon, shortPath } from './ui.jsx';
+import { EffortTrigger, MenuItem, MenuSection, Modal, SpeedTrigger, Spinner, Trigger, baseName, envIcon, shortPath } from './ui.jsx';
+import { effectiveSpeed } from '../../../agent/pidesk-speed.mjs';
 import { api, captureComposerDraft, clearQueued, defaultFolder, getState, notify, openSettings, recoverComposerDraft, restoreComposerDraft, setComposerDraft, setDraft, setEnvironments, takeComposerDraft, useStore } from './store.js';
 import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerDraft as takeDraft, restoreComposerDraft as restoreDraft, recoverComposerDraft as recoverDraft } from './composer-draft.js';
 import { cachedDir, listDir, prefetchDir } from './dirs.js';
@@ -390,7 +391,15 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
 const shortError = (message = '', label) => /disk .* is full/i.test(message) ? `${label}: disk full`
   : /could not connect/i.test(message) ? `Can’t reach ${label}` : `${label} unavailable`;
 
-// The row under the composer: environment + folder on the left (new sessions), model / effort on the right.
+// Faster processing where the model's provider sells it (agent/pidesk-speed.mjs), priced per reply.
+const SPEED_CHOICES = {
+  standard: { label: 'Standard', detail: 'The usual speed and price' },
+  fast: { label: 'Fast', detail: 'Faster output at 2× the price' },
+  ultrafast: { label: 'Ultrafast', detail: 'The fastest output, at 6× the price' },
+};
+const SPEED_NOTE = 'Applies to this conversation and its agents. Changing it can miss the prompt cache once.';
+
+// The row under the composer: environment + folder on the left (new sessions), model / speed / effort on the right.
 export function ComposerBar({ session }) {
   const draft = useStore(s => s.draft);
   const catalog = useStore(s => s.catalog);
@@ -403,6 +412,7 @@ export function ComposerBar({ session }) {
   const env = environments.find(e => e.id === environmentId) ?? { id: environmentId, label: session?.environmentLabel ?? 'This computer', kind: environmentId?.startsWith('ssh:') ? 'ssh' : 'local' };
   const model = isNew ? draft.model : session.model;
   const effort = isNew ? draft.thinkingLevel : session.thinkingLevel;
+  const speed = (isNew ? draft.speed : session.speed) ?? 'standard';
   const cwd = isNew ? draft.cwd : session.cwd;
   const modelInfo = catalog.find(m => m.provider === model?.provider && m.id === model?.id);
   const modelTitle = model ? `${model.provider}/${model.id}` : undefined;
@@ -414,6 +424,8 @@ export function ComposerBar({ session }) {
   };
   const changeModel = m => isNew ? setDraft({ model: m }) : api('setModel', session.id, m.provider, m.id).catch(e => notify(e.message, 'error'));
   const changeEffort = l => isNew ? setDraft({ thinkingLevel: l }) : api('setThinking', session.id, l).catch(e => notify(e.message, 'error'));
+  const changeSpeed = s => isNew ? setDraft({ speed: s }) : api('setSpeed', session.id, s).catch(e => notify(e.message, 'error'));
+  const speeds = modelInfo?.speeds ?? [];
 
   return (
     <div className="composer-bar">
@@ -437,6 +449,7 @@ export function ComposerBar({ session }) {
               <span className="strong">{modelLabel(model, catalog)}</span>
             </Trigger>
           : <button type="button" className="trigger attention" onClick={() => openSettings(true, 'providers')}><Icon name="key" size={15} /><span>Add a model</span></button>}
+        {speeds.length > 1 && <SpeedTrigger speeds={speeds.map(value => ({ value, ...SPEED_CHOICES[value] }))} value={effectiveSpeed(speed, speeds)} onChange={changeSpeed} note={SPEED_NOTE} />}
         {modelInfo?.reasoning !== false && <EffortTrigger levels={effortsFor(modelInfo).map(level => ({ value: level, label: effortLabel(level) }))} value={effort} onChange={changeEffort} />}
       </div>
       {browsing && <RemoteBrowser environmentId={environmentId} start={cwd ?? undefined} onPick={path => setDraft({ cwd: path })} onClose={() => setBrowsing(false)} />}
