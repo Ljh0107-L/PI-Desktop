@@ -9,7 +9,7 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-export const EXTENSION_FILES = ['pidesk-speed.mjs', 'pidesk-subagent.mjs', 'pidesk-bridge.js'];
+export const EXTENSION_FILES = ['pidesk-speed.mjs', 'pidesk-ultra.mjs', 'pidesk-subagent.mjs', 'pidesk-bridge.js'];
 // Left by versions with the (removed) Cursor CLI engine.
 export const OBSOLETE_FILES = ['cursor-acp.mjs', 'pidesk-cursor.mjs'];
 export const EXTENSION_PACKAGE = '{"private":true}\n';

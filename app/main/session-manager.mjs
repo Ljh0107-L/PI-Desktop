@@ -167,7 +167,7 @@ export class SessionManager extends EventEmitter {
   }
   // Desktop settings a Pi applies itself (Settings → Subagents, the conversation's speed): in its boot
   // record, then by command whenever they changed or the Pi started without them.
-  bootConfig(record) { return { subagents: this.store.settings.defaults?.subagents ?? 'limited', speed: record?.speed ?? 'standard' }; }
+  bootConfig(record) { return { subagents: this.store.settings.defaults?.subagents ?? 'limited', speed: record?.speed ?? 'standard', ultra: !!record?.ultra }; }
   configChanged() {
     for (const [id, runtime] of this.runtimes) if (runtime.status === 'connected') this.#syncConfig(runtime, this.#recordOf(id)).catch(() => {});
   }
@@ -178,6 +178,33 @@ export class SessionManager extends EventEmitter {
     if (!session || runtime.configKey === key) return;
     await session.prompt(`/pidesk-config ${Buffer.from(key).toString('base64')}`);
     if (runtime.session === session) runtime.configKey = key;
+  }
+  // The model and effort chosen for this conversation, made true in its Pi: when it attaches (one that
+  // kept running may have missed a change), after each change and before each prompt. One change at a
+  // time and the effort after the model, because Pi resets the effort when the model changes. What the
+  // Pi has is tracked in runtime.applied, so a prompt with nothing to change costs no request.
+  #applyModel(record, runtime) {
+    const session = runtime?.session;
+    if (!session) return Promise.resolve();
+    const run = async () => {
+      if (runtime.session !== session) return;
+      let applied = runtime.applied ?? {};
+      const want = record.model;
+      if (want?.provider && want.id && (applied.model?.provider !== want.provider || applied.model?.id !== want.id)) {
+        await this.#syncProviders(runtime);
+        await session.setModel(want.provider, want.id);
+        applied = { model: { provider: want.provider, id: want.id } };
+        if (runtime.session === session) runtime.applied = applied;
+      }
+      if (record.thinkingLevel && applied.thinkingLevel !== record.thinkingLevel) {
+        await session.request('set_thinking_level', { level: record.thinkingLevel });
+        applied = { ...applied, thinkingLevel: record.thinkingLevel };
+      }
+      if (runtime.session === session) runtime.applied = applied;
+    };
+    const queued = (runtime.applying ?? Promise.resolve()).catch(() => {}).then(run);
+    runtime.applying = queued;
+    return queued;
   }
   async #syncProviders(runtime) {
     const session = runtime?.session;
@@ -439,7 +466,7 @@ export class SessionManager extends EventEmitter {
     if (result?.cancelled) throw new Error('Moving the pre-warmed Pi was cancelled.');
   }
 
-  async create({ environmentId, cwd: chosen, model, thinkingLevel, speed, prompt }) {
+  async create({ environmentId, cwd: chosen, model, thinkingLevel, speed, ultra, prompt }) {
     const env = this.env(environmentId);
     const noFolder = !chosen;
     const cwd = noFolder ? await this.#projectlessDir(env, prompt) : chosen;
@@ -452,10 +479,10 @@ export class SessionManager extends EventEmitter {
     if (spare) {
       this.spares.delete(spareKey);
       clearTimeout(spare.timer);
-      try { return await this.#adopt(spare.record, fields, { model, thinkingLevel, speed }); }
+      try { return await this.#adopt(spare.record, fields, { model, thinkingLevel, speed, ultra }); }
       catch { await this.#stopSpare(spare); } // the warm Pi failed or could not move: start a fresh one below
     }
-    const record = { id: randomUUID(), ...fields, model, thinkingLevel: thinkingLevel ?? 'medium', ...speedField(speed), createdAt: Date.now(), updatedAt: Date.now() };
+    const record = { id: randomUUID(), ...fields, model, thinkingLevel: thinkingLevel ?? 'medium', ...speedField(speed), ...(ultra ? { ultra: true } : {}), createdAt: Date.now(), updatedAt: Date.now() };
     this.#add(record);
     await this.ensureStarted(record.id);
     return this.#view(record);
@@ -468,28 +495,26 @@ export class SessionManager extends EventEmitter {
   }
   // Take over a pre-warmed Pi. No folder: it runs in the root, so it first moves into the conversation's
   // directory; that starts a fresh session there, so the model and effort are compared against Pi's state.
-  async #adopt(spareRecord, fields, { model, thinkingLevel, speed }) {
+  async #adopt(spareRecord, fields, { model, thinkingLevel, speed, ultra }) {
     const session = await this.ensureStarted(spareRecord.id, spareRecord);
-    let current = { model: spareRecord.model, thinkingLevel: spareRecord.thinkingLevel };
+    let current = {};
     if (fields.noFolder) {
+      // A fresh session in the conversation's directory: what the Pi has now is its own state.
       await this.#moveInto(spareRecord.environmentId, session, fields.cwd);
       current = await session.state();
+      const runtime = this.runtimes.get(spareRecord.id);
+      if (runtime?.session === session) runtime.applied = { model: current.model ? { provider: current.model.provider, id: current.model.id } : null, thinkingLevel: current.thinkingLevel };
     }
     const record = Object.assign(spareRecord, fields, { createdAt: Date.now(), updatedAt: Date.now() });
     delete record.spare;
     if (fields.noFolder) Object.assign(record, { piSessionFile: current.sessionFile, piSessionId: current.sessionId });
     this.#add(record);
-    const wantModel = model ?? record.model;
-    const wantLevel = thinkingLevel ?? record.thinkingLevel;
-    await Promise.all([
-      wantModel && (current.model?.provider !== wantModel.provider || current.model?.id !== wantModel.id)
-        ? session.setModel(wantModel.provider, wantModel.id).catch(error => this.emit('notice', { id: record.id, level: 'warning', message: error.message })) : null,
-      wantLevel && wantLevel !== current.thinkingLevel ? session.request('set_thinking_level', { level: wantLevel }).catch(() => {}) : null,
-    ]);
     // A speed other than the spare's reaches its Pi with the first prompt (#syncConfig).
     const wantSpeed = speedField(speed ?? record.speed);
     if (!wantSpeed.speed) delete record.speed;
-    this.#save(record, { model: wantModel, thinkingLevel: wantLevel, ...wantSpeed });
+    if (ultra) record.ultra = true; else delete record.ultra;
+    this.#save(record, { model: model ?? record.model, thinkingLevel: thinkingLevel ?? record.thinkingLevel, ...wantSpeed });
+    await this.#applyModel(record, this.runtimes.get(record.id)).catch(error => this.emit('notice', { id: record.id, level: 'warning', message: error.message }));
     return this.#view(record);
   }
   #current(record, runtime) { return !runtime.closing && this.runtimes.get(record.id) === runtime; }
@@ -523,8 +548,10 @@ export class SessionManager extends EventEmitter {
       this.#assertCurrent(record, runtime);
       runtime.status = 'connected'; runtime.starting = null; runtime.retry = 0; runtime.lastUsed = Date.now();
       this.#status(record, runtime, { status: 'connected', phase: null, streaming: runtime.streaming });
-      // A Settings edit can land after configuration's last await but before this callback.
+      // A Settings edit, or a model or effort chosen, can land after configuration's last await but
+      // before this callback.
       this.#syncProviders(runtime).catch(() => {});
+      this.#applyModel(record, runtime).catch(() => {});
       return session;
     }).catch(error => {
       runtime.starting = null;
@@ -615,6 +642,7 @@ export class SessionManager extends EventEmitter {
     runtime.autoReconnect = true;
     const state = session.initialState ?? await session.state();
     runtime.streaming = !!state.isStreaming;
+    runtime.applied = { model: state.model ? { provider: state.model.provider, id: state.model.id } : null, thinkingLevel: state.thinkingLevel };
     const info = session.attachInfo;
     const processKey = info?.pid && info?.startedAt ? `${info.pid}:${info.startedAt}` : null;
     const sameProcess = processKey && runtime.providerProcess === processKey;
@@ -642,13 +670,8 @@ export class SessionManager extends EventEmitter {
       await this.#syncConfig(runtime, record).catch(() => {});
       session.prompt('/goal').catch(() => {}); // re-publish the goal of a Pi that kept running without us
     }
-    if (created) {
-      // RPC commands are asynchronous: thinking must follow a model switch, otherwise
-      // Pi can clamp it against the old model. Matching state needs no mutation at all.
-      const modelChanged = record.model && (state.model?.provider !== record.model.provider || state.model?.id !== record.model.id);
-      if (modelChanged) await session.setModel(record.model.provider, record.model.id).catch(error => { if (!record.spare && this.#current(record, runtime)) this.emit('notice', { id: record.id, level: 'warning', message: error.message }); });
-      if (record.thinkingLevel && (modelChanged || state.thinkingLevel !== record.thinkingLevel)) await session.request('set_thinking_level', { level: record.thinkingLevel }).catch(() => {});
-    }
+    // Also a Pi that kept running while the model or effort was changed here: it still has the old ones.
+    await this.#applyModel(record, runtime).catch(error => { if (!record.spare && this.#current(record, runtime)) this.emit('notice', { id: record.id, level: 'warning', message: error.message }); });
     this.#assertCurrent(record, runtime);
     this.#save(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId });
     return session;
@@ -698,6 +721,13 @@ export class SessionManager extends EventEmitter {
       }
       return;
     }
+    if (request.method === 'setStatus' && request.statusKey === 'pidesk-ultra') {
+      const before = runtime.ultra?.task?.status;
+      try { runtime.ultra = request.statusText ? JSON.parse(request.statusText) : null; } catch { runtime.ultra = null; }
+      const after = runtime.ultra?.task?.status;
+      this.emit('ultra', { id: record.id, ultra: runtime.ultra, ...(before === 'active' && after && after !== 'active' ? { ended: after, title: record.title } : {}), local: record.environmentId === 'local' });
+      return;
+    }
     if (request.method === 'setStatus' && request.statusKey === 'pidesk-goal') {
       try { runtime.goal = request.statusText ? JSON.parse(request.statusText) : null; } catch { runtime.goal = null; }
       this.emit('goal', { id: record.id, goal: runtime.goal });
@@ -725,12 +755,15 @@ export class SessionManager extends EventEmitter {
     let session = await this.ensureStarted(id);
     let runtime = this.runtimes.get(id);
     let interrupted = false;
-    if (interrupt && runtime?.streaming) {
+    // While an Ultra task runs, a message joins it (Pi steers it in before the next model call); an
+    // interruption would read as Stop and pause the task.
+    if (interrupt && runtime?.streaming && runtime.ultra?.task?.status !== 'active') {
       ({ session, runtime } = await this.#interruptForPrompt(id, session, runtime));
       interrupted = true;
     }
     await this.#syncProviders(this.runtimes.get(id));
     await this.#syncConfig(this.runtimes.get(id), record).catch(() => {});
+    await this.#applyModel(record, this.runtimes.get(id)).catch(error => this.emit('notice', { id, level: 'warning', message: error.message }));
     // The first message names the conversation at once (its first line), and the model then suggests a
     // better title, as Claude does; a title the user set by hand is never replaced.
     let nameIt = null;
@@ -871,19 +904,31 @@ export class SessionManager extends EventEmitter {
         return;
       }
     }
-    if (runtime?.status === 'connected') {
-      await this.#syncProviders(runtime).catch(() => {});
-      await runtime.session.setModel(provider, modelId);
+    const previous = record.model;
+    this.#save(record, { model: { provider, id: modelId } }); // the composer shows it at once
+    if (runtime?.status !== 'connected') return; // applied when its Pi attaches or before the next prompt
+    try { await this.#applyModel(record, runtime); }
+    catch (error) {
+      if (record.model?.provider === provider && record.model?.id === modelId) this.#save(record, { model: previous });
+      throw error;
     }
-    this.#save(record, { model: { provider, id: modelId } });
   }
 
   async setThinking(id, level) {
     const record = this.record(id);
-    const runtime = this.runtimes.get(id);
-    if (runtime?.status === 'connected') await runtime.session.request('set_thinking_level', { level });
     this.#save(record, { thinkingLevel: level });
+    const runtime = this.runtimes.get(id);
+    if (runtime?.status === 'connected') await this.#applyModel(record, runtime);
   }
+  // Ultra mode (the composer's Ultra switch): Pi works on each request on its own until it is done.
+  async setUltra(id, on) {
+    const record = this.record(id);
+    if (on) record.ultra = true; else delete record.ultra;
+    this.#save(record, {});
+    const runtime = this.runtimes.get(id);
+    if (runtime?.status === 'connected') await this.#syncConfig(runtime, record);
+  }
+  ultra(id) { return this.runtimes.get(id)?.ultra ?? null; }
   // Fast or Ultrafast processing (the composer's Speed). A running Pi applies it from its next request.
   async setSpeed(id, speed) {
     if (!SPEEDS.includes(speed)) throw new Error(`Unknown speed: ${speed}`);
@@ -963,7 +1008,7 @@ export class SessionManager extends EventEmitter {
     return this.prewarm({ environmentId: record.environmentId, cwd: record.cwd, model: record.model, thinkingLevel: record.thinkingLevel, speed: record.speed, noFolder: record.noFolder });
   }
   #idle(runtime) {
-    return runtime.status === 'connected' && !runtime.streaming && !runtime.starting && !runtime.questions.size && runtime.goal?.status !== 'active'
+    return runtime.status === 'connected' && !runtime.streaming && !runtime.starting && !runtime.questions.size && runtime.goal?.status !== 'active' && runtime.ultra?.task?.status !== 'active'
       && ![...(runtime.agents?.values() ?? [])].some(agent => ACTIVE_AGENT.has(agent.status)); // background agents keep it busy
   }
   // Stop Pis that are idle and either unused for IDLE_STOP_MS or beyond MAX_IDLE_PER_ENV on their machine.
@@ -1061,8 +1106,9 @@ export class SessionManager extends EventEmitter {
       const state = await session.state();
       if (!state.sessionFile || state.sessionFile === source.piSessionFile) throw new Error('Fork did not create a separate session file.');
       session.request('set_session_name', { name: record.title }).catch(() => {});
-      if (source.model && (state.model?.provider !== source.model.provider || state.model?.id !== source.model.id)) await session.setModel(source.model.provider, source.model.id).catch(() => {});
-      if (source.thinkingLevel && state.thinkingLevel !== source.thinkingLevel) await session.request('set_thinking_level', { level: source.thinkingLevel }).catch(() => {});
+      const runtime = this.runtimes.get(record.id);
+      if (runtime?.session === session) runtime.applied = { model: state.model ? { provider: state.model.provider, id: state.model.id } : null, thinkingLevel: state.thinkingLevel };
+      await this.#applyModel(record, runtime).catch(() => {});
       Object.assign(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId });
       delete record.spare;
       this.#add(record);

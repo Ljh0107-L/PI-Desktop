@@ -57,11 +57,11 @@ export function Popover({ anchor, open, onClose, children, placement = 'top-star
   );
 }
 
-export function MenuItem({ icon, label, detail, checked, onClick, trailing, disabled, title, className = '' }) {
+export function MenuItem({ icon, label, checked, onClick, trailing, disabled, title, className = '' }) {
   return (
     <button type="button" className={`menu-item ${className}`} onClick={onClick} disabled={disabled} title={title}>
       {icon && <span className="menu-icon">{typeof icon === 'string' ? <Icon name={icon} size={17} /> : icon}</span>}
-      <span className="menu-text"><span className="menu-label">{label}</span>{detail && <span className="menu-detail">{detail}</span>}</span>
+      <span className="menu-text"><span className="menu-label">{label}</span></span>
       {trailing}
       {checked && <Icon name="check" size={17} className="menu-check" />}
     </button>
@@ -90,13 +90,12 @@ export function EffortTrigger({ levels, value, onChange, disabled, title }) {
   </Trigger>;
 }
 
-// Fast / Ultrafast processing under the composer, for models that offer it. `speeds`: [{ value, label, detail }].
-export function SpeedTrigger({ speeds, value, onChange, note }) {
+// Fast / Ultrafast processing under the composer, for models that offer it. `speeds`: [{ value, label }].
+export function SpeedTrigger({ speeds, value, onChange }) {
   const current = speeds.find(speed => speed.value === value) ?? speeds[0];
-  return <Trigger width={250} label="Speed" className={`speed-trigger ${value !== 'standard' ? 'on' : ''}`} title={`Speed: ${current.label}`}
+  return <Trigger width={200} label="Speed" className={`speed-trigger ${value !== 'standard' ? 'on' : ''}`} title={`Speed: ${current.label}`}
     menu={close => <MenuSection title="Speed">
-      {speeds.map(speed => <MenuItem key={speed.value} label={speed.label} detail={speed.detail} checked={value === speed.value} onClick={() => { onChange(speed.value); close(); }} />)}
-      {note && <div className="menu-note">{note}</div>}
+      {speeds.map(speed => <MenuItem key={speed.value} label={speed.label} checked={value === speed.value} onClick={() => { onChange(speed.value); close(); }} />)}
     </MenuSection>}>
     <Icon name="bolt" size={14} />{value !== 'standard' && <span>{current.label}</span>}
   </Trigger>;

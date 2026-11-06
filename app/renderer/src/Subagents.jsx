@@ -32,12 +32,10 @@ export function SubagentSummary({ sessionId, call, tool }) {
   const batch = subagentBatch(call, tool, latest);
   const tasks = visibleSubagentTasks(batch.tasks, cleared);
   const wasCleared = batch.tasks.length > 0 && !tasks.length;
-  const working = batch.background && tasks.some(isSubagentActive);
   return <section className="subagent-summary" data-call-id={call.id}>
     <button className="subagent-summary-head" disabled={wasCleared} onClick={() => openSubagent(sessionId, call.id)}>
       <Icon name="fork" size={16} /><b>Subagents</b><span>{wasCleared ? 'Task history cleared' : subagentSummary(tasks)}</span>{!wasCleared && <Icon name="chevronRight" size={15} />}
     </button>
-    {working && <div className="subagent-summary-hint">Working in the background. Pi continues when each one reports.</div>}
     {tasks.map(task => <TaskRow key={task.key} task={task} onClick={() => openSubagent(sessionId, call.id, task.index)} />)}
   </section>;
 }

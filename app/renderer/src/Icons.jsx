@@ -4,7 +4,7 @@ import {
   Archive, ArrowLeft, ArrowUp, Brain, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, CornerDownLeft, Ellipsis,
   FilePen, FoldVertical, Folder, GitBranch, Globe, KeyRound, Laptop, ListChecks, PanelLeft, PanelRight, Pencil, Plus,
   RefreshCw, Search, Server, Settings, ShieldAlert, ShieldCheck, Sparkles, SquareTerminal, StickyNote, Trash2,
-  TriangleAlert, Unplug, Wifi, X, MessageCircleQuestion, Gauge, Database, ArrowDown, Timer, FileText, FileCode, FileImage, ListTree, ExternalLink, Code, File, Maximize2, Minimize2, Paperclip, Target, GitFork, FileDiff, Download, MessageSquare, Terminal, Wrench, Zap,
+  TriangleAlert, Unplug, Wifi, X, MessageCircleQuestion, Gauge, Database, ArrowDown, Timer, FileText, FileCode, FileImage, ListTree, ExternalLink, Code, File, Maximize2, Minimize2, Paperclip, Target, GitFork, FileDiff, Download, MessageSquare, Terminal, Wrench, Zap, Infinity as InfinityIcon,
 } from 'lucide-react';
 
 const LUCIDE = {
@@ -14,7 +14,7 @@ const LUCIDE = {
   file: StickyNote, fileEdit: FilePen, x: X, alert: TriangleAlert, brain: Brain, refresh: RefreshCw, server: Server,
   key: KeyRound, trash: Trash2, edit: Pencil, globe: Globe, more: Ellipsis, archive: Archive, back: ChevronLeft,
   forward: ChevronRight, branch: GitBranch, enter: CornerDownLeft, compact: FoldVertical, copy: Copy, list: ListChecks,
-  arrowLeft: ArrowLeft, unplug: Unplug, wifi: Wifi, question: MessageCircleQuestion, gauge: Gauge, database: Database, arrowDown: ArrowDown, timer: Timer, fileText: FileText, fileCode: FileCode, fileImage: FileImage, listTree: ListTree, externalLink: ExternalLink, code: Code, fileAny: File, maximize: Maximize2, minimize: Minimize2, paperclip: Paperclip, target: Target, fork: GitFork, fileDiff: FileDiff, terminalPanel: SquareTerminal, download: Download, chat: MessageSquare, console: Terminal, wrench: Wrench, bolt: Zap,
+  arrowLeft: ArrowLeft, unplug: Unplug, wifi: Wifi, question: MessageCircleQuestion, gauge: Gauge, database: Database, arrowDown: ArrowDown, timer: Timer, fileText: FileText, fileCode: FileCode, fileImage: FileImage, listTree: ListTree, externalLink: ExternalLink, code: Code, fileAny: File, maximize: Maximize2, minimize: Minimize2, paperclip: Paperclip, target: Target, fork: GitFork, fileDiff: FileDiff, terminalPanel: SquareTerminal, download: Download, chat: MessageSquare, console: Terminal, wrench: Wrench, bolt: Zap, infinity: InfinityIcon,
 };
 
 const GLYPHS = {

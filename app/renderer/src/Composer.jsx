@@ -17,8 +17,8 @@ const effortsFor = model => {
 
 // ---------------------------------------------------------------- environment menu (Claude-style, with a "More" flyout)
 function EnvItem({ env, value, onPick, status }) {
-  return <MenuItem icon={envIcon(env)} label={env.label} detail={status?.status === 'preparing' ? status.message : status?.status === 'error' ? 'Setup failed — see Settings' : null}
-    checked={value === env.id} onClick={() => onPick(env.id)} trailing={status?.status === 'preparing' ? <Spinner /> : null} />;
+  return <MenuItem icon={envIcon(env)} label={env.label} title={status?.status === 'preparing' ? status.message : status?.status === 'error' ? `Setup failed: ${status.message ?? 'see Settings'}` : undefined}
+    checked={value === env.id} onClick={() => onPick(env.id)} trailing={status?.status === 'preparing' ? <Spinner /> : status?.status === 'error' ? <Icon name="alert" size={14} className="menu-alert" /> : null} />;
 }
 
 export function EnvironmentMenu({ value, onChange, close }) {
@@ -143,7 +143,7 @@ export function ModelMenu({ value, onChange, close }) {
         {!catalog.length && !catalogError && <div className="menu-empty">No models yet — add a provider and its API key.</div>}
         {groups.map(([provider, models]) => (
           <MenuSection key={provider} title={providerName(provider)}>
-            {models.map(m => <MenuItem key={m.id} label={m.name} detail={m.name !== m.id ? m.id : null} checked={value?.provider === m.provider && value?.id === m.id}
+            {models.map(m => <MenuItem key={m.id} label={m.name} title={`${m.provider}/${m.id}`} checked={value?.provider === m.provider && value?.id === m.id}
               onClick={() => { onChange({ provider: m.provider, id: m.id }); close(); }} />)}
           </MenuSection>
         ))}
@@ -257,8 +257,8 @@ function SlashMenu({ items, index, onPick }) {
   return (
     <div className="slash-menu" ref={ref} role="listbox">
       {items.map((c, i) => (
-        <button key={c.name} type="button" role="option" aria-selected={i === index} className={`slash-item ${i === index ? 'on' : ''}`} onMouseDown={e => { e.preventDefault(); onPick(c); }}>
-          <span className="slash-name">/{c.name}</span><span className="slash-desc">{c.description}</span>
+        <button key={c.name} type="button" role="option" aria-selected={i === index} className={`slash-item ${i === index ? 'on' : ''}`} title={c.description || undefined} onMouseDown={e => { e.preventDefault(); onPick(c); }}>
+          <span className="slash-name">/{c.name}</span>
         </button>
       ))}
     </div>
@@ -392,12 +392,7 @@ const shortError = (message = '', label) => /disk .* is full/i.test(message) ? `
   : /could not connect/i.test(message) ? `Can’t reach ${label}` : `${label} unavailable`;
 
 // Faster processing where the model's provider sells it (agent/pidesk-speed.mjs), priced per reply.
-const SPEED_CHOICES = {
-  standard: { label: 'Standard', detail: 'The usual speed and price' },
-  fast: { label: 'Fast', detail: 'Faster output at 2× the price' },
-  ultrafast: { label: 'Ultrafast', detail: 'The fastest output, at 6× the price' },
-};
-const SPEED_NOTE = 'Applies to this conversation and its agents. Changing it can miss the prompt cache once.';
+const SPEED_LABELS = { standard: 'Standard', fast: 'Fast', ultrafast: 'Ultrafast' };
 
 // The row under the composer: environment + folder on the left (new sessions), model / speed / effort on the right.
 export function ComposerBar({ session }) {
@@ -425,6 +420,8 @@ export function ComposerBar({ session }) {
   const changeModel = m => isNew ? setDraft({ model: m }) : api('setModel', session.id, m.provider, m.id).catch(e => notify(e.message, 'error'));
   const changeEffort = l => isNew ? setDraft({ thinkingLevel: l }) : api('setThinking', session.id, l).catch(e => notify(e.message, 'error'));
   const changeSpeed = s => isNew ? setDraft({ speed: s }) : api('setSpeed', session.id, s).catch(e => notify(e.message, 'error'));
+  const ultraOn = isNew ? !!draft.ultra : !!session.ultra;
+  const toggleUltra = () => isNew ? setDraft({ ultra: !ultraOn }) : api('setUltra', session.id, !ultraOn).catch(e => notify(e.message, 'error'));
   const speeds = modelInfo?.speeds ?? [];
 
   return (
@@ -444,12 +441,16 @@ export function ComposerBar({ session }) {
         </>}
       </div>
       <div className="composer-bar-right">
+        <button type="button" className={`trigger ultra-trigger ${ultraOn ? 'on' : ''}`} aria-pressed={ultraOn} onClick={toggleUltra}
+          title={ultraOn ? 'Ultra is on: Pi works on each request on its own until it is done' : 'Ultra: hand Pi a request and let it work on its own until it is done'}>
+          <Icon name="infinity" size={16} /><span>Ultra</span>
+        </button>
         {catalog.length || model
           ? <Trigger width={320} label="Model" title={modelTitle} className="model-trigger" menu={close => <ModelMenu value={model} onChange={changeModel} close={close} />}>
               <span className="strong">{modelLabel(model, catalog)}</span>
             </Trigger>
           : <button type="button" className="trigger attention" onClick={() => openSettings(true, 'providers')}><Icon name="key" size={15} /><span>Add a model</span></button>}
-        {speeds.length > 1 && <SpeedTrigger speeds={speeds.map(value => ({ value, ...SPEED_CHOICES[value] }))} value={effectiveSpeed(speed, speeds)} onChange={changeSpeed} note={SPEED_NOTE} />}
+        {speeds.length > 1 && <SpeedTrigger speeds={speeds.map(value => ({ value, label: SPEED_LABELS[value] }))} value={effectiveSpeed(speed, speeds)} onChange={changeSpeed} />}
         {modelInfo?.reasoning !== false && <EffortTrigger levels={effortsFor(modelInfo).map(level => ({ value: level, label: effortLabel(level) }))} value={effort} onChange={changeEffort} />}
       </div>
       {browsing && <RemoteBrowser environmentId={environmentId} start={cwd ?? undefined} onPick={path => setDraft({ cwd: path })} onClose={() => setBrowsing(false)} />}

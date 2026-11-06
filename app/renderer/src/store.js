@@ -28,6 +28,7 @@ let state = {
   transcripts: {},                          // session id -> transcript
   questions: {},
   goals: {},
+  ultra: {},                                // session id -> { enabled, task } from its Pi (Ultra mode)
   agents: {},                               // session id -> { agent id -> live state from its Pi }
   confirm: null,                            // { title, message, action, run }                                // session id -> { objective, status, turns } | null
   files: {},                                // session id -> { tabs: [path], active }
@@ -43,7 +44,7 @@ let state = {
   paletteOpen: false,
   history: [], future: [],                  // back / forward navigation
   composerDrafts: {},                       // in-memory text/images per conversation; never written to settings
-  draft: { environmentId: 'local', cwd: null, model: null, thinkingLevel: 'medium', speed: 'standard' },
+  draft: { environmentId: 'local', cwd: null, model: null, thinkingLevel: 'medium', speed: 'standard', ultra: false },
 };
 
 const set = patch => { state = { ...state, ...(typeof patch === 'function' ? patch(state) : patch) }; for (const l of listeners) l(); };
@@ -124,6 +125,12 @@ window.pidesk.subscribe(({ channel, payload }) => {
     case 'goal':
       set(s => ({ goals: { ...s.goals, [payload.id]: payload.goal } }));
       break;
+    case 'ultra':
+      set(s => ({ ultra: { ...s.ultra, [payload.id]: payload.ultra } }));
+      break;
+    case 'open-session':
+      openSession(payload.id).catch(() => {});
+      break;
     case 'agents':
       set(s => ({ agents: { ...s.agents, [payload.id]: Object.fromEntries((payload.agents ?? []).map(agent => [agent.id, agent])) } }));
       break;
@@ -173,7 +180,7 @@ export async function bootstrap() {
   set({
     ready: true, settings: boot.settings, environments: boot.environments, sessions: boot.sessions, home: boot.home, piVersion: boot.piVersion,
     questions: Object.fromEntries(boot.sessions.map(s => [s.id, s.pendingQuestions ?? []])),
-    draft: { environmentId: d.environmentId ?? 'local', cwd: defaultFolder(boot.settings, d.environmentId ?? 'local'), model: d.model, thinkingLevel: d.thinkingLevel, speed: d.speed ?? 'standard' },
+    draft: { environmentId: d.environmentId ?? 'local', cwd: defaultFolder(boot.settings, d.environmentId ?? 'local'), model: d.model, thinkingLevel: d.thinkingLevel, speed: d.speed ?? 'standard', ultra: false },
   });
   loadCatalog();
   api('resumeRemote').catch(() => {}); // re-attach SSH sessions still running on their hosts
@@ -318,6 +325,7 @@ export async function openSession(id, { record = true } = {}) {
     setTranscript(id, { ...history, live: current.live, tools: { ...history.tools, ...current.tools } });
     refreshStats(id);
     api('goal', id).then(goal => set(s => ({ goals: { ...s.goals, [id]: goal ?? s.goals[id] ?? null } }))).catch(() => {});
+    api('ultra', id).then(ultra => set(s => ({ ultra: { ...s.ultra, [id]: ultra ?? s.ultra[id] ?? null } }))).catch(() => {});
     api('agents', id).then(list => { if (list?.length) set(s => ({ agents: { ...s.agents, [id]: { ...Object.fromEntries(list.map(agent => [agent.id, agent])), ...s.agents[id] } } })); }).catch(() => {});
   } catch (error) {
     setTranscript(id, { ...transcriptOf(id), loaded: true, error: error.message });
@@ -349,7 +357,8 @@ export async function startSession(text, attachments = []) {
   const pendingId = 'pending';
   set({ view: 'session', activeId: pendingId, transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: [{ role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] } } });
   try {
-    const session = await api('createSession', { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel, speed: draft.speed, prompt: text });
+    const session = await api('createSession', { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel, speed: draft.speed, ultra: draft.ultra, prompt: text });
+    if (draft.ultra) setDraft({ ultra: false }); // each conversation turns Ultra on for itself
     set(s => ({ activeId: session.id, transcripts: { ...s.transcripts, [session.id]: { ...emptyTranscript(), loaded: true }, [pendingId]: undefined }, sessions: s.sessions.some(x => x.id === session.id) ? s.sessions : [session, ...s.sessions] }));
     warnIfNoImages(draft.model, attachments);
     await api('prompt', session.id, text, attachments);

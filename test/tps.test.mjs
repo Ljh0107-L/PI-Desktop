@@ -1,7 +1,7 @@
 // Pure regressions for GitHub CI. No app, model request or live relay required.
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { applyEvent, emptyTranscript, estimateTokens, fromHistory, MIN_SPEED_TOKENS, speedDisplay, speedReply, usageOf } from '../app/renderer/src/transcript.js';
+import { applyEvent, emptyTranscript, estimateTokens, fromHistory, MIN_SPEED_TOKENS, MIN_TIMED_TOKENS, speedDisplay, speedReply, usageOf } from '../app/renderer/src/transcript.js';
 
 const timing = overrides => ({ source: 'agent', complete: true, start: 0, first: 1000, last: 2000, end: 2100,
   chars: 400, deltas: 3, weight: 100, firstWeight: 10, thinkingChars: 0, ...overrides });
@@ -302,4 +302,35 @@ test('the Usage card times the latest reply long enough to time, not a few-token
   assert.equal(speedReply([long, burst]), long);
   const other = message({ timestamp: 4, model: 'other-model', usage: { output: 7 }, __timing: timing({ first: 100, last: 101 }) });
   assert.equal(speedReply([long, other]), other, 'the last model has nothing to time: its own last reply');
+});
+
+// claude-opus-5-5 at Fast on an SSH host (November 2026): "Hello?" got a 38-token reply that streamed in
+// about 150 ms. The card stayed on the first reply's speed for the rest of the conversation.
+test('each reply shows its own speed, also a short one from a fast model', () => {
+  const first = message({ timestamp: 1, usage: { output: 400 }, content: [{ type: 'text', text: 'x'.repeat(1600) }], __timing: timing({ first: 500, last: 8500, end: 8600, chars: 1600 }) });
+  const short = message({ timestamp: 2, usage: { output: 38 }, content: [{ type: 'text', text: '中'.repeat(38) }],
+    __timing: timing({ first: 1000, last: 1146, end: 1150, chars: 38, deltas: 12, weight: 38, firstWeight: 2 }) });
+  assert.equal(speedReply([first, short]), short, 'the last reply, not the earlier long one');
+  const u = usageOf([short]);
+  assert.equal(u.speedBasis, 'generation');
+  assert.ok(Math.abs(u.tps - 36 / 0.146) < 1e-9, `${u.tps}`);
+  // Not timed, so the earlier measured reply stays: a relay's burst (a whole reply within a few ms), a
+  // short window denser than any model streams, and a few-token "done".
+  const burst = message({ timestamp: 3, usage: { output: 38 }, content: [{ type: 'text', text: '中'.repeat(38) }],
+    __timing: timing({ first: 1000, last: 1006, end: 1007, chars: 38, deltas: 12, weight: 38, firstWeight: 2 }) });
+  const dense = message({ timestamp: 4, usage: { output: 100 }, content: [{ type: 'text', text: 'x'.repeat(400) }],
+    __timing: timing({ first: 1000, last: 1080, end: 1090, chars: 400, deltas: 10, weight: 100, firstWeight: 10 }) });
+  const done = message({ timestamp: 5, usage: { output: MIN_TIMED_TOKENS - 6 }, content: [{ type: 'text', text: '已写入。' }],
+    __timing: timing({ first: 1000, last: 1300, end: 1310, chars: 4, deltas: 3, weight: 4, firstWeight: 1 }) });
+  for (const reply of [burst, dense, done]) assert.equal(speedReply([first, short, reply]), short, `after ${reply.timestamp}`);
+});
+
+test('a reply without any reasoning is plain generation, though summarized thinking was requested', () => {
+  const provenance = { provider: 'anthropic', model: 'claude-opus-5-5', thinking: 'summary', thinkingSource: 'request', thinkingDisplay: 'summarized' };
+  const none = usage({ __usageProvenance: provenance, usage: { output: 100, reasoning: 0 } });
+  assert.equal(none.speedScope, 'all'); assert.equal(speedDisplay(none).label, 'Generation');
+  // With reasoning the answer is timed alone, as before.
+  const some = usage({ __usageProvenance: provenance, usage: { output: 100, reasoning: 40 }, content: [{ type: 'thinking', thinking: 'x'.repeat(40) }, { type: 'text', text: 'x'.repeat(400) }],
+    __timing: timing({ answer: answerTiming() }) });
+  assert.equal(some.speedScope, 'answer'); assert.equal(speedDisplay(some).label, 'Answer generation');
 });

@@ -277,8 +277,92 @@ test('a speed chosen while the desktop was away reaches the Pi that kept running
   assert.equal(calls.length, 0);
   await manager.ensureStarted(record.id);
   const configs = calls.filter(call => call.message?.startsWith('/pidesk-config '));
-  assert.deepEqual(configs.map(call => JSON.parse(Buffer.from(call.message.split(' ')[1], 'base64').toString('utf8'))), [{ subagents: 'limited', speed: 'fast' }]);
+  assert.deepEqual(configs.map(call => JSON.parse(Buffer.from(call.message.split(' ')[1], 'base64').toString('utf8'))), [{ subagents: 'limited', speed: 'fast', ultra: false }]);
   assert.ok(calls.indexOf(configs[0]) < calls.findIndex(call => call.message === '/goal'), 'before anything else runs');
+});
+
+// "I switched the model (or speed, or effort) and it kept the old one for a while": a change made while
+// the Pi was starting or reconnecting was only saved, and Pi resets the effort when the model changes.
+test('a model and effort chosen while the Pi kept running reach it when it re-attaches, effort last', async t => {
+  const { manager, dir } = managerFixture(t);
+  const calls = fakeSessions(t, { onStart: session => { session.initialState = { ...session.initialState, model: { provider: 'p', id: 'a' }, thinkingLevel: 'medium' }; } });
+  const record = { id: 'session', environmentId: 'local', cwd: dir, model: { provider: 'p', id: 'a' }, thinkingLevel: 'medium' };
+  manager.store.sessions.push(record);
+  await manager.ensureStarted(record.id);
+  assert.equal(calls.filter(c => ['set_model', 'set_thinking_level'].includes(c.type)).length, 0, 'nothing to change');
+  const runtime = manager.runtimes.get(record.id);
+  runtime.status = 'reconnecting';
+  await manager.setModel(record.id, 'p', 'b');
+  await manager.setThinking(record.id, 'high');
+  assert.deepEqual(record.model, { provider: 'p', id: 'b' }); assert.equal(record.thinkingLevel, 'high');
+  assert.equal(calls.length, 0, 'saved while there is no Pi to tell');
+  await manager.ensureStarted(record.id);
+  assert.deepEqual(calls.filter(c => ['set_model', 'set_thinking_level'].includes(c.type)).map(c => [c.type, c.modelId ?? c.level]), [['set_model', 'b'], ['set_thinking_level', 'high']]);
+});
+
+test('switching models shows the choice at once, sets the effort again, and a refused model is undone', async t => {
+  const { manager, dir } = managerFixture(t);
+  let refuse = false, seen = null;
+  const record = { id: 'session', environmentId: 'local', cwd: dir, model: { provider: 'p', id: 'a' }, thinkingLevel: 'xhigh' };
+  const calls = fakeSessions(t, {
+    onStart: session => { session.initialState = { ...session.initialState, model: { provider: 'p', id: 'a' }, thinkingLevel: 'xhigh' }; },
+    onRequest: async (_session, type) => {
+      if (type !== 'set_model') return;
+      seen = { ...record.model };
+      if (refuse) throw new Error('Model not found: p/c');
+    },
+  });
+  manager.store.sessions.push(record);
+  await manager.ensureStarted(record.id);
+  await manager.setModel(record.id, 'p', 'b');
+  assert.deepEqual(seen, { provider: 'p', id: 'b' }, 'the record (and so the composer) had the new model before Pi answered');
+  assert.deepEqual(calls.filter(c => ['set_model', 'set_thinking_level'].includes(c.type)).map(c => [c.type, c.modelId ?? c.level]), [['set_model', 'b'], ['set_thinking_level', 'xhigh']],
+    'Pi resets the effort for a new model: the chosen one is set again');
+  refuse = true;
+  await assert.rejects(manager.setModel(record.id, 'p', 'c'), /Model not found/);
+  assert.deepEqual(record.model, { provider: 'p', id: 'b' }, 'back to the model Pi has');
+});
+
+test('a prompt first applies a model chosen after the Pi was configured', async t => {
+  const { manager, dir } = managerFixture(t);
+  const calls = fakeSessions(t, { onStart: session => { session.initialState = { ...session.initialState, model: { provider: 'p', id: 'a' }, thinkingLevel: 'medium' }; } });
+  const record = { id: 'session', environmentId: 'local', cwd: dir, model: { provider: 'p', id: 'a' }, thinkingLevel: 'medium', title: 'T' };
+  manager.store.sessions.push(record);
+  await manager.ensureStarted(record.id);
+  record.model = { provider: 'p', id: 'b' }; // chosen in the moment between configuration and "connected"
+  await manager.prompt(record.id, 'hello');
+  const order = calls.filter(c => c.type === 'set_model' || (c.type === 'prompt' && c.message === 'hello')).map(c => c.type);
+  assert.deepEqual(order, ['set_model', 'prompt']);
+});
+
+test('Ultra on the desktop: Pi\'s status, a message joins the running task, and the idle sweep leaves it', async t => {
+  const { manager, dir } = managerFixture(t);
+  const calls = fakeSessions(t);
+  const record = { id: 'session', environmentId: 'local', cwd: dir, title: 'Long job', ultra: true };
+  manager.store.sessions.push(record);
+  await manager.ensureStarted(record.id);
+  const runtime = manager.runtimes.get(record.id);
+  const events = [];
+  manager.on('ultra', e => events.push(e));
+  const status = task => runtime.session.emit('ui', { method: 'setStatus', statusKey: 'pidesk-ultra', statusText: JSON.stringify({ enabled: true, task }) });
+  status({ objective: 'Ship it', status: 'active', startedAt: 1 });
+  assert.equal(manager.ultra(record.id).task.status, 'active');
+  assert.deepEqual(events.map(e => [e.ultra.task.status, e.ended ?? null, e.local]), [['active', null, true]]);
+  // Pi is working on the task: the message is steered in, not an interruption that would read as Stop.
+  runtime.streaming = true;
+  await manager.prompt(record.id, 'Also update the README', [], { interrupt: true });
+  assert.ok(!calls.some(c => c.type === 'abort'), 'no abort');
+  assert.equal(calls.find(c => c.type === 'prompt' && c.message === 'Also update the README')?.streamingBehavior, 'steer');
+  runtime.streaming = false;
+  // Idle between runs (waiting to retry, say) is not idle for the sweep.
+  manager.focused = null;
+  runtime.lastUsed = 0;
+  await manager.sweep(Date.now() + 24 * 3600e3);
+  assert.equal(manager.runtimes.get(record.id)?.status, 'connected', 'still running');
+  status({ objective: 'Ship it', status: 'complete', startedAt: 1, finishedAt: 2 });
+  assert.equal(events.at(-1).ended, 'complete', 'the end is reported once, for the notification');
+  status({ objective: 'Ship it', status: 'complete', startedAt: 1, finishedAt: 2 });
+  assert.equal(events.at(-1).ended, undefined);
 });
 
 test('providers changed during startup are synced, then concurrent edits share one update', async t => {

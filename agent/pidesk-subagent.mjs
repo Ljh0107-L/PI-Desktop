@@ -174,6 +174,11 @@ const TYPE_PROMPTS = {
 - Don't create, edit or delete files. Use bash only for read-only commands (git log, git diff, ls, wc and the like); never install, build, write files or run tests.
 - Locate before reading: grep and find first, then read the relevant parts.
 - Answer the question you were asked with evidence: file paths with line numbers and the key lines. Say what you didn't find or couldn't confirm.`,
+  // Ultra's independent review (pidesk-ultra.mjs), started by Pi Desktop itself, never by the model.
+  review: `You are a reviewer: you check finished work against the request it was for, independently and with evidence.
+- Read the changed files, and run the builds, tests and commands that show whether the work does what was asked. Running checks is your job.
+- Never change the work: no edits, no new files outside temporary ones, no commits, no installs that alter the project.
+- Judge only against the request and the user's instructions, not your own preferences. Be specific: paths, commands, output.`,
 };
 const forkDirective = (name, task) => `You are a fork of the agent in this conversation, started for one task. You have the whole conversation above, but the main agent carries on without you: do only this task, then end with a report for the main agent. It sees only your final message, not your tool calls.
 Starting agents, asking the user, managing the goal and presenting files aren't available to you: put questions, blockers and the paths of files for the user in your report.
@@ -483,10 +488,10 @@ export function createSubagentTool({
     return { tools, messages, start: { kind: 'prompt', message: forkDirective(name, task) } };
   }
 
-  function createEntry({ ctx, callId, index, task, context, background, cwd }) {
-    const type = task.type?.trim() || 'general';
-    const definition = BUILT_IN_TYPES.has(type) ? undefined : definitionFor(type, cwd);
-    if (!BUILT_IN_TYPES.has(type) && !definition) {
+  function createEntry({ ctx, callId, index, task, context, background, cwd, internalType }) {
+    const type = internalType ?? (task.type?.trim() || 'general');
+    const definition = internalType || BUILT_IN_TYPES.has(type) ? undefined : definitionFor(type, cwd);
+    if (!internalType && !BUILT_IN_TYPES.has(type) && !definition) {
       const names = ['general', 'explore', 'fork', ...definitions.map(d => d.name)];
       throw new Error(`Unknown agent type "${type}". Available: ${names.join(', ')}`);
     }
@@ -506,7 +511,7 @@ export function createSubagentTool({
       const fork = forkSetup(entry, ctx, callId, record.name, task.task);
       Object.assign(entry, { systemPrompt: ctx.getSystemPrompt(), tools: fork.tools, messages: fork.messages, start: fork.start });
     } else {
-      const names = definition?.tools ?? (type === 'explore' ? EXPLORE_TOOLS : CODING_TOOLS);
+      const names = definition?.tools ?? (type === 'explore' || type === 'review' ? EXPLORE_TOOLS : CODING_TOOLS);
       Object.assign(entry, { systemPrompt: freshPrompt(type, cwd, definition), tools: childTools(entry, ctx, names), messages: [],
         start: { kind: 'prompt', message: `Context from the coordinating agent:\n${context?.trim() || '(none)'}\n\nYour task (${record.name}):\n${task.task}` } });
     }
@@ -923,8 +928,26 @@ export function createSubagentTool({
     },
   };
 
+  // Ultra's review of finished work: a fresh agent that can read and run checks but not edit, started
+  // by Pi Desktop (so no per-request limit applies), waited for in the foreground and stopped at the
+  // time limit rather than left to report later. Resolves to its report and run usage.
+  async function review({ callId, brief, signal, onUpdate, ctx, waitSeconds = 3600 }) {
+    if (!ctx?.model) throw new Error('No model selected for the review');
+    const cwd = ctx.cwd ?? promptOptions.cwd ?? process.cwd();
+    const entry = createEntry({ ctx, callId, index: 0, task: { name: 'Review the finished work', task: brief }, background: false, cwd, internalType: 'review' });
+    const run = { entry, control: { notify: false } };
+    const onAbort = () => entry.stop.abort(signal.reason ?? new Error('Cancelled'));
+    if (signal?.aborted) onAbort(); else signal?.addEventListener('abort', onAbort, { once: true });
+    run.promise = startRun(entry, entry.start, run.control);
+    const stopUpdates = liveUpdates([entry], onUpdate);
+    try { await waitFor([run], waitSeconds); }
+    finally { stopUpdates(); signal?.removeEventListener('abort', onAbort); }
+    if (!run.done) { stop(entry.record.id, 'The review ran past its time limit'); await entry.running?.catch(() => {}); }
+    return { status: entry.record.status, output: entry.record.output ?? '', error: entry.record.error, agentRuns: run.done ? [run.done.record] : [], agent: snapshot(entry.record) };
+  }
+
   return {
-    tool, messageTool, stopTool,
+    tool, messageTool, stopTool, review,
     shutdown: () => { lifetime.abort(new Error('Parent session closed')); clearInterval(heartbeat); heartbeat = null; flushPublish(); },
     setPromptOptions(options) { promptOptions = options ?? {}; },
     // off: no subagent tools or guidance; limited / more: how many new agents one request may start.

@@ -27,6 +27,7 @@ import { Type } from 'typebox';
 import { createBashToolDefinition } from '@earendil-works/pi-coding-agent';
 import { createSubagentTool } from './pidesk-subagent.mjs';
 import { createSpeed } from './pidesk-speed.mjs';
+import { AWAY_ANSWER, createUltra, parseVerdict, reviewBrief } from './pidesk-ultra.mjs';
 
 function literalKey(key) {
   // Pi treats "$NAME" and "!command" specially; "$$" and a leading "$!" are the documented escapes.
@@ -350,6 +351,66 @@ export default function pideskBridge(pi) {
     },
   });
   for (const tool of [subagents.tool, subagents.messageTool, subagents.stopTool]) pi.registerTool(tool);
+  // ---------------------------------------------------------------- Ultra
+  // The conversation's Ultra mode (pidesk-ultra.mjs), switched by the desktop with /pidesk-config. Its
+  // independent review is an agent that reads and runs checks but can't edit.
+  const ultra = createUltra(pi, {
+    enabled: !!boot.config?.ultra,
+    review: async (task, summary, { toolCallId, signal, onUpdate, ctx }) => {
+      const result = await subagents.review({ callId: toolCallId, brief: reviewBrief(task, summary), signal, onUpdate, ctx });
+      const details = { kind: 'pidesk-ultra-review', agent: result.agent, agentRuns: result.agentRuns };
+      if (result.status !== 'completed') return { verdict: 'error', text: result.error || `the review agent ${result.status}`, details };
+      return { verdict: parseVerdict(result.output), text: result.output.replace(/\n*\**VERDICT:\s*\**\s*(PASS|GAPS)\b[\s\S]*$/i, '').trim() || result.output, details };
+    },
+  });
+  let agentsResetAt = 0; // in an Ultra task, the limit on new agents starts over every hour
+  const lastUserText = ctx => {
+    try {
+      const entry = [...ctx.sessionManager.getBranch()].reverse().find(e => e.type === 'message' && e.message?.role === 'user');
+      const content = entry?.message?.content;
+      return typeof content === 'string' ? content : (content ?? []).filter(c => c?.type === 'text').map(c => c.text).join('\n');
+    } catch { return ''; }
+  };
+  pi.registerTool({
+    name: 'report_progress',
+    label: 'Report progress',
+    description: 'Ultra mode: record progress on the task after each meaningful step. The user sees it, and it is carried into later turns, also after the context is compacted.',
+    promptSnippet: 'report_progress: note what is done, what comes next and any assumption (Ultra mode)',
+    parameters: Type.Object({
+      done: Type.String({ description: 'What is done so far, briefly' }),
+      next: Type.String({ description: 'The next step' }),
+      assumptions: Type.Optional(Type.String({ description: 'Assumptions or decisions you made without the user' })),
+    }),
+    async execute(_id, params, _signal, _onUpdate, ctx) { ultra.attach(ctx); return text(ultra.progress(params)); },
+  });
+  pi.registerTool({
+    name: 'finish_task',
+    label: 'Finish task',
+    description: 'Ultra mode: finish the task when everything the request asks for is done and verified. The first call asks for an audit against the request; a later call has an independent reviewer check the work.',
+    promptSnippet: 'finish_task: finish the Ultra task with a summary, after an audit and an independent review',
+    parameters: Type.Object({
+      summary: Type.String({ description: 'For the user: what you did, how you verified it, assumptions you made, and what is still open' }),
+    }),
+    async execute(toolCallId, params, signal, onUpdate, ctx) {
+      ultra.attach(ctx);
+      const outcome = await ultra.finish(params, { toolCallId, signal, onUpdate, ctx });
+      return { content: [{ type: 'text', text: outcome.text }], details: { kind: 'pidesk-ultra-finish', ...(outcome.details ?? {}) } };
+    },
+  });
+  pi.on('input', event => ultra.onInput(event.text));
+  pi.on('agent_end', event => ultra.onRunEnd(event.messages));
+  pi.registerCommand?.('pidesk-ultra', {
+    description: 'Pi Desktop: resume, pause or dismiss the Ultra task',
+    handler: async (args, ctx) => {
+      ultra.attach(ctx);
+      const verb = String(args ?? '').trim();
+      if (verb === 'resume') ultra.resume();
+      else if (verb === 'pause') ultra.pause();
+      else if (verb === 'dismiss') ultra.dismiss();
+      else ctx?.ui?.setStatus?.('pidesk-ultra', JSON.stringify(ultra.snapshot()));
+    },
+  });
+
   // Settings → Subagents: off removes the tools and their guidance; otherwise it caps new agents per request.
   const SUBAGENT_TOOLS = [subagents.tool.name, subagents.messageTool.name, subagents.stopTool.name];
   subagents.setMode(boot.config?.subagents ?? 'limited');
@@ -360,8 +421,9 @@ export default function pideskBridge(pi) {
       if (want.length !== active.length) pi.setActiveTools(want);
     } catch { /* applied again when the session starts */ }
   };
-  pi.on('session_start', (_event, ctx) => {
+  pi.on('session_start', (event, ctx) => {
     applySubagentMode();
+    try { ultra.restore(ctx.sessionManager.getBranch(), { reason: event?.reason, ui: ctx.ui }); } catch { /* best effort */ }
     agentUi = ctx.ui;
     // Agents that were still running when this session's previous Pi ended: record that they stopped.
     setTimeout(() => { try { subagents.restore(ctx.sessionManager.getBranch()); } catch { /* best effort */ } subagents.sync(); }, 0);
@@ -369,10 +431,11 @@ export default function pideskBridge(pi) {
   pi.on('agent_start', () => { parentRunning = true; });
   pi.on('agent_settled', (event, ctx) => {
     parentRunning = false;
+    ultra.onSettled(event, ctx);
     agentUi = ctx?.ui ?? agentUi;
     subagents.onSettled({ aborted: event.aborted, branch: ctx?.sessionManager?.getBranch?.() });
   });
-  pi.on('session_shutdown', () => subagents.shutdown());
+  pi.on('session_shutdown', () => { subagents.shutdown(); ultra.shutdown(); });
   // The desktop's controls: stop an agent, send it a message from the user, resend live state.
   pi.registerCommand?.('pidesk-agents', {
     description: 'Pi Desktop: stop, message or resync agents',
@@ -391,11 +454,12 @@ export default function pideskBridge(pi) {
   // speed), as base64 JSON.
   pi.registerCommand?.('pidesk-config', {
     description: 'Pi Desktop: apply settings',
-    handler: async args => {
+    handler: async (args, ctx) => {
       try {
         const next = JSON.parse(Buffer.from(String(args ?? '').trim(), 'base64').toString('utf8'));
         if (next?.subagents) { subagents.setMode(next.subagents); applySubagentMode(); }
         if (next?.speed) speed.set(next.speed);
+        if (typeof next?.ultra === 'boolean') { ultra.attach(ctx); ultra.setEnabled(next.ultra, { running: parentRunning, request: ctx ? lastUserText(ctx) : '' }); }
         globalThis[BOOT] = { ...(globalThis[BOOT] ?? {}), config: { ...(globalThis[BOOT]?.config ?? {}), ...next } };
       } catch { process.stderr.write('pidesk: ignoring malformed settings\n'); }
     },
@@ -434,7 +498,8 @@ export default function pideskBridge(pi) {
   // ---------------------------------------------------------------- No folder
   // A structured prompt section (not a replaced prompt), so Pi records it once as a transcript delta.
   pi.on('before_agent_start', event => {
-    if (event.messageType === 'user') subagents.newRequest(); // the per-request agent limit starts over
+    if (event.messageType === 'user') { subagents.newRequest(); agentsResetAt = Date.now(); } // the per-request agent limit starts over
+    else if (ultra.drives && Date.now() - agentsResetAt >= 3600e3) { subagents.newRequest(); agentsResetAt = Date.now(); }
     const options = event.systemPromptOptions;
     const note = options && projectlessNote(options.cwd);
     if (note) (options.sections ??= {}).projectless = note;
@@ -444,6 +509,9 @@ export default function pideskBridge(pi) {
       if (guidance) (options.sections ??= {}).subagents = guidance;
       else if (options.sections) delete options.sections.subagents;
       (options.sections ??= {}).runtime = runtimeNote(runtime);
+      const unattended = ultra.promptSection();
+      if (unattended) options.sections.ultra = unattended;
+      else delete options.sections.ultra;
     }
   });
 
@@ -489,7 +557,7 @@ export default function pideskBridge(pi) {
   });
   pi.on('agent_settled', (event, ctx) => {
     ui = ctx.ui ?? ui;
-    if (goal?.status !== 'active') return;
+    if (goal?.status !== 'active' || ultra.drives) return;
     if (event.aborted) { saveGoal({ status: 'paused' }); return; } // stopping the run pauses the goal, like Codex
     if ((goal.turns ?? 0) >= MAX_GOAL_TURNS) { saveGoal({ status: 'paused' }); return; }
     saveGoal({ turns: (goal.turns ?? 0) + 1 });
@@ -550,6 +618,7 @@ export default function pideskBridge(pi) {
       options: Type.Optional(Type.Array(Type.String(), { description: 'Suggested answers, shortest first; omit for a free-text answer', maxItems: 8 })),
     }),
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+      if (ultra.enabled) return text(AWAY_ANSWER);
       if (!ctx.hasUI) return text('Nobody is at the desktop to answer. Continue with your best judgement and state your assumption.');
       const options = (params.options ?? []).filter(Boolean);
       const answer = options.length ? await ctx.ui.select(params.question, options) : await ctx.ui.input(params.question, '');

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, safeStorage, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, Menu, nativeImage, nativeTheme, net, Notification, powerSaveBlocker, safeStorage, shell } from 'electron';
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -208,6 +208,8 @@ const api = {
   deleteSession: id => manager.delete(id),
   commands: id => manager.commands(id),
   goal: id => manager.goal(id),
+  ultra: id => manager.ultra(id),
+  setUltra: (id, on) => manager.setUltra(id, on),
   agents: id => manager.agents(id),
   stopAgent: (id, agentId) => manager.stopAgent(id, agentId),
   messageAgent: (id, agentId, text) => manager.messageAgent(id, agentId, text),
@@ -320,7 +322,9 @@ app.whenReady().then(() => {
   usage = new UsageLedger({ path: join(app.getPath('userData'), 'usage.jsonl'), sessionsDir: join(app.getPath('userData'), 'agent', 'sessions') });
   manager.on('event', ({ event }) => { if (event.type === 'message_end') usage.record(event.message); });
   manager.on('environments-changed', () => send('environments', environments()));
-  for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'rewound', 'notice', 'environment', 'goal', 'agents']) manager.on(channel, payload => send(channel, payload));
+  for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'rewound', 'notice', 'environment', 'goal', 'agents', 'ultra']) manager.on(channel, payload => send(channel, payload));
+  manager.on('ultra', ultraChanged);
+  manager.on('status', ultraPiStatus);
   manager.on('sessions', () => send('sessions', manager.list()));
   createWindow();
   updater.start();
@@ -328,9 +332,35 @@ app.whenReady().then(() => {
   app.on('activate', () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
 });
 
+// Ultra on this Mac: keep it awake while a task runs here (the screen may still turn off), say when a
+// task ends, and ask before quitting stops one. Tasks on SSH hosts run there whatever this Mac does.
+const ultraLocal = new Map(); // session id -> running here
+let awake = null;
+function keepAwake() {
+  if (ultraLocal.size && awake == null) awake = powerSaveBlocker.start('prevent-app-suspension');
+  if (!ultraLocal.size && awake != null) { powerSaveBlocker.stop(awake); awake = null; }
+}
+// A Pi that stopped (archived, deleted, crashed) sends no more status: it no longer keeps the Mac awake.
+function ultraPiStatus({ id, status }) { if (!['connected', 'connecting', 'reconnecting'].includes(status) && ultraLocal.delete(id)) keepAwake(); }
+function ultraChanged({ id, ultra, ended, title, local }) {
+  if (local && ultra?.task?.status === 'active') ultraLocal.set(id, true); else ultraLocal.delete(id);
+  keepAwake();
+  if (ended && ['complete', 'stalled'].includes(ended) && Notification.isSupported()) {
+    const note = new Notification({ title: ended === 'complete' ? 'Ultra finished' : 'Ultra stopped: no progress', body: title || 'Conversation' });
+    note.on('click', () => { if (window && !window.isDestroyed()) { window.show(); window.focus(); send('open-session', { id }); } });
+    note.show();
+  }
+}
+
 let quitting = false;
 app.on('before-quit', event => {
   if (quitting || !manager) return;
+  if (ultraLocal.size && window && !window.isDestroyed()) {
+    const choice = dialog.showMessageBoxSync(window, { type: 'warning', buttons: ['Quit', 'Cancel'], defaultId: 1, cancelId: 1,
+      message: `Ultra is working in ${ultraLocal.size === 1 ? 'a conversation' : `${ultraLocal.size} conversations`} on this Mac`,
+      detail: 'Quitting stops it. It carries on when you open the conversation again.' });
+    if (choice !== 0) { event.preventDefault(); return; }
+  }
   event.preventDefault();
   quitting = true;
   terminals.closeAll();

@@ -78,10 +78,9 @@ export function Palette() {
               {section.items.map(item => {
                 n += 1; const i = n;
                 return (
-                  <button key={item.key} className={`palette-item ${i === index ? 'selected' : ''}`} onMouseMove={() => setIndex(i)} onClick={() => run(item)}>
+                  <button key={item.key} className={`palette-item ${i === index ? 'selected' : ''}`} title={item.detail || undefined} onMouseMove={() => setIndex(i)} onClick={() => run(item)}>
                     <Icon name={item.icon} size={18} />
                     <span className="palette-label">{item.label}</span>
-                    {item.detail && <span className="palette-detail">{item.detail}</span>}
                     {i === index && <Icon name="enter" size={17} className="palette-enter" />}
                   </button>
                 );

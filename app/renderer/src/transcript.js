@@ -61,7 +61,10 @@ function generation(m) {
   const inferTokens = !positive(reported) || (reported === 1 && visibleOutput >= 20);
   let estimated = inferTokens || m.__usageProvenance?.source === 'estimated';
   let out = inferTokens ? estimateTokens(answerText) + (reasoning || estimateTokens(thinking)) : reported;
-  const coversReasoning = m.__usageProvenance?.thinking !== 'summary' &&
+  // Nothing hidden when the model didn't reason at all: no thinking block and a reported count of 0
+  // (an Anthropic request asks for summarized thinking, but a short reply often has none).
+  const noReasoning = m.usage?.reasoning === 0 && !blocks.some(b => b?.type === 'thinking');
+  const coversReasoning = noReasoning || m.__usageProvenance?.thinking !== 'summary' &&
     !blocks.some(b => b?.type === 'thinking' && b.redacted) &&
     (!thinking || (Number.isFinite(t.thinkingChars) && t.thinkingChars >= thinking.length * 0.8)) &&
     (!reasoning || estimateTokens(thinking) >= reasoning * 0.5);
@@ -81,7 +84,10 @@ function generation(m) {
   const ms = sample.last - sample.first;
   // Tiny replies, one-chunk tool JSON and dense upstream bursts cannot establish a useful decode
   // window. Unknown is preferable to a request average or fabricated high TPS. Keep usage intact.
-  if (ms < 200 || sample.chars / ms > 20 || sample.chars < content.length * 0.8 ||
+  // A short reply from a fast model (40 tokens in 150 ms at Fast) can still be timed when it came in
+  // many chunks at a believable density; a relay's buffered burst is far denser.
+  const shortWindow = ms >= 50 && sample.deltas >= 8 && sample.chars / ms <= 4;
+  if ((ms < 200 && !shortWindow) || sample.chars / ms > 20 || sample.chars < content.length * 0.8 ||
       estimateTokens(content) < Math.max(20, out * 0.5)) return null;
   // Deltas are chunks, not single tokens. Allocate reported tokens by observed token weights and
   // remove the entire first chunk (including same-timestamp deltas), not merely one token.
@@ -218,7 +224,9 @@ export function speedDisplay(usage, { earlier = false } = {}) {
   };
 }
 
-// Replies shorter than this (a "done" after a tool call) are one or two chunks: their speed is noise.
+// A reply shorter than this (a "done" after a tool call) is one or two chunks: its speed is noise.
+export const MIN_TIMED_TOKENS = 16;
+// An estimate (no measurable window) stands in for a reply only when the reply is at least this long.
 export const MIN_SPEED_TOKENS = 64;
 
 // The processing speed a reply ran at (the composer's Speed; the bridge records what was asked for,
@@ -235,15 +243,17 @@ export function speedTier(m) {
     : `The provider ran it at ${label} speed, billed at ${label} rates.`;
   return { label, slower: true, title: `Asked for ${asked}. ${why}` };
 }
-// The reply whose speed the Usage card shows, among the last model's replies: the latest measured
-// generation long enough to time, else the latest estimate of one, else the last reply. A burst of
+// The reply whose speed the Usage card shows, so it changes with every reply: the last one when its
+// generation was measured; else (too short or too coarse to time) the latest measured reply of the
+// same model, then the latest estimate of a reply long enough, then the last reply. A burst of
 // tool-call arguments after a tool result is an estimate; the generation before it was measured.
+export const timedReply = m => (m?.usage?.output ?? 0) >= MIN_TIMED_TOKENS && usageOf([m]).speedBasis === 'generation';
 export function speedReply(replies) {
   const last = replies.at(-1);
-  if (!last) return last;
+  if (!last || timedReply(last)) return last;
   const model = m => `${m.provider}\n${m.responseModel ?? m.model}`;
-  const long = replies.filter(m => model(m) === model(last) && (m.usage?.output ?? 0) >= MIN_SPEED_TOKENS && usageOf([m]).tps != null);
-  return [...long].reverse().find(m => usageOf([m]).speedBasis === 'generation') ?? long.at(-1) ?? last;
+  const same = replies.filter(m => model(m) === model(last)).reverse();
+  return same.find(timedReply) ?? same.find(m => (m.usage?.output ?? 0) >= MIN_SPEED_TOKENS && usageOf([m]).tps != null) ?? last;
 }
 // Usage per finished turn (user message → the replies that followed), oldest first.
 export function turnUsages(messages) {

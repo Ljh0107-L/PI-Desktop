@@ -133,7 +133,7 @@ function fakePi() {
 }
 
 test('the bridge starts at the boot record speed and follows /pidesk-config', () => {
-  process.env.PIDESK_BOOT = JSON.stringify({ providers: [], config: { subagents: 'limited', speed: 'fast' } });
+  process.env.PIDESK_BOOT = JSON.stringify({ providers: [], config: { subagents: 'limited', speed: 'fast', ultra: false } });
   const { pi, request, stream, end, config } = fakePi();
   pideskBridge(pi);
   assert.equal(request({ model: 'claude-opus-5-5' }, opus).speed, 'fast');
@@ -142,7 +142,7 @@ test('the bridge starts at the boot record speed and follows /pidesk-config', ()
   assert.equal(request({ model: 'deepseek-flash' }, { provider: 'deepseek', api: 'openai-completions', id: 'deepseek-flash' }).service_tier, undefined);
   config({ subagents: 'limited', speed: 'ultrafast' });
   assert.equal(request({ model: 'gpt-6.1-sol' }, sol).service_tier, 'ultrafast');
-  config({ subagents: 'limited', speed: 'standard' });
+  config({ subagents: 'limited', speed: 'standard', ultra: false });
   const plain = request({ model: 'gpt-6.1-sol' }, sol);
   assert.equal(plain.service_tier, undefined);
   assert.equal(end(reply(sol)).__speed, undefined, 'nothing recorded at standard speed');
@@ -179,20 +179,20 @@ test("a conversation's speed reaches its Pi: in the boot record, then by command
   const record = { id: 's1', title: 'T', environmentId: 'local', cwd: '/w', model: { provider: 'anthropic', id: 'claude-opus-5-5' } };
   const store = { settings: { providers: [], defaults: { subagents: 'limited' } }, sessions: [record], saveSessions() {}, getKey: () => null };
   const manager = new SessionManager({ store, environments: () => [], local: {} });
-  assert.deepEqual(manager.bootConfig(record), { subagents: 'limited', speed: 'standard' });
+  assert.deepEqual(manager.bootConfig(record), { subagents: 'limited', speed: 'standard', ultra: false });
   const sent = [];
   manager.runtimes.set('s1', { status: 'connected', configKey: JSON.stringify(manager.bootConfig(record)), session: { prompt: async line => { sent.push(line); } } });
   await manager.setSpeed('s1', 'fast');
   assert.equal(record.speed, 'fast');
-  assert.deepEqual(sent.map(decode), [{ subagents: 'limited', speed: 'fast' }]);
+  assert.deepEqual(sent.map(decode), [{ subagents: 'limited', speed: 'fast', ultra: false }]);
   await manager.setSpeed('s1', 'fast');
   assert.equal(sent.length, 1, 'not sent again while unchanged');
-  assert.deepEqual(manager.bootConfig(record), { subagents: 'limited', speed: 'fast' }, 'a restarted Pi boots at it');
+  assert.deepEqual(manager.bootConfig(record), { subagents: 'limited', speed: 'fast', ultra: false }, 'a restarted Pi boots at it');
   await manager.setSpeed('s1', 'standard');
   assert.ok(!Object.hasOwn(record, 'speed'), 'a record keeps a speed only when it is not standard');
-  assert.deepEqual(decode(sent[1]), { subagents: 'limited', speed: 'standard' });
+  assert.deepEqual(decode(sent[1]), { subagents: 'limited', speed: 'standard', ultra: false });
   await assert.rejects(manager.setSpeed('s1', 'warp'), /Unknown speed/);
   store.settings.defaults.subagents = 'off';
   manager.configChanged(); await new Promise(r => setTimeout(r, 0));
-  assert.deepEqual(decode(sent[2]), { subagents: 'off', speed: 'standard' }, 'Settings changes keep each conversation its own speed');
+  assert.deepEqual(decode(sent[2]), { subagents: 'off', speed: 'standard', ultra: false }, 'Settings changes keep each conversation its own speed');
 });

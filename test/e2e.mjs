@@ -401,6 +401,24 @@ try {
   await page.click('.goal-close');
   await page.locator('.goal-banner').waitFor({ state: 'detached', timeout: 15000 });
 
+  // ---- Ultra: Pi works on its own after the message; replies with no progress end as stalled
+  try {
+    await page.click('.ultra-trigger');
+    await page.locator('.ultra-trigger.on').waitFor({ timeout: 10000 });
+    const before = await page.locator('.markdown', { hasText: 'Ultra mode: continue the task' }).count();
+    await send('ultra demo task');
+    await page.locator('.ultra-banner').waitFor({ timeout: 20000 });
+    await page.locator('.ultra-banner.stalled').waitFor({ timeout: 120000 });
+    const continued = await page.locator('.markdown', { hasText: 'Ultra mode: continue the task' }).count() - before;
+    const label = await page.locator('.ultra-banner .goal-state').innerText();
+    check('Ultra continues on its own and stops as stalled after turns without progress', continued >= 4 && /Stalled/.test(label), `${continued} continuations · ${label}`);
+    await S('05f-ultra');
+    await page.click('.ultra-trigger');
+    await page.locator('.ultra-trigger.on').waitFor({ state: 'detached', timeout: 10000 });
+    await page.click('.ultra-banner .goal-close');
+    await page.locator('.ultra-banner').waitFor({ state: 'detached', timeout: 15000 });
+  } catch (error) { check('Ultra', false, error.message.split('\n')[0]); }
+
   // ---- edit an earlier message and regenerate from there
   await waitNew('.markdown', 'echo: edit me please', () => send('edit me please'));
   await page.locator('.user-row', { hasText: 'edit me please' }).last().hover();
@@ -592,7 +610,7 @@ try {
   await waitNew('.session-main .markdown', 'Tool result: Started 1 agent in the background', () => send('[[agents-slow]]'), 30000);
   await mainTranscript().locator('.subagent-summary').last().locator('.subagent-task-row', { hasText: 'Slow check' }).click();
   await inspector().locator('.subagent-inspector-meta', { hasText: 'Running' }).waitFor({ timeout: 30000 });
-  check('a running background agent says so in its delegation card', await mainTranscript().locator('.subagent-summary-hint').count() >= 1);
+  check('a running background agent says so in its delegation card', await mainTranscript().locator('.subagent-summary').last().locator('.subagent-task-row', { hasText: 'Slow check' }).locator('.subagent-task-caption', { hasText: 'Running' }).count() >= 1);
   await inspector().getByRole('button', { name: 'Stop this agent', exact: true }).click();
   await inspector().locator('.subagent-inspector-meta', { hasText: 'Cancelled' }).waitFor({ timeout: 30000 });
   await mainTranscript().locator('.agent-report.cancelled', { hasText: 'Slow check' }).waitFor({ timeout: 30000 });
@@ -834,8 +852,8 @@ try {
   await page.locator('.grouped-row.selectable.on', { hasText: 'Off' }).waitFor();
   const saved = JSON.parse(readFileSync(join(profile, 'settings.json'), 'utf8')).defaults?.subagents;
   check('Settings → Agents saves how many agents Pi may start', saved === 'off', saved);
-  await page.click('.grouped-row.selectable:has-text("Limited")');
-  await page.locator('.grouped-row.selectable.on', { hasText: 'Limited' }).waitFor();
+  await page.click('.grouped-row.selectable:has-text("Up to 2 per message")');
+  await page.locator('.grouped-row.selectable.on', { hasText: 'Up to 2 per message' }).waitFor();
   await page.click('.settings-sidebar .nav-item.back');
 } catch (error) { check('Settings → Agents', false, error.message.split('\n')[0]); }
 const secretsFile = readFileSync(join(profile, 'secrets.json'), 'utf8');

@@ -31,6 +31,36 @@ function GoalBanner({ session }) {
   );
 }
 
+// The conversation's Ultra task: what Pi works on, for how long, and stop / resume / dismiss. The latest
+// progress report and any error show on hover.
+const elapsed = ms => { const m = Math.max(0, Math.floor(ms / 60000)), h = Math.floor(m / 60); return m < 1 ? '<1m' : h ? `${h}h ${m % 60}m` : `${m}m`; };
+function UltraBanner({ session }) {
+  const ultra = useStore(s => s.ultra[session.id]);
+  const [, tick] = useState(0);
+  const task = ultra?.task;
+  useEffect(() => {
+    if (task?.status !== 'active') return;
+    const timer = setInterval(() => tick(n => n + 1), 30000);
+    return () => clearInterval(timer);
+  }, [task?.status]);
+  if (!task?.objective) return null;
+  const retrying = task.status === 'active' && task.retryAt > Date.now();
+  const label = task.status === 'active' ? (task.reviewing ? 'Reviewing' : retrying ? 'Retrying soon' : 'Working') : { paused: 'Paused', stalled: 'Stalled', complete: 'Done' }[task.status] ?? task.status;
+  const run = verb => api('prompt', session.id, `/pidesk-ultra ${verb}`).catch(e => notify(e.message, 'error'));
+  const stop = () => { api('abort', session.id).catch(() => {}); run('pause'); };
+  const title = [task.objective, task.progress?.done && `Done: ${task.progress.done}`, task.progress?.next && `Next: ${task.progress.next}`, task.reason, task.lastError].filter(Boolean).join('\n');
+  return (
+    <div className={`goal-banner ultra-banner ${task.status}`} title={title}>
+      <Icon name="infinity" size={15} className="goal-icon" />
+      <span className="goal-objective">{task.objective}</span>
+      <span className={`goal-state ${task.status === 'complete' ? 'complete' : task.status === 'stalled' ? 'blocked' : ''}`}>{task.status === 'active' && <span className="goal-pulse" />}{label} · {elapsed((task.finishedAt ?? Date.now()) - task.startedAt)}</span>
+      {task.status === 'active' && <button className="goal-action" onClick={stop}>Stop</button>}
+      {['paused', 'stalled'].includes(task.status) && ultra.enabled && <button className="goal-action" onClick={() => run('resume')}>Resume</button>}
+      {task.status !== 'active' && <button className="goal-close" aria-label="Dismiss" title="Dismiss" onClick={() => run('dismiss')}><Icon name="x" size={13} /></button>}
+    </div>
+  );
+}
+
 function ConfirmHost() {
   const confirm = useStore(s => s.confirm);
   if (!confirm) return null;
@@ -75,6 +105,7 @@ function ConnectionBanner({ session }) {
 function SessionView({ session }) {
   const transcript = useStore(s => s.transcripts[session.id]) ?? emptyTranscript();
   const questions = useStore(s => s.questions[session.id]) ?? [];
+  const ultraWorking = useStore(s => s.ultra[session.id]?.task?.status === 'active');
   const rightPanel = useStore(s => s.rightPanel);
   const filePaneOpen = useStore(s => s.filePaneOpen);
   const terminalOpen = useStore(s => s.terminalOpen);
@@ -103,7 +134,8 @@ function SessionView({ session }) {
             : <>
               <ConnectionBanner session={session} />
               <GoalBanner session={session} />
-              <Composer session={session} autoFocus placeholder={questions.length ? 'Answer the agent’s question…' : session.streaming ? 'Send to interrupt…' : 'Reply to Pi…'} onSubmit={(text, attachments) => sendPrompt(session.id, text, attachments)} />
+              <UltraBanner session={session} />
+              <Composer session={session} autoFocus placeholder={questions.length ? 'Answer the agent’s question…' : ultraWorking ? 'Add to the task…' : session.streaming ? 'Send to interrupt…' : 'Reply to Pi…'} onSubmit={(text, attachments) => sendPrompt(session.id, text, attachments)} />
               <ComposerBar session={session} />
             </>}
         </div>

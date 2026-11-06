@@ -481,9 +481,9 @@ function UsagePage() {
 
 // ---------------------------------------------------------------- agents
 const SUBAGENT_MODES = [
-  { id: 'off', label: 'Off', detail: 'Pi does all the work itself.' },
-  { id: 'limited', label: 'Limited', detail: 'Up to 2 new agents per message, for large independent work, broad searches or reviews.' },
-  { id: 'more', label: 'More', detail: 'Up to 5 new agents per message.' },
+  { id: 'off', label: 'Off' },
+  { id: 'limited', label: 'Up to 2 per message' },
+  { id: 'more', label: 'Up to 5 per message' },
 ];
 function AgentsPage() {
   const mode = useStore(s => s.settings.defaults?.subagents) ?? 'limited';
@@ -499,13 +499,12 @@ function AgentsPage() {
       <div className="grouped-list" role="radiogroup" aria-label="Subagents">
         {SUBAGENT_MODES.map(m => (
           <button key={m.id} type="button" role="radio" aria-checked={mode === m.id} className={`grouped-row selectable ${mode === m.id ? 'on' : ''}`} onClick={() => choose(m.id)}>
-            <span className="grouped-main"><span className="grouped-title">{m.label}</span><span className="grouped-detail">{m.detail}</span></span>
+            <span className="grouped-main"><span className="grouped-title">{m.label}</span></span>
             {mode === m.id && <Icon name="check" size={16} className="grouped-check" />}
           </button>
         ))}
       </div>
       {error && <div className="form-error"><Icon name="alert" size={14} /> {error}</div>}
-      <p className="settings-foot-note">How many agents Pi may start for one of your messages. Pi does the main work itself and delegates only pieces that clearly pay off; sending an agent that is already running more instructions doesn't count. Running conversations apply a change before their next message.</p>
     </section>
   );
 }
