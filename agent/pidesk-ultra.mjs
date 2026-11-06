@@ -30,9 +30,11 @@ export const ULTRA_TOOLS = ['report_progress', 'finish_task'];
 export const ULTRA_PROMPT = `Ultra mode is on: the user handed you this work and is away until it is done, for hours if it takes that. You have their full trust for it: work entirely on your own.
 - Nobody will answer questions or approve plans. Decide yourself: take the most reasonable option, note the assumption, and keep going. Never stop to ask, to offer choices, or to wait for confirmation.
 - Do whatever the work needs without asking: read, change, install, run and test what it takes, and commit, push or publish when the request calls for it. Follow the user's instructions and the project's rules as always.
-- Tokens are no concern; finishing the work well is. When an approach fails, find out why and try another. Break large work into steps and keep moving. End a turn only after making progress, never with just a status update.
+- Tokens are no concern; finishing the work well is. When an approach fails, find out why and try another. Break large work into steps and keep moving. End a turn only after making progress, never with just a status update; to wait for agents you started, end your turn and their reports start the next one.
+- Before ending a turn, reread your last paragraph: if it is a plan, a promise or a list of next steps, carry it out now instead.
+- Before a command that changes a system's state (restarting a service, deleting data, changing configuration), make sure what you have actually seen calls for it, not just what you suspect.
 - After each meaningful step, call report_progress: what is done, what comes next, and any assumption you made. The user sees it, and it reminds you where you are after the context is compacted.
-- When everything the request asks for is done and verified, call finish_task with a summary for the user: what you did, how you verified it, the assumptions you made, and what is still open. An independent reviewer then checks the work; fix whatever it finds.`;
+- When everything the request asks for is done and verified, call finish_task with a summary for the user: what you did, how you verified it, the assumptions you made, and what is still open. Pi Desktop then has an independent reviewer check the work, so you need no review agents of your own; fix whatever it finds.`;
 
 export const AWAY_ANSWER = 'Nobody will answer: Ultra mode is on and the user is away. Decide yourself — choose the most reasonable option, note the assumption with report_progress and in your final summary, and keep working.';
 
@@ -90,7 +92,7 @@ export function parseVerdict(text) {
 
 // pi: { sendMessage, appendEntry, getActiveTools, setActiveTools }. review(task, summary, toolContext)
 // resolves to { verdict: 'pass' | 'gaps' | 'error', text, details }. Timers are injectable for tests.
-export function createUltra(pi, { enabled: initial = false, review = null, schedule = setTimeout, cancel = clearTimeout, now = Date.now } = {}) {
+export function createUltra(pi, { enabled: initial = false, review = null, agentsRunning = () => false, schedule = setTimeout, cancel = clearTimeout, now = Date.now } = {}) {
   let enabled = !!initial, task = null, ui = null, lastRun = null, retryTimer = null;
   const view = () => task && {
     objective: task.objective, status: task.status, turns: task.turns ?? 0, startedAt: task.startedAt, updatedAt: task.updatedAt,
@@ -185,6 +187,9 @@ export function createUltra(pi, { enabled: initial = false, review = null, sched
       const idleTurns = run?.toolCalls ? 0 : (task.idleTurns ?? 0) + 1;
       if (idleTurns >= STALL_TURNS) { update({ status: 'stalled', idleTurns, reason: `No progress in ${STALL_TURNS} turns in a row` }); return true; }
       update({ turns: (task.turns ?? 0) + 1, idleTurns, errors: 0, fatalErrors: 0, lastError: undefined, retryAt: undefined });
+      // Agents it started are still working: their reports start its next turn. Pushed on instead, a
+      // model waiting for them had nothing to do but ask them for status or redo their work.
+      if (agentsRunning()) return true;
       next();
       return true;
     },

@@ -53,17 +53,31 @@ test('More allows 5; Off starts none and drops the guidance', async t => {
   assert.deepEqual(AGENT_LIMITS, { off: 0, limited: 2, more: 5 });
 });
 
-test('the guidance keeps the main work with the model and asks for small tasks', () => {
-  const guidance = subagentPrompt(2);
-  assert.match(guidance, /Most work doesn't need one: do it yourself by default/);
-  assert.match(guidance, /The main task the user asked for: understanding it, making the changes and verifying them is your job/);
-  assert.match(guidance, /Look at the code yourself before you consider delegating/);
-  assert.match(guidance, /At most 2 new agents per user request/);
-  assert.match(guidance, /One agent, one question to answer or one self-contained change/);
-  const { tool } = createSubagentTool({});
-  assert.match(tool.promptSnippet, /do the main task, searches and edits yourself/);
-  assert.doesNotMatch(tool.promptSnippet, /for searches \(explore\)/, 'no longer advertised as the way to search');
+test('the guidance keeps the main work with the model: a short note in the prompt, the rest with the tool', () => {
+  const asked = subagentPrompt(), free = subagentPrompt('more');
+  for (const guidance of [asked, free]) assert.ok(guidance.length < 400, 'a short note, not a section that dominates the system prompt');
+  assert.equal(subagentPrompt('limited'), asked, 'Limited is the default');
+  assert.match(asked, /Start agents only when the user, the project's instructions or a skill asks for them/);
+  assert.match(asked, /Otherwise do the work yourself, however large, and never redo or chase work you have handed off/);
+  assert.match(free, /Most requests need none, so do the work yourself, and never redo or chase work you have handed off/);
+  assert.doesNotMatch(free, /only when/, 'More leaves the call to the model');
+  const { tool, messageTool } = createSubagentTool({});
+  assert.match(tool.description, /Most requests need none: do the work yourself by default, and when unsure, don't start one/);
+  assert.match(tool.description, /Keep for yourself the main task \(understanding, changing, verifying and explaining\)/);
+  assert.match(tool.description, /One small task is never worth splitting across several agents/);
+  assert.match(tool.description, /Brief it fully, the first time/);
+  assert.match(tool.description, /started on a thin brief and corrected afterwards costs more than doing the work yourself/);
+  assert.match(tool.description, /of finished work you verified, given the diff rather than your conclusion, with background false/);
+  assert.match(tool.description, /leave its work and files alone and don't message it for status; to wait, end your turn/);
+  assert.match(messageTool.description, /Not for status checks/);
+  for (const text of [asked, free, tool.description, tool.promptSnippet]) {
+    assert.doesNotMatch(text, /At most \d|independent review/, 'no number to use as a budget, and review is not advertised');
+  }
+  assert.equal(tool.promptGuidelines, undefined, 'no extra rules line');
+  assert.match(tool.promptSnippet, /do the main task yourself/);
+  assert.doesNotMatch(tool.promptSnippet, /search/, 'the tools list advertises no use: by default agents are for when they are asked for');
   assert.match(tool.parameters.properties.tasks.items.properties.name.description, /3 to 6 words/);
+  assert.match(tool.parameters.properties.tasks.items.properties.type.description, /explore \(read-only: finds code and answers where and how/);
 });
 
 test('the bridge starts the count over on each user message, and Off removes the tools', () => {
@@ -77,13 +91,14 @@ test('the bridge starts the count over on each user message, and Off removes the
   });
   const apply = config => commands.get('pidesk-config').handler(Buffer.from(JSON.stringify(config)).toString('base64'));
   const prompt = messageType => { const event = { messageType, prompt: 'hi', systemPromptOptions: { cwd: '/workspace', sections: {} } }; for (const h of handlers.get('before_agent_start')) h(event); return event.systemPromptOptions.sections; };
-  assert.ok(prompt('user').subagents, 'guidance while subagents are on');
+  assert.match(prompt('user').subagents, /Start agents only when the user, the project's instructions or a skill asks for them/, 'by default, agents only when asked');
   apply({ subagents: 'off' });
   assert.ok(!active.some(name => name.startsWith('subagent')), 'the tools are no longer declared');
   assert.equal(prompt('user').subagents, undefined);
   apply({ subagents: 'more' });
   assert.ok(['subagent', 'subagent_message', 'subagent_stop'].every(name => active.includes(name)));
-  assert.match(prompt('user').subagents, /At most 5 new agents/);
+  assert.match(prompt('user').subagents, /Most requests need none/);
+  assert.doesNotMatch(prompt('user').subagents, /At most \d/, 'the cap is enforced, not stated as a number to use');
 });
 
 test('a refused delegation shows its tasks as not started', () => {

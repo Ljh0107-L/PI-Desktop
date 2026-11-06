@@ -32,7 +32,8 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
     const system = (payload.messages ?? []).filter(m => m.role === 'system' || m.role === 'developer')
       .map(m => typeof m.content === 'string' ? m.content : (m.content ?? []).map(c => c.text ?? '').join('')).join('\n');
     const subagent = system.includes('You are a Pi Desktop subagent, not the coordinating assistant.');
-    requests.push({ provider, model: payload.model, authorization: auth, messageCount: payload.messages?.length ?? 0, system, subagent, at: Date.now() });
+    const tools = (payload.tools ?? []).map(t => ({ name: t.function?.name ?? t.name, description: t.function?.description ?? t.description ?? '' }));
+    requests.push({ provider, model: payload.model, authorization: auth, messageCount: payload.messages?.length ?? 0, system, tools, subagent, at: Date.now() });
 
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
     const id = 'chatcmpl-' + requests.length;

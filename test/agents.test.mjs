@@ -82,19 +82,29 @@ test('background agents return at once and report to an idle parent with a turn'
   assert.deepEqual(message.details.agentRuns.map(r => [r.key, r.usage.totalTokens]), [[`pidesk-agent:${launched.id}:1`, 18]]);
 });
 
-test('reports wait for a busy parent, and a stopped run records them without a new turn', async () => {
+test('a busy parent gets each report after its current step, and a stopped run records them without a new turn', async () => {
   const { notices, notify } = notifier();
   let idle = false;
   const c = context(async () => reply('report'));
   const controller = createSubagentTool({ notify, isIdle: () => idle });
   await start(controller, c, [{ name: 'a', task: 'a' }, { name: 'b', task: 'b' }]);
-  await until(() => controller.agents().every(a => a.status === 'completed'));
-  await sleep(10);
-  assert.equal(notices.length, 0, 'nothing is pushed into a running turn');
+  await until(() => notices.length === 2);
+  assert.ok(notices.every(n => n.options.deliverAs === 'steer' && n.options.triggerTurn), 'handed over during the turn, not held until it ends');
+  // Stop cleared Pi's queue before the parent read them: kept in the session, starting nothing.
   idle = true;
   controller.onSettled({ aborted: true, branch: [] });
-  assert.equal(notices.length, 2);
-  assert.ok(notices.every(n => !n.options.triggerTurn), 'after Stop, reports are recorded but start nothing');
+  assert.equal(notices.length, 4);
+  assert.deepEqual(notices.slice(2).map(n => n.message.details.key).sort(), notices.slice(0, 2).map(n => n.message.details.key).sort());
+  assert.ok(notices.slice(2).every(n => !n.options.triggerTurn), 'after Stop, reports are recorded but start nothing');
+  // Read during the run: in the session already, so nothing is sent again.
+  const { notices: read, notify: notifyRead } = notifier();
+  idle = false;
+  const other = createSubagentTool({ notify: notifyRead, isIdle: () => idle });
+  await start(other, context(async () => reply('report')), [{ name: 'c', task: 'c' }]);
+  await until(() => read.length === 1);
+  idle = true;
+  other.onSettled({ aborted: false, branch: [{ type: 'custom_message', customType: 'pidesk-agent', details: { key: read[0].message.details.key } }] });
+  assert.equal(read.length, 1);
 });
 
 test('a report that never reached the session is sent again, at most three times', async () => {

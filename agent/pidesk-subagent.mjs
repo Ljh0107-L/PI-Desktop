@@ -124,41 +124,24 @@ const blockedToolSummary = (tool, args) => clip(typeof args?.description === 'st
 // How many new agents one user request may start, by the Settings → Subagents choice.
 export const AGENT_LIMITS = { off: 0, limited: 2, more: 5 };
 
-// Most work should not be delegated: models that read "delegate searches" delegated the main task
-// itself, a few tool calls in (seen in real sessions). The guidance leads with doing the work.
-export const subagentPrompt = (limit = AGENT_LIMITS.limited) => `The subagent tool starts agents with their own context windows. Most work doesn't need one: do it yourself by default. An agent starts without this conversation, needs time to get oriented, and leaves you a report you still have to check, so delegating usually costs more than it saves.
-
-Do it yourself
-- The main task the user asked for: understanding it, making the changes and verifying them is your job, not an agent's.
-- Searches and reads that take a few tool calls (grep, find, read), including finding where something is defined or used.
-- Anything that depends on what you just learned, or that you will need to understand in detail afterwards.
-- Look at the code yourself before you consider delegating: you can't brief work you haven't scoped.
-
-Delegate only when it clearly pays
-- A sweep across a large, unfamiliar codebase that would take many reads and whose details you won't need afterwards: an explore agent (read-only) reads and reports the answer with paths.
-- Separate pieces of work that are truly independent and large enough to be worth running in parallel while you carry on with the main task.
-- An independent review of finished work: give the agent the diff or files to examine, not your conclusion, since an agent handed a hypothesis tends to confirm it.
-- A side task that needs this conversation's context: a fork sees the whole conversation, so its brief can be just the task.
-- At most ${limit} new agent${limit === 1 ? '' : 's'} per user request (a setting). Sending an existing agent more instructions with subagent_message doesn't count.
-
-Keep each agent's task small
-- One agent, one question to answer or one self-contained change, with its scope spelled out: which files or directories, and what not to touch. If you can't say in a sentence what done looks like, the task is too big or not yet understood: keep it yourself.
-- Independent small tasks go in one call and run in parallel. A large job stays with you, split into steps you do yourself.
-
-Writing the brief (agents other than a fork see nothing of this conversation)
-- Say what to find out or change and what done looks like; what you already know or have ruled out; the files and paths involved; what it may change and what it must leave alone; every user instruction that applies to it (for example "don't run tests locally", "no commits"); and what its report should contain.
-
-While agents run
-- By default the call returns at once and each report arrives later as a message: keep working on the main task meanwhile. Don't redo delegated work, and don't guess at results that haven't arrived.
-- Set background to false for short work you can't continue without; if the wait runs out, the agents keep going and report later.
-- Agents share the working tree unless a task sets isolation to "worktree": a separate git checkout of the last commit, on its own branch. Give concurrent writers separate files or worktrees.
-- subagent_message continues an agent with its context intact; subagent_stop cancels an agent that is going the wrong way.
-
-Using the reports
-- A report is the agent's claim, not proof. Check what matters before relying on it (read the changed files, run the check) and tell the user what you verified.
-- The user doesn't see agent reports in full: relay what matters in your own words.
-- Delegation grants no extra permission: the user's restrictions apply to agents too.`;
-export const SUBAGENT_PROMPT = subagentPrompt();
+// Where the guidance lives, as in Claude Code: two sentences in the system prompt, the details in the
+// subagent tool's description, read when the model weighs delegating. Pi's own system prompt is a few
+// lines, so the 3.9K-character section 0.2.0 had there was 46% of it and delegation read as a core part
+// of the job: models started reviews of unfinished work, citing the section's "independent review",
+// while reading the same files themselves (seen in real sessions). Earlier, models that read "delegate
+// searches" delegated the main task itself. The Settings cap is enforced, not stated: a number reads as
+// a budget to use. Limited, the default, starts agents only when asked, as Claude Code does for the
+// models that delegated too eagerly; More leaves the call to the model.
+export const subagentPrompt = (mode = 'limited') => mode === 'more'
+  ? `The subagent tool hands work to agents with their own context: independent pieces worth running in parallel, or a broad search of a large codebase where only the answer matters. Most requests need none, so do the work yourself, and never redo or chase work you have handed off.`
+  : `The subagent tool hands work to agents with their own context. Start agents only when the user, the project's instructions or a skill asks for them, for example to run work in parallel or to have an agent search or review. Otherwise do the work yourself, however large, and never redo or chase work you have handed off.`;
+export const SUBAGENT_DESCRIPTION = [
+  'Start agents with their own context windows, one bounded question or change each. Most requests need none: do the work yourself by default, and when unsure, don\'t start one. An agent knows only your brief and you get back only its report, so context is lost both ways, and its errors look as certain as its findings.',
+  'Keep for yourself the main task (understanding, changing, verifying and explaining), anything a few tool calls settle, and anything you are reading or changing or will need in detail afterwards. One small task is never worth splitting across several agents.',
+  'Worth an agent: a broad search of a large codebase where only the answer matters (explore); independent pieces with their own files and nothing to keep in sync, big enough to run in parallel; a side task the user asked for. A review only when you want a second opinion your own reading hasn\'t shaped: of finished work you verified, given the diff rather than your conclusion, with background false.',
+  'Brief it fully, the first time: the goal, what you know or have ruled out, paths, what it may change and must leave alone, the user\'s instructions that apply, and what to report. An agent started on a thin brief and corrected afterwards costs more than doing the work yourself. A fork already has this conversation.',
+  'Its report arrives by itself after your current step. Until then leave its work and files alone and don\'t message it for status; to wait, end your turn. A report is a claim: check what matters, then tell the user what it found in your own words.',
+].join('\n');
 
 const MARKER = 'You are a Pi Desktop subagent, not the coordinating assistant.';
 const CHILD_BASE = `${MARKER}
@@ -250,14 +233,9 @@ export function loadAgentDefinitions(cwd, { home = homedir() } = {}) {
 }
 
 export function agentTypesSection(definitions = []) {
-  const lines = [
-    'Agent types (a task\'s type):',
-    '- general (default): coding tools: read, write, edit, bash, grep, find, ls.',
-    '- explore: read-only (read, grep, find, ls, and bash for read-only commands). It locates code and answers where and how questions across many files, with paths and line numbers; it doesn\'t review or judge. It skips project instruction files: put what it needs in the brief.',
-    '- fork: a copy of you with this whole conversation, your tools and model. It can\'t start agents or ask the user.',
-    ...definitions.map(d => `- ${d.name}: ${d.description} (tools: ${d.tools.join(', ') || 'none'}${d.isolation ? '; own worktree' : ''})`),
-  ];
-  return lines.join('\n');
+  if (!definitions.length) return '';
+  return ['Custom agent types (a task\'s type):',
+    ...definitions.map(d => `- ${d.name}: ${d.description} (tools: ${d.tools.join(', ') || 'none'}${d.isolation ? '; own worktree' : ''})`)].join('\n');
 }
 
 // ---------------------------------------------------------------- worktrees
@@ -384,16 +362,21 @@ export function createSubagentTool({
     publishTimer.unref?.();
   }
 
-  // ---- reports to the parent: sent when it is idle, never left in Pi's queue (Stop clears it)
+  // ---- reports to the parent. An idle parent starts a turn for them. A busy one gets each report after
+  // its current step (Pi's steer): held until its turn ended, replies reached a parent that kept working
+  // minutes late and all at once, and it kept asking again meanwhile. Stop clears Pi's queue: reports
+  // that never reached the session are sent again when the run settles, then without starting a turn.
   const pending = [];
   const sent = new Map();               // key -> { notice, attempts }, until it is seen in the session
   function flushNotices({ trigger }) {
     if (!notify || !pending.length || lifetime.signal.aborted) return;
+    const busy = isIdle?.() === false;
     const batch = pending.splice(0);
     batch.forEach((notice, i) => {
       const last = i === batch.length - 1;
       sent.set(notice.details.key, { notice, attempts: (sent.get(notice.details.key)?.attempts ?? 0) + 1 });
-      try { notify(notice, trigger && last ? { triggerTurn: true, deliverAs: 'followUp' } : {}); }
+      const options = busy ? { triggerTurn: true, deliverAs: 'steer' } : trigger && last ? { triggerTurn: true, deliverAs: 'followUp' } : {};
+      try { notify(notice, options); }
       catch { pending.push(notice); }
     });
   }
@@ -411,7 +394,7 @@ export function createSubagentTool({
     ].filter(Boolean).join('\n\n');
     pending.push({ customType: 'pidesk-agent', content, display: true,
       details: { kind: 'pidesk-agent', key: `${record.id}:${run.run}`, agent: snapshot(record), run: run.run, agentRuns: [run.record] } });
-    if (isIdle?.() !== false) flushNotices({ trigger: true });
+    flushNotices({ trigger: true });
   }
 
   // ---- building a child
@@ -791,18 +774,17 @@ export function createSubagentTool({
   // ---------------------------------------------------------------- tools
   const tool = {
     name: 'subagent', label: 'Subagents', exposure: 'model-only',
-    description: 'Start agents with their own context windows, for work that clearly pays to delegate: a broad read-only sweep of a large codebase (explore), independent work large enough to run in parallel, or an independent review. Do the main task, ordinary searches and edits yourself, and keep each task small: one question or one bounded change. tasks [{name, task, type?, isolation?}]; types: general (default), explore (read-only), fork (a copy of you with this conversation), or a custom type from your instructions. Runs in the background by default and each report arrives as a message; at most a few new agents per user request.',
-    promptSnippet: 'Delegate only large, independent or review work; do the main task, searches and edits yourself.',
-    promptGuidelines: ['Do the work yourself by default; delegate only what clearly pays, after looking at the code yourself. Brief fresh agents fully (goal, paths, scope, user instructions, what to report). Verify reports before relying on them.'],
+    description: SUBAGENT_DESCRIPTION,
+    promptSnippet: 'Hand separate work to agents with their own context; do the main task yourself.',
     parameters: Type.Object({
       tasks: Type.Array(Type.Object({
         name: Type.String({ minLength: 1, maxLength: 80, description: 'What it does, in 3 to 6 words (for example "Find the retry logic")' }),
         task: Type.String({ minLength: 1, maxLength: 20000, description: 'The brief for one bounded question or change: goal, what you know or ruled out, paths, scope, applicable user instructions, and what to report' }),
-        type: Type.Optional(Type.String({ maxLength: 64, description: 'general (default), explore, fork, or a custom agent type listed in your instructions' })),
-        isolation: Type.Optional(Type.Literal('worktree', { description: 'Work in a separate git worktree on its own branch, starting from the last commit' })),
+        type: Type.Optional(Type.String({ maxLength: 64, description: 'general (default; coding tools), explore (read-only: finds code and answers where and how, with paths; doesn\'t review or judge, and skips project instruction files, so put what it needs in the brief), fork (a copy of you with this conversation and your tools; can\'t start agents or ask the user), or a custom type listed in your instructions' })),
+        isolation: Type.Optional(Type.Literal('worktree', { description: 'Work in a separate git worktree on its own branch, starting from the last commit. Otherwise agents share your working tree: give concurrent writers separate files or worktrees.' })),
       }), { minItems: 1, maxItems: MAX_TASKS }),
       context: Type.Optional(Type.String({ maxLength: 24000, description: 'Facts and user instructions shared by every brief (a fork already has the conversation)' })),
-      background: Type.Optional(Type.Boolean({ description: 'Default true: return at once and receive each report as a message. false: wait for the reports, up to waitSeconds' })),
+      background: Type.Optional(Type.Boolean({ description: 'Default true: return at once; each report arrives as a message after your current step. false: wait for the reports, up to waitSeconds' })),
       waitSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 3600, description: `With background false: how long to wait before the agents carry on in the background (default ${defaultWaitSeconds})` })),
     }),
     async execute(callId, params, parentSignal, onUpdate, ctx) {
@@ -833,7 +815,7 @@ export function createSubagentTool({
       if (background) {
         const text = [`Started ${created.length} agent${created.length === 1 ? '' : 's'} in the background:`,
           ...created.map(e => `- ${describeAgent(e.record)}`),
-          'Each report arrives as a separate message when that agent finishes. Until then work on something that doesn\'t depend on them, or end your turn; don\'t redo their work or guess their results. subagent_message sends an agent more instructions; subagent_stop cancels it.'].join('\n');
+          'Each report arrives by itself as a message after your current step once that agent finishes: don\'t message an agent to ask how it is going. Until then work only on what doesn\'t overlap with theirs (not their files), or end your turn to wait: a report starts your next one. Don\'t redo their work or guess their results. subagent_message gives an agent its next step or a correction; subagent_stop cancels it.'].join('\n');
         // No runs are reported here: each agent's usage comes with its report.
         return { content: [{ type: 'text', text }], details: { kind: 'pidesk-subagents', background: true, results: created.map(e => snapshot(e.record)), agentRuns: [] } };
       }
@@ -873,11 +855,11 @@ export function createSubagentTool({
 
   const messageTool = {
     name: 'subagent_message', label: 'Message agent', exposure: 'model-only',
-    description: 'Send more instructions to an agent you started (by id). It continues with its context intact. Runs in the background by default; the reply arrives as a message.',
+    description: 'Give an agent you started (by id) its next step or a correction; it keeps its context. Not for status checks: reports arrive by themselves. A running agent answers in its report; an idle one replies as a message, or within this call with background false.',
     parameters: Type.Object({
       id: Type.String({ minLength: 1, maxLength: 64, description: 'The agent id from its start or report' }),
       message: Type.String({ minLength: 1, maxLength: 20000, description: 'What to do next: a follow-up question, a correction, the next step' }),
-      background: Type.Optional(Type.Boolean({ description: 'Default true. false: wait for the reply, up to waitSeconds' })),
+      background: Type.Optional(Type.Boolean({ description: 'Default true. false: wait for an idle agent\'s reply, up to waitSeconds (a running agent answers in its report)' })),
       waitSeconds: Type.Optional(Type.Integer({ minimum: 1, maximum: 3600 })),
     }),
     async execute(_id, params, parentSignal) {
@@ -889,7 +871,7 @@ export function createSubagentTool({
       if (background || sent_.queued) {
         return { content: [{ type: 'text', text: sent_.queued
           ? `Queued for ${describeAgent(entry.record)}: it reads your message after its current step, and its report arrives as a message.`
-          : `Sent to ${describeAgent(entry.record)}. Its reply arrives as a message.` }], details: { kind: 'pidesk-agent-message', agent: snapshot(entry.record) } };
+          : `Sent to ${describeAgent(entry.record)}. Its reply arrives by itself as a message; no need to ask again.` }], details: { kind: 'pidesk-agent-message', agent: snapshot(entry.record) } };
       }
       const control = sent_.control;
       const onAbort = () => { if (!control.notify) entry.stop.abort(parentSignal.reason ?? new Error('Cancelled')); };
@@ -950,14 +932,15 @@ export function createSubagentTool({
     tool, messageTool, stopTool, review,
     shutdown: () => { lifetime.abort(new Error('Parent session closed')); clearInterval(heartbeat); heartbeat = null; flushPublish(); },
     setPromptOptions(options) { promptOptions = options ?? {}; },
-    // off: no subagent tools or guidance; limited / more: how many new agents one request may start.
+    // off: no subagent tools or guidance; limited: agents only when asked, 2 per request at most;
+    // more: when the model judges they help, 5 at most.
     setMode(next) { if (Object.hasOwn(AGENT_LIMITS, next)) mode = next; },
     get mode() { return mode; },
     newRequest() { startedInRequest = 0; },
     promptSection(cwd) {
       if (mode === 'off') return null;
       if (cwd && definitionsCwd !== cwd) { definitions = loadAgentDefinitions(cwd, { home }); definitionsCwd = cwd; }
-      return `${subagentPrompt(AGENT_LIMITS[mode])}\n\n${agentTypesSection(definitions)}`;
+      return [subagentPrompt(mode), agentTypesSection(definitions)].filter(Boolean).join('\n\n');
     },
     stop: (id, reason) => !!stop(id, reason),
     message: (id, text, options) => message(id, text, { background: true, ...options }),

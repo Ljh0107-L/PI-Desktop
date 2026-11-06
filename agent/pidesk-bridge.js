@@ -18,6 +18,8 @@
 // 6. No folder (Codex's projectless chats): a conversation started without a folder runs in its own
 //    generated directory, <root>/<YYYY-MM-DD>/<name>/ with work/ and outputs/. When the desktop marks the
 //    Pi as such (PIDESK_PROJECTLESS), a prompt section tells the model how to use it, as Codex does.
+// 7. A working-style section: the habits Claude Code's prompt asks for that Pi's own rules (which stop
+//    at "be concise") lack, such as answering a question instead of changing code and reporting failures.
 import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
@@ -25,7 +27,7 @@ import { homedir } from 'node:os';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { Type } from 'typebox';
 import { createBashToolDefinition } from '@earendil-works/pi-coding-agent';
-import { createSubagentTool } from './pidesk-subagent.mjs';
+import { createSubagentTool, isActiveAgent } from './pidesk-subagent.mjs';
 import { createSpeed } from './pidesk-speed.mjs';
 import { AWAY_ANSWER, createUltra, parseVerdict, reviewBrief } from './pidesk-ultra.mjs';
 
@@ -127,6 +129,21 @@ export function runtimeNote(runtime) {
     "Runtime availability is not permission to run tests, builds, installs, or GUI applications. Respect the user's restrictions, including no local tests or GUI launches and CI/SSH-only verification.",
     'Prefer bounded lookup in known paths (for example command -v node), not a filesystem-wide find / search. Report missing tools instead of installing them without permission.',
   ].join('\n');
+}
+
+// How to work, in Pi Desktop's words. Pi's rules already cover its file tools (read rather than cat).
+// In Ultra the user has handed the work over and is away, so nothing waits for their confirmation.
+export function workingNote({ unattended = false } = {}) {
+  return [
+    'When the user asks a question or describes a problem without asking for a change, the answer is your assessment: say what you found, then stop. Change things only when asked to.',
+    'Move on once you know enough: what the conversation has established stays established, and a decision the user made stays made. Mention only options you would take, and when you weigh a choice, give your recommendation.',
+    'Be accurate about results: show the output of a failing test, mention any step you skipped, and keep what you checked apart from what you assume. Work that is done and verified needs no hedging.',
+    'Write code that fits the code around it: its naming, its idioms, its amount of commenting.',
+    unattended
+      ? 'Look at what you are about to delete or overwrite before you do it.'
+      : 'Before anything hard to undo or that reaches beyond this machine (deleting data, force-pushing, publishing, sending messages), confirm with the user unless they or the project\'s instructions already said to go ahead, and look at what you are about to delete or overwrite.',
+    'Send tool calls that don\'t depend on each other together, in one step.',
+  ].map(line => `- ${line}`).join('\n');
 }
 
 const BOOT = Symbol.for('pidesk.boot');
@@ -337,7 +354,7 @@ export default function pideskBridge(pi) {
 
   // ---------------------------------------------------------------- agents
   // Agents run inside this Pi. Their live state reaches the desktop as a status line; reports reach
-  // the coordinating agent as messages, sent when it is idle (see pidesk-subagent.mjs).
+  // the coordinating agent as messages, after its current step or as a new turn (see pidesk-subagent.mjs).
   let agentUi = null, parentRunning = false;
   const subagents = createSubagentTool({
     notify: (message, options) => pi.sendMessage(message, options),
@@ -362,6 +379,8 @@ export default function pideskBridge(pi) {
       if (result.status !== 'completed') return { verdict: 'error', text: result.error || `the review agent ${result.status}`, details };
       return { verdict: parseVerdict(result.output), text: result.output.replace(/\n*\**VERDICT:\s*\**\s*(PASS|GAPS)\b[\s\S]*$/i, '').trim() || result.output, details };
     },
+    // Agents still working: their reports start the next turn, so Ultra doesn't push one.
+    agentsRunning: () => subagents.agents().some(isActiveAgent),
   });
   let agentsResetAt = 0; // in an Ultra task, the limit on new agents starts over every hour
   const lastUserText = ctx => {
@@ -375,7 +394,7 @@ export default function pideskBridge(pi) {
     name: 'report_progress',
     label: 'Report progress',
     description: 'Ultra mode: record progress on the task after each meaningful step. The user sees it, and it is carried into later turns, also after the context is compacted.',
-    promptSnippet: 'report_progress: note what is done, what comes next and any assumption (Ultra mode)',
+    promptSnippet: 'Note what is done, what comes next and any assumption (Ultra mode)',
     parameters: Type.Object({
       done: Type.String({ description: 'What is done so far, briefly' }),
       next: Type.String({ description: 'The next step' }),
@@ -387,7 +406,7 @@ export default function pideskBridge(pi) {
     name: 'finish_task',
     label: 'Finish task',
     description: 'Ultra mode: finish the task when everything the request asks for is done and verified. The first call asks for an audit against the request; a later call has an independent reviewer check the work.',
-    promptSnippet: 'finish_task: finish the Ultra task with a summary, after an audit and an independent review',
+    promptSnippet: 'Finish the Ultra task with a summary, after an audit and an independent review',
     parameters: Type.Object({
       summary: Type.String({ description: 'For the user: what you did, how you verified it, assumptions you made, and what is still open' }),
     }),
@@ -505,11 +524,12 @@ export default function pideskBridge(pi) {
     if (note) (options.sections ??= {}).projectless = note;
     if (options) {
       subagents.setPromptOptions(options); // project instructions for agents that start fresh
-      const guidance = subagents.promptSection(options.cwd);
-      if (guidance) (options.sections ??= {}).subagents = guidance;
-      else if (options.sections) delete options.sections.subagents;
-      (options.sections ??= {}).runtime = runtimeNote(runtime);
       const unattended = ultra.promptSection();
+      (options.sections ??= {}).working_style = workingNote({ unattended: !!unattended });
+      const guidance = subagents.promptSection(options.cwd);
+      if (guidance) options.sections.subagents = guidance;
+      else delete options.sections.subagents;
+      options.sections.runtime = runtimeNote(runtime);
       if (unattended) options.sections.ultra = unattended;
       else delete options.sections.ultra;
     }
@@ -611,7 +631,7 @@ export default function pideskBridge(pi) {
     name: 'ask_user',
     label: 'Ask user',
     description: 'Ask the user a question and wait for their answer. Use it when you need a decision, a preference, or information you cannot find yourself. Provide `options` when there are a few clear choices; the user can still answer in their own words.',
-    promptSnippet: 'ask_user: ask the user a question (optionally with choices) and wait for the answer',
+    promptSnippet: 'Ask the user a question (optionally with choices) and wait for the answer',
     promptGuidelines: ['Use ask_user only when you cannot proceed sensibly without the user; prefer finding answers yourself.'],
     parameters: Type.Object({
       question: Type.String({ description: 'The question, phrased for the user' }),
@@ -634,7 +654,7 @@ export default function pideskBridge(pi) {
     name: 'present_files',
     label: 'Present files',
     description: 'Show files to the user as cards they can open or download to their own computer. Use it for a finished file the user asked for or will want to keep (a report, an export, a generated image, an archive, a build artifact) once it is written. Not for files you only read, scratch files, or source files you merely edited.',
-    promptSnippet: 'present_files: give the user finished files to open or download',
+    promptSnippet: 'Give the user finished files to open or download',
     promptGuidelines: ['When you create a file the user asked for or will want to keep, call present_files with its path once it is complete, instead of only naming the path: the files may be on another machine than the user, and this is how they get them.'],
     parameters: Type.Object({
       paths: Type.Array(Type.String({ description: 'Path of a file, relative to the working directory or absolute' }), { minItems: 1, maxItems: 20 }),

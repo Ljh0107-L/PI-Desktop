@@ -10,7 +10,7 @@ import { createSubagentTool } from '../agent/pidesk-subagent.mjs';
 import pideskBridge from '../agent/pidesk-bridge.js';
 import { SessionManager } from '../app/main/session-manager.mjs';
 
-function harness({ enabled = true, review = null } = {}) {
+function harness({ enabled = true, review = null, agentsRunning } = {}) {
   const sent = [], entries = [], timers = [], statuses = [];
   let active = ['read', 'bash', 'report_progress', 'finish_task'], clock = 1000;
   const pi = {
@@ -18,13 +18,35 @@ function harness({ enabled = true, review = null } = {}) {
     appendEntry: (customType, data) => entries.push({ type: 'custom', customType, data: structuredClone(data) }),
     getActiveTools: () => [...active], setActiveTools: names => { active = [...names]; },
   };
-  const ultra = createUltra(pi, { enabled, review, now: () => clock, schedule: (fn, ms) => { const t = { fn, ms }; timers.push(t); return t; }, cancel: t => { t.cancelled = true; } });
+  const ultra = createUltra(pi, { enabled, review, agentsRunning, now: () => clock, schedule: (fn, ms) => { const t = { fn, ms }; timers.push(t); return t; }, cancel: t => { t.cancelled = true; } });
   ultra.attach({ ui: { setStatus: (key, value) => statuses.push([key, JSON.parse(value)]) } });
   const run = (messages, aborted = false) => { ultra.onRunEnd(messages); return ultra.onSettled({ aborted }); };
   const withTools = [{ role: 'assistant', content: [{ type: 'toolCall', name: 'bash' }], stopReason: 'toolUse' }, { role: 'assistant', content: [{ type: 'text', text: 'ok' }], stopReason: 'stop' }];
   const talk = [{ role: 'assistant', content: [{ type: 'text', text: 'Thinking about it.' }], stopReason: 'stop' }];
   return { ultra, sent, entries, timers, statuses, run, withTools, talk, active: () => active, tick: ms => { clock += ms; } };
 }
+
+test('while agents it started are working, their reports start the next turn instead of a push', () => {
+  let running = true;
+  const h = harness({ agentsRunning: () => running });
+  h.ultra.onInput('Port the parser and its tests');
+  assert.equal(h.run(h.withTools), true);
+  assert.equal(h.sent.length, 0, 'no continuation while an agent works: it would only ask the agent for status');
+  assert.equal(h.ultra.task.status, 'active');
+  assert.equal(h.ultra.task.turns, 1);
+  running = false;
+  h.run(h.withTools); // the turn a report started
+  assert.equal(h.sent.length, 1, 'pushed on once no agent is working');
+  assert.match(h.ultra.promptSection(), /to wait for agents you started, end your turn and their reports start the next one/);
+  assert.match(h.ultra.promptSection(), /Pi Desktop then has an independent reviewer check the work, so you need no review agents of your own/);
+});
+
+test('the Ultra prompt has the model carry out what it planned, and act on what it saw', () => {
+  const h = harness();
+  assert.match(h.ultra.promptSection(), /reread your last paragraph: if it is a plan, a promise or a list of next steps, carry it out now instead/);
+  assert.match(h.ultra.promptSection(), /Before a command that changes a system's state \(restarting a service, deleting data, changing configuration\), make sure what you have actually seen calls for it, not just what you suspect/);
+  assert.equal(harness({ enabled: false }).ultra.promptSection(), null);
+});
 
 test('a message starts a task, and a run that ends unfinished starts the next one', () => {
   const h = harness();
@@ -220,6 +242,8 @@ test('in the bridge: unattended answers, its own continuation over /goal, and a 
   const sections = {};
   f.emit('before_agent_start', { messageType: 'user', prompt: 'x', systemPromptOptions: { cwd: '/workspace', sections } }, ctx);
   assert.match(sections.ultra, /Ultra mode is on/);
+  assert.doesNotMatch(sections.working_style, /confirm with the user/, 'Ultra asks for no confirmation');
+  assert.match(sections.working_style, /Look at what you are about to delete or overwrite before you do it/);
   // A goal is set too: Ultra, not /goal, continues while its task runs.
   await (await import('node:util')).promisify(setImmediate)();
   f.emit('input', { text: 'Ship the importer', source: 'rpc' }, ctx);
@@ -251,6 +275,10 @@ test('in the bridge: unattended answers, its own continuation over /goal, and a 
   assert.ok(seenTools.includes('bash') && !seenTools.includes('write') && !seenTools.includes('edit'), `the reviewer can run checks but not edit: ${seenTools}`);
   await f.config({ subagents: 'off', ultra: false }, ctx);
   assert.ok(!f.active().includes('finish_task'));
+  const after = {};
+  f.emit('before_agent_start', { messageType: 'user', prompt: 'x', systemPromptOptions: { cwd: '/workspace', sections: after } }, ctx);
+  assert.equal(after.ultra, undefined);
+  assert.match(after.working_style, /confirm with the user/, 'the confirmation is back once Ultra is off');
   t.after(() => f.emit('session_shutdown', {}, ctx));
 });
 

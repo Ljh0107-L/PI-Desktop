@@ -7,7 +7,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
 import { AssistantMessageEventStream, registerSessionResourceCleanup } from '@earendil-works/pi-ai';
 import { Type } from 'typebox';
-import { createSubagentTool, recordSubagentStep, SUBAGENT_PROMPT, TRACE_MAX_BYTES, TRACE_MAX_STEPS } from '../agent/pidesk-subagent.mjs';
+import { createSubagentTool, recordSubagentStep, TRACE_MAX_BYTES, TRACE_MAX_STEPS } from '../agent/pidesk-subagent.mjs';
 import { outputs, usageOf } from '../app/renderer/src/transcript.js';
 import { UsageLedger } from '../app/main/usage.mjs';
 
@@ -66,8 +66,9 @@ test('fresh agents get their brief, project instructions, model and effort, not 
     assert.deepEqual(names.sort(), ['bash', 'read', 'write']);
   }
   assert.equal(result.usage.totalTokens, 36);
-  assert.ok(SUBAGENT_PROMPT.includes('every user instruction that applies'));
-  assert.ok(SUBAGENT_PROMPT.includes('isolation to "worktree"'));
+  const { tool: described } = createSubagentTool({});
+  assert.ok(described.description.includes("the user's instructions that apply"));
+  assert.match(described.parameters.properties.tasks.items.properties.isolation.description, /separate files or worktrees/);
 });
 
 test('one concurrency pool applies across simultaneous batches; results retain task order', async () => {

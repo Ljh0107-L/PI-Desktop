@@ -40,9 +40,16 @@ export function SubagentSummary({ sessionId, call, tool }) {
   </section>;
 }
 
-// A background agent's report in the conversation: who reported, and a way into its activity.
-export function AgentReport({ sessionId, agent }) {
-  if (!agent) return null;
+// Background agents' reports in the conversation: one card for reports in a row, a row per agent.
+export function AgentReports({ sessionId, agents }) {
+  if (!agents?.length) return null;
+  return <div className="agent-reports">
+    {agents.map((agent, i) => <AgentReport key={agent.id ?? i} sessionId={sessionId} agent={agent} />)}
+  </div>;
+}
+
+// One agent's report: who reported, and a way into its activity.
+function AgentReport({ sessionId, agent }) {
   const done = agent.status === 'completed';
   const canOpen = typeof agent.callId === 'string' && Number.isInteger(agent.index);
   return <button className={`agent-report ${agent.status}`} disabled={!canOpen} title={agent.error || undefined}

@@ -2,7 +2,7 @@
 
 The coordinating agent can start agents that work in their own context windows and report back. Their main purpose is to keep the conversation's context on what matters: an agent may read tens of thousands of tokens of files and logs, but only its report enters the conversation. Independent work can also run in parallel.
 
-Pi delegates sparingly, the way Claude Code does: the main task, ordinary searches and edits stay with the coordinating agent, which looks at the code itself before it delegates anything. Agents are for a broad read-only sweep of a large codebase, independent work large enough to run in parallel, or an independent review, and each gets one small, bounded task.
+Pi delegates sparingly, the way Claude Code does. By default (Settings → Agents: When asked) it starts agents only when you, the project's instructions or a skill ask for them, and otherwise does the work itself, however large. With When useful it decides for itself: the main task, ordinary searches and edits still stay with the coordinating agent, and agents are for a broad read-only sweep of a large codebase, independent work large enough to run in parallel, or a second opinion on finished work. Each agent gets one small, bounded task, briefed in full the first time.
 
 Ask in ordinary language, for example:
 
@@ -27,11 +27,11 @@ Every agent uses the session's model and reasoning effort unless a custom defini
 
 ## Running, reports, follow-ups
 
-- **Background by default.** The `subagent` call returns at once with each agent's id. When an agent finishes, its report arrives in the conversation as a message ("Automated message from Pi Desktop, not from the user…") that starts the coordinating agent's next turn if it is idle. If it is busy, reports wait until its turn ends; after a Stop they are recorded without starting a turn.
+- **Background by default.** The `subagent` call returns at once with each agent's id. When an agent finishes, its report arrives in the conversation as a message ("Automated message from Pi Desktop, not from the user…") that starts the coordinating agent's next turn if it is idle. If it is busy, the report reaches it after its current step; reports in a row share one card in the conversation. After a Stop they are recorded without starting a turn.
 - **Waiting.** `background: false` makes the call wait for the reports, up to `waitSeconds` (default 600). Agents still running then carry on in the background and report later; nothing is killed for taking long.
 - **Follow-ups.** `subagent_message { id, message }` continues an agent with its context intact. A finished agent starts another run; a working one reads the message within its current run. The last 24 finished agents stay available.
 - **Stop.** `subagent_stop { id }`, or **Stop** in the inspector, cancels an agent. A stopped agent cannot be continued.
-- **How many.** One message can start at most 2 new agents (Settings → Agents: Off, Limited with 2, More with 5). Follow-ups to existing agents don't count. A call over the limit starts none of its agents and tells the model to do the work itself; its card says Not started. Off removes the tools and their guidance.
+- **How many.** One message can start at most 2 new agents (Settings → Agents: Off; When asked, up to 2; When useful, up to 5). Follow-ups to existing agents don't count. A call over the limit starts none of its agents and tells the model to do the work itself; its card says Not started. Off removes the tools and their guidance.
 - **Limits.** Up to 8 tasks per call; up to 5 agents work at once per session, the rest queue. There is no time limit and no turn limit. An agent whose model gives no response for 10 minutes (while no tool is running) is stopped as stalled. Each report is bounded to about 8 KB.
 
 Reports are the agent's claims: the coordinating agent is told to check what matters before relying on them and to relay what matters to you. Delegation grants no extra permission; your restrictions apply to agents too.
@@ -81,7 +81,7 @@ with file paths and line numbers. Don't edit anything.
 
 ## Internals
 
-`agent/pidesk-subagent.mjs` holds the runtime and the prompts (`SUBAGENT_PROMPT` for the coordinating agent, the agent prompts, and the fork directive); the bridge registers the `subagent`, `subagent_message` and `subagent_stop` tools and adds the guidance, with the list of agent types, as a system-prompt section before each run. Coding tools go through the parent's `ctx.executeTool()` pipeline (validation, hooks, permissions). Bash timeouts default to 120 seconds when omitted. The execution trace keeps public text and tool steps only (at most 80 steps and 64 KiB per agent), never hidden thinking, credentials or inherited prompts. Output-limit recovery (once per run) and transient retries (twice per run) are unchanged from earlier versions.
+`agent/pidesk-subagent.mjs` holds the runtime and the prompts (`subagentPrompt(mode)` for the coordinating agent, the agent prompts, and the fork directive); the bridge registers the `subagent`, `subagent_message` and `subagent_stop` tools and adds the guidance, with the list of agent types, as a system-prompt section before each run. Coding tools go through the parent's `ctx.executeTool()` pipeline (validation, hooks, permissions). Bash timeouts default to 120 seconds when omitted. The execution trace keeps public text and tool steps only (at most 80 steps and 64 KiB per agent), never hidden thinking, credentials or inherited prompts. Output-limit recovery (once per run) and transient retries (twice per run) are unchanged from earlier versions.
 
 Live state reaches the desktop as the `pidesk-agents` status line (throttled to one update a second, and resent every 30 seconds while agents work); reports are `pidesk-agent` custom messages saved in the session file; each run's usage is reported exactly once as `details.agentRuns`.
 

@@ -3,7 +3,7 @@ import { Icon } from './Icons.jsx';
 import { Sidebar, SessionMenuItems } from './Sidebar.jsx';
 import { Composer, ComposerBar } from './Composer.jsx';
 import { Transcript } from './Conversation.jsx';
-import { AgentReport, SubagentSummary } from './Subagents.jsx';
+import { AgentReports, SubagentSummary } from './Subagents.jsx';
 import { RightPanel } from './RightPanel.jsx';
 import { SettingsPage } from './Settings.jsx';
 import { FilePane } from './FilePane.jsx';
@@ -126,7 +126,7 @@ function SessionView({ session }) {
       <div className="session-main">
         <Transcript session={session} transcript={transcript} questions={questions}
           renderSubagents={block => <SubagentSummary key={block.key} sessionId={session.id} call={block.call} tool={transcript.tools[block.call.id]} />}
-          renderAgentReport={block => <AgentReport key={block.key} sessionId={session.id} agent={block.agent} />} />
+          renderAgentReport={block => <AgentReports key={block.key} sessionId={session.id} agents={block.agents} />} />
         <div className="dock">
           {session.engine === 'cursor'
             // Cursor CLI was removed: its old conversations can still be read, copied and deleted.

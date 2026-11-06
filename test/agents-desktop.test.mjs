@@ -97,8 +97,39 @@ test('a report is one row in the conversation, and its files count as outputs', 
   const a = agent('a', 'completed', 2, { files: [{ path: '/w/notes.md', tool: 'write' }] });
   const t = { tools: {}, messages: [{ role: 'user', content: 'go', timestamp: 1 }, report(a), { role: 'assistant', content: [{ type: 'text', text: 'Thanks' }], timestamp: 6 }] };
   const blocks = displayBlocks(t);
-  const row = blocks.find(b => b.kind === 'agentReport');
-  assert.equal(row.agent.id, 'a');
-  assert.ok(blocks.indexOf(row) < blocks.findIndex(b => b.kind === 'text' || b.kind === 'markdown' || b.kind === 'assistant'), 'the reply follows the report');
+  const card = blocks.find(b => b.kind === 'agentReports');
+  assert.deepEqual(card.agents.map(r => r.id), ['a']);
+  assert.ok(blocks.indexOf(card) < blocks.findIndex(b => b.kind === 'text' || b.kind === 'markdown' || b.kind === 'assistant'), 'the reply follows the report');
   assert.deepEqual(outputs(t).map(f => f.path), ['/w/notes.md']);
+});
+
+test('reports in a row share one card with a row per agent; one that arrives mid-work stays in that turn', () => {
+  const keyed = (a, n) => { const m = report(a); return { ...m, details: { ...m.details, key: `${a.id}:${n}` } }; };
+  const said = (text, extra = {}) => ({ role: 'assistant', content: [{ type: 'text', text }], stopReason: 'stop', usage: usage(5), timestamp: 2, ...extra });
+  const review = agent('b', 'completed', 3, { name: 'Review' });
+  // Eight reports held until the turn ended, as 0.2.0 sent them: one card, the latest report per agent.
+  let t = { tools: {}, messages: [
+    { role: 'user', content: 'go', timestamp: 1 }, said('Started them'),
+    keyed(agent('a', 'completed', 2), 1), keyed(review, 1), keyed(agent('a', 'completed', 4), 2), keyed(agent('b', 'failed', 5, { name: 'Review' }), 2), keyed(agent('a', 'completed', 6, { output: 'latest' }), 3),
+    said('Thanks', { timestamp: 7 }),
+  ] };
+  let blocks = displayBlocks(t);
+  const cards = blocks.filter(b => b.kind === 'agentReports');
+  assert.equal(cards.length, 1);
+  assert.deepEqual(cards[0].agents.map(r => [r.id, r.status, r.output ?? null]), [['a', 'completed', 'latest'], ['b', 'failed', null]]);
+  assert.equal(blocks.filter(b => b.kind === 'usage').length, 2, 'the reply after the reports is its own turn');
+  // Reports that come back later are another card.
+  t = { ...t, messages: [...t.messages, keyed(agent('a', 'completed', 8), 4)] };
+  assert.equal(displayBlocks(t).filter(b => b.kind === 'agentReports').length, 2);
+  // A report handed over while Pi is working (after a tool result) is a row in that work, not a new turn.
+  t = { tools: {}, messages: [
+    { role: 'user', content: 'go', timestamp: 1 },
+    { role: 'assistant', content: [{ type: 'toolCall', id: 't1', name: 'bash', arguments: { command: 'ls' } }], stopReason: 'toolUse', usage: usage(5), timestamp: 2 },
+    { role: 'toolResult', toolCallId: 't1', toolName: 'bash', content: [{ type: 'text', text: 'ok' }], timestamp: 3 },
+    keyed(agent('a', 'completed', 4), 1),
+    said('Done', { timestamp: 5 }),
+  ] };
+  blocks = displayBlocks(t);
+  assert.equal(blocks.filter(b => b.kind === 'usage').length, 1, 'one turn, one footer');
+  assert.ok(blocks.findIndex(b => b.kind === 'agentReports') < blocks.findIndex(b => b.kind === 'usage'));
 });

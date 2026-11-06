@@ -394,11 +394,24 @@ export function displayBlocks(t) {
       else { flush(); blocks.push({ kind: 'break', key: `x${mi}` }); }
       return;
     }
-    // A background agent's report: a compact row; the reply that follows answers it.
+    // Background agents' reports. Reports in a row share one card, a row per agent with its latest
+    // report. One that reached Pi mid-work (after a tool result) is a row in that work; one that reached
+    // an idle Pi starts a turn, and the reply that follows answers it.
     if (message.role === 'custom' && message.customType === 'pidesk-agent') {
       const key = message.details?.key ?? mi;
-      flush(); closeTurn(); turnKey = `agent:${key}`;
-      blocks.push({ kind: 'agentReport', key: `agent-report:${key}`, agent: message.details?.agent ?? null });
+      const agent = message.details?.agent ?? null;
+      flush();
+      const follows = all[mi - 1]?.role === 'custom' && all[mi - 1].customType === 'pidesk-agent';
+      const card = follows && blocks.at(-1)?.kind === 'agentReports' ? blocks.at(-1) : null;
+      if (!card) {
+        let p = mi - 1;
+        while (p >= 0 && all[p].role === 'custom' && all[p].customType === 'pidesk-agent') p--;
+        if (all[p]?.role !== 'toolResult') { closeTurn(); turnKey = `agent:${key}`; }
+        blocks.push({ kind: 'agentReports', key: `agent-reports:${key}`, agents: agent ? [agent] : [] });
+      } else if (agent) {
+        const i = card.agents.findIndex(a => a.id === agent.id);
+        if (i >= 0) card.agents[i] = agent; else card.agents.push(agent);
+      }
       return;
     }
     if (message.role === 'custom' && message.customType === 'pidesk-subagent-notice') {

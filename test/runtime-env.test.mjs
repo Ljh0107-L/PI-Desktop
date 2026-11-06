@@ -4,7 +4,7 @@ import { accessSync, chmodSync, constants, existsSync, lstatSync, mkdirSync, mkd
 import { tmpdir } from 'node:os';
 import { basename, delimiter, dirname, join } from 'node:path';
 import test from 'node:test';
-import pideskBridge, { runtimeNote, setupRuntimeEnvironment } from '../agent/pidesk-bridge.js';
+import pideskBridge, { runtimeNote, setupRuntimeEnvironment, workingNote } from '../agent/pidesk-bridge.js';
 
 // Child-process checks are deliberately CI-only. They never launch Electron or a GUI:
 // the Electron case uses either a shell fixture or the CI runner's actual Node binary.
@@ -202,6 +202,22 @@ test('runtime prompt facts are accurate and confer no test, install or GUI permi
   assert.match(runtimeNote(null), /session setup has not run/);
 });
 
+test('the working-style note: an assessment for a question, accurate reports, and a confirmation before what can\'t be undone, except in Ultra', () => {
+  const note = workingNote();
+  assert.match(note, /describes a problem without asking for a change, the answer is your assessment: say what you found, then stop/);
+  assert.match(note, /a decision the user made stays made/);
+  assert.match(note, /show the output of a failing test, mention any step you skipped/);
+  assert.match(note, /fits the code around it/);
+  assert.match(note, /confirm with the user unless they or the project's instructions already said to go ahead/);
+  assert.match(note, /Send tool calls that don't depend on each other together, in one step/);
+  assert.doesNotMatch(note, /instead of cat|dedicated tool/, 'Pi\'s own rules already cover its file tools');
+  const unattended = workingNote({ unattended: true });
+  assert.doesNotMatch(unattended, /confirm with the user/, 'nobody is there to confirm in Ultra');
+  assert.match(unattended, /Look at what you are about to delete or overwrite before you do it/);
+  assert.equal(unattended.split('\n').length, note.split('\n').length);
+  assert.ok(note.length < 1200, 'a short section');
+});
+
 test('bridge waits for session_start and adds runtime metadata without replacing other sections', t => {
   const { env } = fixture(t);
   const keys = ['PATH', 'PI_NODE', 'PI_CODING_AGENT_DIR', 'PIDESK_BOOT'];
@@ -225,6 +241,7 @@ test('bridge waits for session_start and adds runtime metadata without replacing
   assert.equal(before.systemPromptOptions.sections.existing, 'unchanged');
   assert.match(before.systemPromptOptions.sections.runtime, /Node is available/);
   assert.ok(before.systemPromptOptions.sections.subagents);
+  assert.equal(before.systemPromptOptions.sections.working_style, workingNote());
   assert.equal(before.systemPrompt, undefined);
   for (const handler of handlers.get('session_shutdown')) handler({});
 });

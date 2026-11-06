@@ -482,8 +482,8 @@ function UsagePage() {
 // ---------------------------------------------------------------- agents
 const SUBAGENT_MODES = [
   { id: 'off', label: 'Off' },
-  { id: 'limited', label: 'Up to 2 per message' },
-  { id: 'more', label: 'Up to 5 per message' },
+  { id: 'limited', label: 'When asked, up to 2 per message', detail: 'Pi starts agents only when you, the project’s instructions or a skill ask for them.' },
+  { id: 'more', label: 'When useful, up to 5 per message', detail: 'Pi starts agents when it judges they help.' },
 ];
 function AgentsPage() {
   const mode = useStore(s => s.settings.defaults?.subagents) ?? 'limited';
@@ -498,7 +498,7 @@ function AgentsPage() {
       <div className="section-head"><h2 className="section-title">Subagents</h2></div>
       <div className="grouped-list" role="radiogroup" aria-label="Subagents">
         {SUBAGENT_MODES.map(m => (
-          <button key={m.id} type="button" role="radio" aria-checked={mode === m.id} className={`grouped-row selectable ${mode === m.id ? 'on' : ''}`} onClick={() => choose(m.id)}>
+          <button key={m.id} type="button" role="radio" aria-checked={mode === m.id} className={`grouped-row selectable ${mode === m.id ? 'on' : ''}`} title={m.detail} onClick={() => choose(m.id)}>
             <span className="grouped-main"><span className="grouped-title">{m.label}</span></span>
             {mode === m.id && <Icon name="check" size={16} className="grouped-check" />}
           </button>

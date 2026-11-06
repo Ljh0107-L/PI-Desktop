@@ -497,7 +497,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             case 'tools': return <ToolGroup key={block.key} calls={block.calls} tools={transcript.tools} live={!!transcript.live} />;
             case 'subagents': return renderSubagents?.(block);
             case 'files': return <FileCards key={block.key} sessionId={readOnly ? null : session?.id} call={block.call} tool={transcript.tools[block.call.id]} />;
-            case 'agentReport': return renderAgentReport?.(block) ?? null;
+            case 'agentReports': return renderAgentReport?.(block) ?? null;
             case 'ask': return transcript.tools[block.call.id]?.status === 'done' ? <AskBlock key={block.key} call={block.call} tool={transcript.tools[block.call.id]} /> : null;
             case 'bash': return <pre key={block.key} className="tool-output">$ {block.message.command}{'\n'}{block.message.output}</pre>;
             case 'error': return <div key={block.key} className="block-error"><Icon name="alert" size={15} /> {block.text}</div>;
