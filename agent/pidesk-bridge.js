@@ -320,7 +320,18 @@ export default function pideskBridge(pi) {
     },
   });
   for (const tool of [subagents.tool, subagents.messageTool, subagents.stopTool]) pi.registerTool(tool);
+  // Settings → Subagents: off removes the tools and their guidance; otherwise it caps new agents per request.
+  const SUBAGENT_TOOLS = [subagents.tool.name, subagents.messageTool.name, subagents.stopTool.name];
+  subagents.setMode(boot.config?.subagents ?? 'limited');
+  const applySubagentMode = () => {
+    try {
+      const active = pi.getActiveTools();
+      const want = subagents.mode === 'off' ? active.filter(name => !SUBAGENT_TOOLS.includes(name)) : [...new Set([...active, ...SUBAGENT_TOOLS])];
+      if (want.length !== active.length) pi.setActiveTools(want);
+    } catch { /* applied again when the session starts */ }
+  };
   pi.on('session_start', (_event, ctx) => {
+    applySubagentMode();
     agentUi = ctx.ui;
     // Agents that were still running when this session's previous Pi ended: record that they stopped.
     setTimeout(() => { try { subagents.restore(ctx.sessionManager.getBranch()); } catch { /* best effort */ } subagents.sync(); }, 0);
@@ -343,6 +354,18 @@ export default function pideskBridge(pi) {
         else if (verb === 'message') subagents.message(id, Buffer.from(payload ?? '', 'base64').toString('utf8'), { from: 'user' }).promise.catch(() => {});
         else subagents.sync();
       } catch (error) { ctx?.ui?.notify?.(error.message, 'error'); }
+    },
+  });
+
+  // Desktop settings that shape this Pi's behaviour (for now Settings → Subagents), as base64 JSON.
+  pi.registerCommand?.('pidesk-config', {
+    description: 'Pi Desktop: apply settings',
+    handler: async args => {
+      try {
+        const next = JSON.parse(Buffer.from(String(args ?? '').trim(), 'base64').toString('utf8'));
+        if (next?.subagents) { subagents.setMode(next.subagents); applySubagentMode(); }
+        globalThis[BOOT] = { ...(globalThis[BOOT] ?? {}), config: { ...(globalThis[BOOT]?.config ?? {}), ...next } };
+      } catch { process.stderr.write('pidesk: ignoring malformed settings\n'); }
     },
   });
 
@@ -379,13 +402,16 @@ export default function pideskBridge(pi) {
   // ---------------------------------------------------------------- No folder
   // A structured prompt section (not a replaced prompt), so Pi records it once as a transcript delta.
   pi.on('before_agent_start', event => {
+    if (event.messageType === 'user') subagents.newRequest(); // the per-request agent limit starts over
     const options = event.systemPromptOptions;
     const note = options && projectlessNote(options.cwd);
     if (note) (options.sections ??= {}).projectless = note;
     if (options) {
       subagents.setPromptOptions(options); // project instructions for agents that start fresh
-      (options.sections ??= {}).subagents = subagents.promptSection(options.cwd);
-      options.sections.runtime = runtimeNote(runtime);
+      const guidance = subagents.promptSection(options.cwd);
+      if (guidance) (options.sections ??= {}).subagents = guidance;
+      else if (options.sections) delete options.sections.subagents;
+      (options.sections ??= {}).runtime = runtimeNote(runtime);
     }
   });
 

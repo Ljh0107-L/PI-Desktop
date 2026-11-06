@@ -188,7 +188,11 @@ const api = {
     manager.providersChanged();
     return publicSettings();
   },
-  updateDefaults(patch) { Object.assign(store.settings.defaults, patch); store.saveSettings(); return publicSettings(); },
+  updateDefaults(patch) {
+    Object.assign(store.settings.defaults, patch); store.saveSettings();
+    if (Object.hasOwn(patch ?? {}, 'subagents')) manager.configChanged(); // running Pis apply it before their next prompt
+    return publicSettings();
+  },
   listSessions: () => manager.list(),
   resumeRemote: () => manager.resumeRemote(),
   prewarm: draft => manager.prewarm(draft),

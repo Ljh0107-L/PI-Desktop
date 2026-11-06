@@ -121,28 +121,44 @@ const blockedToolSummary = (tool, args) => clip(typeof args?.description === 'st
   : tool === 'bash' ? 'shell command' : `${tool} operation`, 180);
 
 // ---------------------------------------------------------------- guidance
-export const SUBAGENT_PROMPT = `The subagent tool starts agents that work in their own context windows and report back to you. Delegating keeps this conversation's context on what matters and lets independent work run in parallel. It also costs time and tokens, so use it where it pays.
+// How many new agents one user request may start, by the Settings → Subagents choice.
+export const AGENT_LIMITS = { off: 0, limited: 2, more: 5 };
 
-When to delegate
-- A question that needs searching or reading across many files: an explore agent (read-only) does the reading and returns the answer with paths, so only the conclusion enters this conversation.
-- Independent pieces of work that can run at the same time, each with its own files.
-- A side task that needs what this conversation has already established: a fork sees the whole conversation, so its brief can be just the task.
-- Do the work yourself when it takes a few tool calls, when you already know which file to open, when the steps depend closely on each other, or when it needs back-and-forth with the user.
+// Most work should not be delegated: models that read "delegate searches" delegated the main task
+// itself, a few tool calls in (seen in real sessions). The guidance leads with doing the work.
+export const subagentPrompt = (limit = AGENT_LIMITS.limited) => `The subagent tool starts agents with their own context windows. Most work doesn't need one: do it yourself by default. An agent starts without this conversation, needs time to get oriented, and leaves you a report you still have to check, so delegating usually costs more than it saves.
 
-Writing the brief (general, explore and custom agents see nothing of this conversation)
+Do it yourself
+- The main task the user asked for: understanding it, making the changes and verifying them is your job, not an agent's.
+- Searches and reads that take a few tool calls (grep, find, read), including finding where something is defined or used.
+- Anything that depends on what you just learned, or that you will need to understand in detail afterwards.
+- Look at the code yourself before you consider delegating: you can't brief work you haven't scoped.
+
+Delegate only when it clearly pays
+- A sweep across a large, unfamiliar codebase that would take many reads and whose details you won't need afterwards: an explore agent (read-only) reads and reports the answer with paths.
+- Separate pieces of work that are truly independent and large enough to be worth running in parallel while you carry on with the main task.
+- An independent review of finished work: give the agent the diff or files to examine, not your conclusion, since an agent handed a hypothesis tends to confirm it.
+- A side task that needs this conversation's context: a fork sees the whole conversation, so its brief can be just the task.
+- At most ${limit} new agent${limit === 1 ? '' : 's'} per user request (a setting). Sending an existing agent more instructions with subagent_message doesn't count.
+
+Keep each agent's task small
+- One agent, one question to answer or one self-contained change, with its scope spelled out: which files or directories, and what not to touch. If you can't say in a sentence what done looks like, the task is too big or not yet understood: keep it yourself.
+- Independent small tasks go in one call and run in parallel. A large job stays with you, split into steps you do yourself.
+
+Writing the brief (agents other than a fork see nothing of this conversation)
 - Say what to find out or change and what done looks like; what you already know or have ruled out; the files and paths involved; what it may change and what it must leave alone; every user instruction that applies to it (for example "don't run tests locally", "no commits"); and what its report should contain.
-- For an independent review, hand over the code or diff to examine, not your conclusion: an agent given a hypothesis tends to confirm it.
 
 While agents run
-- By default agents run in the background: the call returns at once and each agent's report arrives later as a message. Meanwhile work on something that doesn't depend on them, or end your turn. Don't redo delegated work, and don't guess at results that haven't arrived.
-- Set background to false only when you can't continue without the results and the work is short. If the wait runs out, the agents keep going and report later.
-- Several tasks in one call run in parallel. Agents share the working tree unless a task sets isolation to "worktree": a separate git checkout of the last commit, on its own branch. Give concurrent writers separate files or worktrees.
-- subagent_message continues an agent with its context intact: a follow-up question, a correction, the next step. subagent_stop cancels an agent that is going the wrong way.
+- By default the call returns at once and each report arrives later as a message: keep working on the main task meanwhile. Don't redo delegated work, and don't guess at results that haven't arrived.
+- Set background to false for short work you can't continue without; if the wait runs out, the agents keep going and report later.
+- Agents share the working tree unless a task sets isolation to "worktree": a separate git checkout of the last commit, on its own branch. Give concurrent writers separate files or worktrees.
+- subagent_message continues an agent with its context intact; subagent_stop cancels an agent that is going the wrong way.
 
 Using the reports
 - A report is the agent's claim, not proof. Check what matters before relying on it (read the changed files, run the check) and tell the user what you verified.
 - The user doesn't see agent reports in full: relay what matters in your own words.
 - Delegation grants no extra permission: the user's restrictions apply to agents too.`;
+export const SUBAGENT_PROMPT = subagentPrompt();
 
 const MARKER = 'You are a Pi Desktop subagent, not the coordinating assistant.';
 const CHILD_BASE = `${MARKER}
@@ -232,7 +248,7 @@ export function agentTypesSection(definitions = []) {
   const lines = [
     'Agent types (a task\'s type):',
     '- general (default): coding tools: read, write, edit, bash, grep, find, ls.',
-    '- explore: read-only searching and reading (read, grep, find, ls, and bash for read-only commands). It skips project instruction files: put what it needs in the brief.',
+    '- explore: read-only (read, grep, find, ls, and bash for read-only commands). It locates code and answers where and how questions across many files, with paths and line numbers; it doesn\'t review or judge. It skips project instruction files: put what it needs in the brief.',
     '- fork: a copy of you with this whole conversation, your tools and model. It can\'t start agents or ask the user.',
     ...definitions.map(d => `- ${d.name}: ${d.description} (tools: ${d.tools.join(', ') || 'none'}${d.isolation ? '; own worktree' : ''})`),
   ];
@@ -328,6 +344,7 @@ const describeAgent = agent => `${agent.name} (id ${agent.id}, ${agent.type}${ag
 export function createSubagentTool({
   concurrency = 5, retryDelayMs = 1000, stallMs = 10 * 60 * 1000, maxRetained = 24, defaultWaitSeconds = 600, heartbeatMs = 30000,
   notify, publish, isIdle, parentTools, home,
+  agentLimit = null, // overrides the Settings limit on new agents per request (tests of concurrency)
 } = {}) {
   const pool = new Pool(concurrency);
   const lifetime = new AbortController();
@@ -336,6 +353,7 @@ export function createSubagentTool({
   let promptOptions = {};               // project context, captured before each parent run
   let definitions = [];                 // custom agents for the current working directory
   let definitionsCwd = null;
+  let mode = 'limited', startedInRequest = 0; // Settings → Subagents, and new agents since the user's last message
 
   // ---- publishing live state (throttled) to the desktop
   const changed = new Set();
@@ -749,13 +767,13 @@ export function createSubagentTool({
   // ---------------------------------------------------------------- tools
   const tool = {
     name: 'subagent', label: 'Subagents', exposure: 'model-only',
-    description: 'Start agents that work in their own context windows and report back: tasks [{name, task, type?, isolation?}]. Types: general (default), explore (read-only), fork (a copy of you with this conversation), or a custom type from your instructions. Runs in the background by default; each report arrives as a message.',
-    promptSnippet: 'Start agents for searches (explore), parallel independent work, or context-heavy side tasks (fork).',
-    promptGuidelines: ['Brief fresh agents fully (goal, paths, scope, user instructions, what to report). Background agents report later as messages: do not redo their work or guess results. Verify reports before relying on them.'],
+    description: 'Start agents with their own context windows, for work that clearly pays to delegate: a broad read-only sweep of a large codebase (explore), independent work large enough to run in parallel, or an independent review. Do the main task, ordinary searches and edits yourself, and keep each task small: one question or one bounded change. tasks [{name, task, type?, isolation?}]; types: general (default), explore (read-only), fork (a copy of you with this conversation), or a custom type from your instructions. Runs in the background by default and each report arrives as a message; at most a few new agents per user request.',
+    promptSnippet: 'Delegate only large, independent or review work; do the main task, searches and edits yourself.',
+    promptGuidelines: ['Do the work yourself by default; delegate only what clearly pays, after looking at the code yourself. Brief fresh agents fully (goal, paths, scope, user instructions, what to report). Verify reports before relying on them.'],
     parameters: Type.Object({
       tasks: Type.Array(Type.Object({
-        name: Type.String({ minLength: 1, maxLength: 80, description: 'Short label for this agent' }),
-        task: Type.String({ minLength: 1, maxLength: 20000, description: 'The brief: goal, what you know or ruled out, paths, scope, applicable user instructions, and what to report' }),
+        name: Type.String({ minLength: 1, maxLength: 80, description: 'What it does, in 3 to 6 words (for example "Find the retry logic")' }),
+        task: Type.String({ minLength: 1, maxLength: 20000, description: 'The brief for one bounded question or change: goal, what you know or ruled out, paths, scope, applicable user instructions, and what to report' }),
         type: Type.Optional(Type.String({ maxLength: 64, description: 'general (default), explore, fork, or a custom agent type listed in your instructions' })),
         isolation: Type.Optional(Type.Literal('worktree', { description: 'Work in a separate git worktree on its own branch, starting from the last commit' })),
       }), { minItems: 1, maxItems: MAX_TASKS }),
@@ -767,6 +785,14 @@ export function createSubagentTool({
       if (!ctx?.model) throw new Error('Select a model before delegating');
       if (!Array.isArray(params?.tasks) || !params.tasks.length || params.tasks.length > MAX_TASKS
         || params.tasks.some(t => !t || typeof t.name !== 'string' || !t.name.trim() || typeof t.task !== 'string' || !t.task.trim())) throw new Error(`Provide 1–${MAX_TASKS} non-empty named subagent tasks`);
+      const limit = agentLimit ?? AGENT_LIMITS[mode] ?? AGENT_LIMITS.limited;
+      if (startedInRequest + params.tasks.length > limit) {
+        const left = Math.max(0, limit - startedInRequest);
+        const text = limit === 0 ? 'Not started: subagents are off in Settings. Do this work yourself.'
+          : `Not started: at most ${limit} new agent${limit === 1 ? '' : 's'} per user request (Settings → Subagents), and this request has already started ${startedInRequest}.${left ? ` You can start ${left} more.` : ''} Do this work yourself, or send an existing agent more instructions with subagent_message.`;
+        return { content: [{ type: 'text', text }], details: { kind: 'pidesk-subagents', refused: text, results: [] }, isError: true };
+      }
+      startedInRequest += params.tasks.length;
       const background = params.background !== false;
       const cwd = ctx.cwd ?? promptOptions.cwd ?? process.cwd();
       const created = [];
@@ -882,9 +908,14 @@ export function createSubagentTool({
     tool, messageTool, stopTool,
     shutdown: () => { lifetime.abort(new Error('Parent session closed')); clearInterval(heartbeat); heartbeat = null; flushPublish(); },
     setPromptOptions(options) { promptOptions = options ?? {}; },
+    // off: no subagent tools or guidance; limited / more: how many new agents one request may start.
+    setMode(next) { if (Object.hasOwn(AGENT_LIMITS, next)) mode = next; },
+    get mode() { return mode; },
+    newRequest() { startedInRequest = 0; },
     promptSection(cwd) {
+      if (mode === 'off') return null;
       if (cwd && definitionsCwd !== cwd) { definitions = loadAgentDefinitions(cwd, { home }); definitionsCwd = cwd; }
-      return `${SUBAGENT_PROMPT}\n\n${agentTypesSection(definitions)}`;
+      return `${subagentPrompt(AGENT_LIMITS[mode])}\n\n${agentTypesSection(definitions)}`;
     },
     stop: (id, reason) => !!stop(id, reason),
     message: (id, text, options) => message(id, text, { background: true, ...options }),

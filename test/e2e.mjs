@@ -826,6 +826,18 @@ try {
   check('restore failed', false, error.message.split('\n')[0]);
   await S('zz-restore-failure').catch(() => {});
 }
+// ---- Settings → Agents: how many new agents Pi may start for one message
+try {
+  await page.click('.settings-button');
+  await page.click('.settings-sidebar .nav-item:has-text("Agents")');
+  await page.click('.grouped-row.selectable:has-text("Off")');
+  await page.locator('.grouped-row.selectable.on', { hasText: 'Off' }).waitFor();
+  const saved = JSON.parse(readFileSync(join(profile, 'settings.json'), 'utf8')).defaults?.subagents;
+  check('Settings → Agents saves how many agents Pi may start', saved === 'off', saved);
+  await page.click('.grouped-row.selectable:has-text("Limited")');
+  await page.locator('.grouped-row.selectable.on', { hasText: 'Limited' }).waitFor();
+  await page.click('.settings-sidebar .nav-item.back');
+} catch (error) { check('Settings → Agents', false, error.message.split('\n')[0]); }
 const secretsFile = readFileSync(join(profile, 'secrets.json'), 'utf8');
 check('settings never store the key in settings.json', !readFileSync(join(profile, 'settings.json'), 'utf8').includes('sk-e2e-secret') && !secretsFile.includes('sk-e2e-secret') && !readFileSync(join(profile, 'settings.json'), 'utf8').includes('sk-e2e-rotated') && !secretsFile.includes('sk-e2e-rotated'));
 await app.close();

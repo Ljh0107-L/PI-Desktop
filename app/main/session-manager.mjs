@@ -161,6 +161,17 @@ export class SessionManager extends EventEmitter {
     for (const key of [...this.spares.keys()]) this.#dropSpare(key);
     for (const runtime of this.runtimes.values()) if (runtime.status === 'connected') this.#syncProviders(runtime).catch(() => {});
   }
+  // Desktop settings a Pi applies itself (Settings → Subagents): in its boot record, then by command
+  // before the next prompt whenever they changed or the Pi started without them.
+  bootConfig() { return { subagents: this.store.settings.defaults?.subagents ?? 'limited' }; }
+  configChanged() { for (const runtime of this.runtimes.values()) if (runtime.status === 'connected') this.#syncConfig(runtime).catch(() => {}); }
+  async #syncConfig(runtime) {
+    const session = runtime?.session;
+    const key = JSON.stringify(this.bootConfig());
+    if (!session || runtime.configKey === key) return;
+    await session.prompt(`/pidesk-config ${Buffer.from(key).toString('base64')}`);
+    if (runtime.session === session) runtime.configKey = key;
+  }
   async #syncProviders(runtime) {
     const session = runtime?.session;
     if (!session) return;
@@ -528,7 +539,7 @@ export class SessionManager extends EventEmitter {
   async #start(record, runtime) {
     const env = this.env(record.environmentId);
     const bootVersion = this.providersVersion;
-    const boot = { providers: this.bootProviders() };
+    const boot = { providers: this.bootProviders(), config: this.bootConfig() };
     const piArgs = record.piSessionFile ? ['--session', record.piSessionFile] : [];
     let session;
     if (env.kind === 'local') {
@@ -579,7 +590,7 @@ export class SessionManager extends EventEmitter {
       await session.start({ readyTimeout: 90000 });
       this.#assertCurrent(record, runtime);
       this.#status(record, runtime, { status: runtime.status, phase: 'configuring' });
-      return await this.#configureSession(record, runtime, session, bootVersion);
+      return await this.#configureSession(record, runtime, session, bootVersion, JSON.stringify(boot.config));
     } catch (error) {
       await session.stop().catch(() => {});
       if (runtime.session === session) runtime.session = null;
@@ -588,9 +599,11 @@ export class SessionManager extends EventEmitter {
     }
   }
 
-  async #configureSession(record, runtime, session, bootVersion) {
+  async #configureSession(record, runtime, session, bootVersion, bootConfigKey) {
     runtime.lastSeq = session.lastSeq;
     const created = !!session.attachInfo?.created;
+    // A Pi this desktop just started has its boot settings; one that kept running may not.
+    runtime.configKey = created ? bootConfigKey : null;
     runtime.autoReconnect = true;
     const state = session.initialState ?? await session.state();
     runtime.streaming = !!state.isStreaming;
@@ -703,6 +716,7 @@ export class SessionManager extends EventEmitter {
       interrupted = true;
     }
     await this.#syncProviders(this.runtimes.get(id));
+    await this.#syncConfig(this.runtimes.get(id)).catch(() => {});
     // The first message names the conversation at once (its first line), and the model then suggests a
     // better title, as Claude does; a title the user set by hand is never replaced.
     let nameIt = null;

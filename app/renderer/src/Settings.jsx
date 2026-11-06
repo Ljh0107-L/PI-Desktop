@@ -479,12 +479,44 @@ function UsagePage() {
   </>;
 }
 
+// ---------------------------------------------------------------- agents
+const SUBAGENT_MODES = [
+  { id: 'off', label: 'Off', detail: 'Pi does all the work itself.' },
+  { id: 'limited', label: 'Limited', detail: 'Up to 2 new agents per message, for large independent work, broad searches or reviews.' },
+  { id: 'more', label: 'More', detail: 'Up to 5 new agents per message.' },
+];
+function AgentsPage() {
+  const mode = useStore(s => s.settings.defaults?.subagents) ?? 'limited';
+  const [error, setError] = useState(null);
+  const choose = async id => {
+    setError(null);
+    try { setSettings(await api('updateDefaults', { subagents: id })); }
+    catch (e) { setError(e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')); }
+  };
+  return (
+    <section className="section">
+      <div className="section-head"><h2 className="section-title">Subagents</h2></div>
+      <div className="grouped-list" role="radiogroup" aria-label="Subagents">
+        {SUBAGENT_MODES.map(m => (
+          <button key={m.id} type="button" role="radio" aria-checked={mode === m.id} className={`grouped-row selectable ${mode === m.id ? 'on' : ''}`} onClick={() => choose(m.id)}>
+            <span className="grouped-main"><span className="grouped-title">{m.label}</span><span className="grouped-detail">{m.detail}</span></span>
+            {mode === m.id && <Icon name="check" size={16} className="grouped-check" />}
+          </button>
+        ))}
+      </div>
+      {error && <div className="form-error"><Icon name="alert" size={14} /> {error}</div>}
+      <p className="settings-foot-note">How many agents Pi may start for one of your messages. Pi does the main work itself and delegates only pieces that clearly pay off; sending an agent that is already running more instructions doesn't count. Running conversations apply a change before their next message.</p>
+    </section>
+  );
+}
+
 // ---------------------------------------------------------------- page
 export function SettingsPage() {
   const tab = useStore(s => s.settingsTab);
   const pages = [
     { id: 'providers', label: 'Models', icon: 'sparkle', title: 'Models' },
     { id: 'connections', label: 'Connections', icon: 'server', title: 'Connections' },
+    { id: 'agents', label: 'Agents', icon: 'fork', title: 'Agents' },
     { id: 'usage', label: 'Usage', icon: 'gauge', title: 'Usage' },
   ];
   const page = pages.find(p => p.id === tab) ?? pages[0];
@@ -501,7 +533,7 @@ export function SettingsPage() {
         <div className="settings-drag drag" />
         <div className="settings-content">
           <h1 className="settings-title">{page.title}</h1>
-          {page.id === 'providers' ? <ModelsPage /> : page.id === 'usage' ? <UsagePage /> : <ConnectionsPage />}
+          {page.id === 'providers' ? <ModelsPage /> : page.id === 'usage' ? <UsagePage /> : page.id === 'agents' ? <AgentsPage /> : <ConnectionsPage />}
         </div>
       </main>
     </div>

@@ -2,6 +2,8 @@
 
 The coordinating agent can start agents that work in their own context windows and report back. Their main purpose is to keep the conversation's context on what matters: an agent may read tens of thousands of tokens of files and logs, but only its report enters the conversation. Independent work can also run in parallel.
 
+Pi delegates sparingly, the way Claude Code does: the main task, ordinary searches and edits stay with the coordinating agent, which looks at the code itself before it delegates anything. Agents are for a broad read-only sweep of a large codebase, independent work large enough to run in parallel, or an independent review, and each gets one small, bounded task.
+
 Ask in ordinary language, for example:
 
 > Have an explore agent find where sessions are restored after a restart and report the call path with file paths. Meanwhile, fix the typo in the README.
@@ -29,6 +31,7 @@ Every agent uses the session's model and reasoning effort unless a custom defini
 - **Waiting.** `background: false` makes the call wait for the reports, up to `waitSeconds` (default 600). Agents still running then carry on in the background and report later; nothing is killed for taking long.
 - **Follow-ups.** `subagent_message { id, message }` continues an agent with its context intact. A finished agent starts another run; a working one reads the message within its current run. The last 24 finished agents stay available.
 - **Stop.** `subagent_stop { id }`, or **Stop** in the inspector, cancels an agent. A stopped agent cannot be continued.
+- **How many.** One message can start at most 2 new agents (Settings → Agents: Off, Limited with 2, More with 5). Follow-ups to existing agents don't count. A call over the limit starts none of its agents and tells the model to do the work itself; its card says Not started. Off removes the tools and their guidance.
 - **Limits.** Up to 8 tasks per call; up to 5 agents work at once per session, the rest queue. There is no time limit and no turn limit. An agent whose model gives no response for 10 minutes (while no tool is running) is stopped as stalled. Each report is bounded to about 8 KB.
 
 Reports are the agent's claims: the coordinating agent is told to check what matters before relying on them and to relay what matters to you. Delegation grants no extra permission; your restrictions apply to agents too.

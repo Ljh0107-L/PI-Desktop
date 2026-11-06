@@ -10,7 +10,7 @@ export const visibleSubagentTasks = (tasks, clearedIds = []) => {
 export const visibleSubagentBatches = (batches, clearedIds = []) => batches.map(batch => ({ ...batch, tasks: visibleSubagentTasks(batch.tasks, clearedIds) }))
   .filter(batch => batch.tasks.length > 0);
 export const subagentStatus = status => ({ pending: 'Waiting for details', queued: 'Queued', running: 'Running', retrying: 'Retrying', completed: 'Completed', failed: 'Failed', cancelled: 'Cancelled', timed_out: 'Timed out' })[status] ?? status;
-export const subagentTaskStatus = task => task.status === 'failed' && (task.failureKind === 'output_limit' || /ended without a complete answer \(length\)/i.test(task.error ?? '')) ? 'Output limit' : subagentStatus(task.status);
+export const subagentTaskStatus = task => task.failureKind === 'refused' ? 'Not started' : task.status === 'failed' && (task.failureKind === 'output_limit' || /ended without a complete answer \(length\)/i.test(task.error ?? '')) ? 'Output limit' : subagentStatus(task.status);
 
 // Every saved or live state of each agent, newest kept: its later reports (pidesk-agent messages),
 // subagent_message/subagent_stop results, and the live state its Pi publishes.
@@ -41,7 +41,9 @@ export function subagentBatch(call, tool, latest = null) {
       ...current, index, key: `${call.id}:${index}`,
       name: current.name || `Task ${index + 1}`,
       task: planned[index]?.task ?? current.task ?? '',
-      status: recorded.length ? current.status : tool?.status === 'error' ? 'failed' : 'pending',
+      status: recorded.length ? current.status : details?.refused ? 'cancelled' : tool?.status === 'error' ? 'failed' : 'pending',
+      // The per-request limit refused this call: its agents never started.
+      ...(details?.refused && !recorded.length ? { failureKind: 'refused', error: details.refused } : {}),
     };
   });
   return { callId: call.id, tasks, background: details?.background === true };

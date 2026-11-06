@@ -72,7 +72,7 @@ test('fresh agents get their brief, project instructions, model and effort, not 
 
 test('one concurrency pool applies across simultaneous batches; results retain task order', async () => {
   const c = context(async () => { await sleep(25); return reply(); });
-  const controller = createSubagentTool({ concurrency: 3 });
+  const controller = createSubagentTool({ concurrency: 3, agentLimit: Infinity });
   const [a, b] = await Promise.all([run(controller, c, tasks(6)), run(controller, c, tasks(4))]);
   assert.equal(c.peak(), 3);
   assert.ok([...a.details.results, ...b.details.results].every(r => r.status === 'completed'));
@@ -224,7 +224,7 @@ test('user stop still cancels a task after more than twelve turns', async () => 
 
 for (const reason of ['parent', 'shutdown']) test(`${reason} cancels active and queued subagents it waits for`, async () => {
   const c = context(async request => { await sleep(10000, undefined, { signal: request.options.signal }); return reply(); });
-  const controller = createSubagentTool({ concurrency: 3 });
+  const controller = createSubagentTool({ concurrency: 3, agentLimit: Infinity });
   const parent = new AbortController();
   const updates = [];
   const promise = run(controller, c, tasks(6), parent.signal, value => updates.push(value));

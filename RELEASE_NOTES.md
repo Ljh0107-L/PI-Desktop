@@ -2,6 +2,12 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.1.45 — Fewer, smaller subagents
+
+- **Pi does the main work itself.** In real sessions the model handed its main task to agents a few tool calls in, and one request started seven of them. The delegation guidance now leads with doing the work, as in Claude Code: the main task, searches and edits stay with the model, which looks at the code itself first. It delegates only a broad read-only sweep of a large codebase, independent work big enough to run in parallel, or a review, and gives each agent one small, bounded task.
+- **A limit per message.** One message can start at most 2 new agents; sending an existing agent more instructions doesn't count. A call over the limit starts none of its agents and tells the model to do the work itself; its card says Not started.
+- **Settings → Agents.** Choose Off (no subagents: the tools and their guidance are gone), Limited (2 per message, the default) or More (5 per message). Running conversations apply a change before their next message.
+
 ## 0.1.44 — Downloads
 
 - **Download files from the file pane.** A file open in the file pane has a Download button, and the tree's right-click menu has Download too. It saves the file to this Mac through a save dialog that starts in Downloads, also from an SSH host, where the file is streamed byte for byte (any size, any content). An interrupted transfer never leaves a partial file under the chosen name. When it finishes, a notice offers Show in Finder.
