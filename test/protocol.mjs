@@ -32,10 +32,12 @@ function check(name, ok, detail = '') {
 
 // ---------------------------------------------------------------------------- fixtures
 const mock = await startMockLlm({ chunkDelay: 60 }); // slow enough that the two streams overlap on a loaded runner
-const keys = { alpha: 'sk-alpha-' + randomBytes(12).toString('hex'), beta: 'sk-beta-' + randomBytes(12).toString('hex') };
+const keys = { alpha: 'sk-alpha-' + randomBytes(12).toString('hex'), beta: 'sk-beta-' + randomBytes(12).toString('hex'), gemini: 'AIza-gemini-' + randomBytes(12).toString('hex') };
 const providers = [
   { id: 'mock-alpha', name: 'Mock Alpha', api: 'openai-completions', baseUrl: mock.baseUrl('mock-alpha'), apiKey: keys.alpha, models: [{ id: 'alpha-1' }, { id: 'alpha-2' }] },
   { id: 'mock-beta', name: 'Mock Beta', api: 'openai-completions', baseUrl: mock.baseUrl('mock-beta'), apiKey: keys.beta, models: [{ id: 'beta-1' }] },
+  // A custom endpoint speaking Google's protocol, with the base Pi Desktop saves for it.
+  { id: 'mock-gemini', name: 'Mock Gemini', api: 'google-generative-ai', baseUrl: `${mock.geminiRoot('mock-gemini')}/v1beta`, apiKey: keys.gemini, models: [{ id: 'gemini-mock-1' }] },
 ];
 const work = mkdtempSync(join(tmpdir(), 'pidesk-m0-'));
 const dirs = {
@@ -100,7 +102,7 @@ try {
 
   for (const session of sessions) {
     const models = (await session.availableModels()).map(m => `${m.provider}/${m.id}`);
-    check(`[${session.id}] providers registered from boot record`, ['mock-alpha/alpha-1', 'mock-alpha/alpha-2', 'mock-beta/beta-1'].every(id => models.includes(id)), models.filter(id => id.startsWith('mock-')).join(', '));
+    check(`[${session.id}] providers registered from boot record`, ['mock-alpha/alpha-1', 'mock-alpha/alpha-2', 'mock-beta/beta-1', 'mock-gemini/gemini-mock-1'].every(id => models.includes(id)), models.filter(id => id.startsWith('mock-')).join(', '));
   }
 
   await local.setModel('mock-alpha', 'alpha-1');
@@ -137,13 +139,28 @@ try {
   check('[local] the answer reached the model', eTool?.result?.content?.[0]?.text === 'The user answered: green' && e.text === 'Tool result: The user answered: green', e.text);
 
   // Tool subprocesses must not see the keys or the boot record.
-  const f = await run(remote, `[[bash:echo "boot=$(env | grep -c PIDESK_BOOT) alpha=$(env | grep -c ${keys.alpha.slice(0, 12)}) beta=$(env | grep -c ${keys.beta.slice(0, 11)})"]]`);
+  const f = await run(remote, `[[bash:echo "boot=$(env | grep -c PIDESK_BOOT) alpha=$(env | grep -c ${keys.alpha.slice(0, 12)}) beta=$(env | grep -c ${keys.beta.slice(0, 11)}) gemini=$(env | grep -c ${keys.gemini.slice(0, 14)})"]]`);
   const envOut = f.tools.find(t => t.toolName === 'bash')?.result?.content?.[0]?.text?.trim();
-  check('[remote] tool environment has no boot record or keys', envOut === 'boot=0 alpha=0 beta=0', envOut);
+  check('[remote] tool environment has no boot record or keys', envOut === 'boot=0 alpha=0 beta=0 gemini=0', envOut);
 
   // History is available for the desktop to render after reconnecting.
   const history = await remote.messages();
   check('[remote] history readable via get_messages', history.filter(m => m.role === 'user').length === 3, `${history.length} messages`);
+
+  // Google's protocol: Pi speaks the Gemini API to a custom endpoint, streams the reply, runs a tool
+  // through it, and sends the key in its header, never in the URL.
+  for (const session of sessions) {
+    await session.setModel('mock-gemini', 'gemini-mock-1');
+    const before = mock.requests.length;
+    const g = await run(session, `hello over Gemini from ${session.id}`);
+    check(`[${session.id}] streamed reply over Google's protocol`, g.deltas.length > 3 && g.text === `[mock-gemini/gemini-mock-1] echo: hello over Gemini from ${session.id}`, `${g.deltas.length} deltas: "${g.text}"`);
+    const t = await run(session, '[[bash:echo gemini-tool]]');
+    const tTool = t.tools.find(x => x.toolName === 'bash');
+    check(`[${session.id}] tool call and its result over Google's protocol`, tTool && !tTool.isError && t.text === 'Tool result: gemini-tool', `"${t.text}"`);
+    const sent = mock.requests.slice(before);
+    check(`[${session.id}] Gemini gets the system prompt and tools, and the key only in x-goog-api-key`, sent.length >= 3 && sent.every(r => r.provider === 'mock-gemini' && r.api === 'google' && r.apiKey === keys.gemini && !r.authorization && !r.url.includes(keys.gemini)) && sent.some(r => r.system.includes('<working_style>') && r.tools.some(x => x.name === 'bash')), JSON.stringify(sent.map(r => ({ provider: r.provider, url: r.url, tools: r.tools?.length }))));
+    await session.setModel('mock-beta', 'beta-1');
+  }
 
   // Subagents execute through the owning session, with its model/key/cwd and no extra Pi process.
   for (const session of sessions) {

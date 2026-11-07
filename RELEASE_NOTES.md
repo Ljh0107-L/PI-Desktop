@@ -2,6 +2,13 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.2 — Google's protocol for custom endpoints
+
+- **Custom endpoints can speak Google's Gemini API.** Settings → Models → Custom endpoint has a new protocol, **Google Gemini API compatible**, for relays and gateways that serve Gemini's own API instead of an OpenAI-compatible one. Pi talks to them natively, on this Mac and on SSH hosts, the same way as to the built-in Google Gemini provider: replies stream, and tools run through Gemini's function calls.
+- **The address as you have it.** Enter the endpoint's address with or without the API version: one without gets `/v1beta`, Google's default, unless the endpoint answers only without one. A pasted request URL works too; its `models/…` path and its query, which can hold the key, are dropped. The key goes in the `x-goog-api-key` header, never in the URL.
+- **Its models.** Choose models lists all of the endpoint's models, page by page, leaves out the ones that only embed text or make images, and fills in each model's name, context window, output limit and whether it thinks.
+- **The telling error when listing models fails.** A wrong key showed the 404 of the second address tried; now it shows the refusal, with Google's own message (such as "API key not valid") for Gemini endpoints.
+
 ## 0.2.1 — Agents when asked
 
 - **Agents when you ask for them.** In real sessions the model still handed agents work it could do itself, such as an independent review before anything had changed. By default Pi now starts agents only when you, the project's instructions or a skill ask for them, and otherwise does the work itself, however large. Settings → Agents calls the choices **When asked, up to 2 per message** (the default, formerly Limited) and **When useful, up to 5 per message** (formerly More), where the model decides for itself, with details on hover. The delegation guidance in the system prompt went from about 3,900 characters to about 350; the details are in the subagent tool's description, which now also says that one small task is never worth splitting and that an agent needs its full brief the first time.

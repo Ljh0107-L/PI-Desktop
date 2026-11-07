@@ -163,7 +163,8 @@ const api = {
     return listCustomModels(draft, apiKey);
   },
   async saveProvider(provider, key) {
-    // With or without /v1: an OpenAI-compatible URL is kept as entered unless only the other form serves the API.
+    // With or without the version: an OpenAI-compatible URL is kept as entered unless only the other form
+    // serves the API, and a Google one without a version gets /v1beta.
     const baseUrl = provider.kind === 'custom' ? await resolveProviderBaseUrl(provider, key || store.getKey(provider.id)) : provider.baseUrl;
     const providers = store.settings.providers;
     const index = providers.findIndex(p => p.id === provider.id);

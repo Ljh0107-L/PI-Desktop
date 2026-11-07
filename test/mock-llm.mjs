@@ -1,4 +1,4 @@
-// Deterministic OpenAI-compatible chat-completions server for offline M0 verification.
+// Deterministic OpenAI-compatible chat-completions server (and a Gemini API one) for offline M0 verification.
 // Each provider gets its own path prefix: /<provider>/v1/chat/completions.
 // Requests are logged (provider, model, bearer token) so tests can prove which key reached which provider.
 //
@@ -12,10 +12,53 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const textOf = content => typeof content === 'string' ? content
   : Array.isArray(content) ? content.map(part => part?.text ?? '').join('') : '';
 
+// Google's protocol (Gemini API) under /<provider>/v1beta: the model list in two pages (the second
+// with a model that only embeds), and streamGenerateContent with the key in x-goog-api-key. Same
+// behaviour as above for echoes, [[bash:…]] and tool results.
+async function geminiReply(req, res, [, provider, model, query = ''], { requests, chunkDelay }) {
+  if (!model) {
+    if (req.method !== 'GET') return res.writeHead(404).end();
+    const second = new URLSearchParams(query).get('pageToken') === 'page-2';
+    const models = second
+      ? [{ name: 'models/gemini-embed-mock', displayName: 'Gemini Embed Mock', supportedGenerationMethods: ['embedContent'] }]
+      : [{ name: 'models/gemini-mock-1', displayName: 'Gemini Mock 1', inputTokenLimit: 1048576, outputTokenLimit: 65536, supportedGenerationMethods: ['generateContent', 'countTokens'], thinking: true }];
+    return res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ models, ...(second ? {} : { nextPageToken: 'page-2' }) }));
+  }
+  if (req.method !== 'POST') return res.writeHead(404).end();
+  let body = '';
+  for await (const chunk of req) body += chunk;
+  const payload = JSON.parse(body || '{}');
+  const contents = payload.contents ?? [];
+  const textOfParts = parts => (parts ?? []).map(part => part.text ?? '').join('');
+  const system = textOfParts((payload.systemInstruction ?? payload.system_instruction)?.parts);
+  const tools = (payload.tools ?? []).flatMap(tool => tool.functionDeclarations ?? []).map(f => ({ name: f.name, description: f.description ?? '' }));
+  requests.push({ provider, model, api: 'google', apiKey: req.headers['x-goog-api-key'] ?? '', authorization: req.headers.authorization ?? '', url: req.url,
+    messageCount: contents.length, system, tools, subagent: system.includes('You are a Pi Desktop subagent, not the coordinating assistant.'), at: Date.now() });
+  res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+  const send = (parts, finishReason) => res.write('data: ' + JSON.stringify({
+    candidates: [{ content: { role: 'model', parts }, index: 0, ...(finishReason ? { finishReason } : {}) }],
+    ...(finishReason ? { usageMetadata: { promptTokenCount: 20, candidatesTokenCount: 10, totalTokenCount: 30 } } : {}), modelVersion: model,
+  }) + '\n\n');
+  const userText = textOfParts([...contents].reverse().find(c => c.role === 'user' && c.parts?.some(part => typeof part.text === 'string'))?.parts);
+  const result = (contents.at(-1)?.parts ?? []).find(part => part.functionResponse)?.functionResponse;
+  const bash = /\[\[bash:([\s\S]+?)\]\]/.exec(userText);
+  if (/^You name conversations/.test(system)) send([{ text: `"${userText.split('\n')[0].slice(0, 50).trim()} (named)"` }], 'STOP');
+  else if (result) send([{ text: `Tool result: ${String(result.response?.output ?? result.response?.error ?? '').split('\n')[0]}` }], 'STOP');
+  else if (bash) send([{ functionCall: { name: 'bash', args: { command: bash[1] } } }], 'STOP');
+  else {
+    const reply = `[${provider}/${model}] echo: ${userText}`;
+    for (let i = 0; i < reply.length; i += 8) { await sleep(chunkDelay); send([{ text: reply.slice(i, i + 8) }]); }
+    send([], 'STOP');
+  }
+  res.end();
+}
+
 export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
   const requests = [];
   const dropped = new Set();
   const server = http.createServer(async (req, res) => {
+    const gemini = /^\/([\w-]+)\/v1beta\/models(?:\/([^/:?]+):streamGenerateContent)?(?:\?(.*))?$/.exec(req.url ?? '');
+    if (gemini) return geminiReply(req, res, gemini, { requests, chunkDelay });
     const match = /^\/([\w-]+)\/v1\/chat\/completions$/.exec(req.url ?? '');
     if (req.method === 'GET' && /\/v1\/models$/.test(req.url ?? '')) {
       res.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ object: 'list', data: [{ id: 'alpha-1', object: 'model' }, { id: 'beta-1', object: 'model', context_length: 200000 }, { id: 'gamma-embed', object: 'model' }] }));
@@ -205,7 +248,8 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
   });
   return new Promise(resolve => server.listen(port, '127.0.0.1', () => {
     const { port: actual } = server.address();
-    resolve({ port: actual, baseUrl: provider => `http://127.0.0.1:${actual}/${provider}/v1`, requests, close: () => new Promise(r => server.close(r)) });
+    resolve({ port: actual, baseUrl: provider => `http://127.0.0.1:${actual}/${provider}/v1`, geminiRoot: provider => `http://127.0.0.1:${actual}/${provider}`,
+      requests, close: () => new Promise(r => server.close(r)) });
   }));
 }
 

@@ -9,6 +9,7 @@ const CUSTOM_APIS = [
   { id: 'openai-completions', label: 'OpenAI Chat Completions compatible' },
   { id: 'openai-responses', label: 'OpenAI Responses compatible' },
   { id: 'anthropic-messages', label: 'Anthropic Messages compatible' },
+  { id: 'google-generative-ai', label: 'Google Gemini API compatible', baseUrl: 'https://example.com/v1beta', key: 'AIza…' },
 ];
 const slug = text => text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'custom';
 
@@ -174,9 +175,11 @@ function ProviderEditor({ initial, onDone }) {
     finally { setBusy(false); }
   };
   const fieldError = f => error?.field === f && <span className="field-error">{error.message}</span>;
+  const protocol = CUSTOM_APIS.find(a => a.id === apiType);
+  const keyHint = kind === 'custom' ? protocol?.key : builtinId === 'google' ? 'AIza…' : undefined;
   const keyField = (
     <label className={`field ${error?.field === 'key' ? 'invalid' : ''}`}><span className="field-label">API key</span>
-      <input type="password" value={key} onChange={e => setKey(e.target.value)} placeholder={editing ? '•••••••• saved' : 'sk-…'} autoComplete="off" spellCheck={false} />{fieldError('key')}</label>
+      <input type="password" value={key} onChange={e => setKey(e.target.value)} placeholder={editing ? '•••••••• saved' : keyHint ?? 'sk-…'} autoComplete="off" spellCheck={false} />{fieldError('key')}</label>
   );
   return (
     <form className="editor" onSubmit={save}>
@@ -201,7 +204,7 @@ function ProviderEditor({ initial, onDone }) {
           </label>
         </div>
         <div className="field-pair">
-          <label className={`field ${error?.field === 'baseUrl' ? 'invalid' : ''}`}><span className="field-label">Base URL</span><input value={baseUrl} onChange={e => setBaseUrl(e.target.value)} placeholder="https://example.com/v1" spellCheck={false} />{fieldError('baseUrl')}</label>
+          <label className={`field ${error?.field === 'baseUrl' ? 'invalid' : ''}`}><span className="field-label">Base URL</span><input value={baseUrl} onChange={e => setBaseUrl(e.target.value)} placeholder={protocol?.baseUrl ?? 'https://example.com/v1'} spellCheck={false} />{fieldError('baseUrl')}</label>
           {keyField}
         </div>
       </>}

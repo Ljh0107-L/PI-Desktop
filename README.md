@@ -24,7 +24,7 @@ npm start                      # builds the renderer and opens the app
 npm run dist                   # builds the .dmg / .zip into release/
 ```
 
-Add a provider under **Settings (bottom left) → Models** (built-in providers such as DeepSeek, Anthropic, OpenAI, OpenRouter, or any OpenAI/Anthropic-compatible endpoint), choose an environment and folder under the message box, and start typing.
+Add a provider under **Settings (bottom left) → Models** (built-in providers such as DeepSeek, Anthropic, OpenAI, OpenRouter, or any endpoint compatible with OpenAI's, Anthropic's or Google's Gemini API), choose an environment and folder under the message box, and start typing.
 
 ## How it works
 

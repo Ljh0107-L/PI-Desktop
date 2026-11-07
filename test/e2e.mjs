@@ -351,6 +351,26 @@ try {
   await page.fill('form.editor label.field:has-text("API key") input', 'sk-e2e-rotated');
   await page.click('form.editor button[type=submit]');
   await page.locator('form.editor').waitFor({ state: 'detached' });
+  // A custom endpoint speaking Google's protocol (Gemini API), its URL entered without the version.
+  await page.click('.add-button:has-text("Add provider")');
+  await page.click('.segmented button:has-text("Custom endpoint")');
+  await page.fill('label.field:has-text("Name") input', 'Mock Gemini');
+  await page.selectOption('label.field:has-text("API protocol") select', { label: 'Google Gemini API compatible' });
+  await page.fill('label.field:has-text("Base URL") input', mock.geminiRoot('mock-gemini'));
+  await page.fill('label.field:has-text("API key") input', 'AIza-e2e-gemini');
+  await page.click('.model-catalog .link-button:has-text("Choose models")');
+  await page.locator('.modal .pick-row', { hasText: 'Gemini Mock 1' }).waitFor({ timeout: 30000 }); // Gemini's display name
+  const geminiListed = await page.locator('.modal .pick-row').allInnerTexts();
+  await page.click('.modal .pick-row:has-text("Gemini Mock 1")');
+  await page.click('.modal-foot .button.primary');
+  await page.click('form.editor button[type=submit]');
+  await page.locator('.row-card', { hasText: 'Mock Gemini' }).waitFor();
+  await page.locator('form.editor').waitFor({ state: 'detached' });
+  const gemini = JSON.parse(readFileSync(join(profile, 'settings.json'), 'utf8')).providers.find(p => p.name === 'Mock Gemini');
+  check('a Google-protocol endpoint added via Settings: /v1beta added, only models that generate, their limits kept',
+    gemini?.api === 'google-generative-ai' && gemini.baseUrl === `${mock.geminiRoot('mock-gemini')}/v1beta` && geminiListed.length === 1 &&
+    gemini.models?.length === 1 && gemini.models[0].id === 'gemini-mock-1' && gemini.models[0].contextWindow === 1048576 && gemini.models[0].reasoning === true,
+    JSON.stringify({ api: gemini?.api, baseUrl: gemini?.baseUrl, listed: geminiListed, models: gemini?.models }));
   // Settings → Usage: totals, a day in the activity graph, models ranked by tokens
   await page.click('.settings-sidebar-nav .nav-item:has-text("Usage")');
   await page.locator('.model-rank-row').first().waitFor({ timeout: 15000 });
@@ -364,6 +384,16 @@ try {
   await page.click('.nav-item.back');
   await waitNew('.markdown', 'echo: after rotating the key', () => send('after rotating the key'));
   check('a running session picks up a rotated API key', mock.requests.at(-1).authorization === 'Bearer sk-e2e-rotated', mock.requests.at(-1).authorization);
+  // The same session replies through the Google-protocol endpoint added above, then goes back to beta-1.
+  await page.locator('.model-trigger').click();
+  await page.locator('.model-menu .menu-item', { hasText: /Gemini Mock 1|gemini-mock-1/ }).click();
+  await waitNew('.markdown', '[mock-gemini/gemini-mock-1] echo: over Google', () => send('over Google'));
+  const viaGemini = mock.requests.at(-1);
+  check('a session replies through the Google-protocol endpoint, the key in x-goog-api-key',
+    viaGemini?.api === 'google' && viaGemini.provider === 'mock-gemini' && viaGemini.apiKey === 'AIza-e2e-gemini' && !viaGemini.authorization && !viaGemini.url.includes('AIza'),
+    JSON.stringify({ api: viaGemini?.api, provider: viaGemini?.provider, url: viaGemini?.url }));
+  await page.locator('.model-trigger').click();
+  await page.click('.model-menu .menu-item:has-text("beta-1")');
 
   await composer().fill('Here is some code:\n```js\nconst answer = 42;\nfunction greet(name) { return `hi ${name}`; }\n```');
   await composer().press('Enter');
