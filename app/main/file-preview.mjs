@@ -33,7 +33,8 @@ export async function filePreview(operation, cwd, rel = '', { fs, home } = {}) {
   const imageTypes = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', ico: 'image/x-icon' };
   const extension = extname(path).slice(1).toLowerCase();
   const image = Object.hasOwn(imageTypes, extension) ? imageTypes[extension] : null;
-  const limit = image ? 8 << 20 : 1 << 20;
+  const pdf = extension === 'pdf';
+  const limit = pdf ? 32 << 20 : image ? 8 << 20 : 1 << 20;
   // Nonblocking open prevents a FIFO (including one substituted during a race) from
   // hanging the main process. Validate the opened descriptor, never an earlier stat(path).
   const handle = await fs.open(path, constants.O_RDONLY | (constants.O_NONBLOCK ?? 0));
@@ -59,6 +60,7 @@ export async function filePreview(operation, cwd, rel = '', { fs, home } = {}) {
   } finally {
     await handle.close();
   }
+  if (pdf) return { path, size, kind: 'pdf', truncated, dataUrl: truncated ? null : `data:application/pdf;base64,${data.toString('base64')}` };
   if (image) return { path, size, kind: 'image', truncated, dataUrl: truncated ? null : `data:${image};base64,${data.toString('base64')}` };
   const binary = data.includes(0);
   // StringDecoder holds an incomplete trailing UTF-8 sequence instead of displaying a

@@ -3,6 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import hljs from 'highlight.js/lib/common';
 import { Icon } from './Icons.jsx';
 import { MenuItem, Markdown, Popover, Spinner, useResizable } from './ui.jsx';
+import { ImagePreview } from './ImagePreview.jsx';
 import { changeStats, hunkLines } from './diffs.js';
 import { api, closeFile, downloadFile, notify, openFile, set as setStore, setFilePaneOpen, useStore } from './store.js';
 
@@ -13,7 +14,7 @@ const LANGS = { js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'ja
 const extOf = path => { const name = path.split('/').pop().toLowerCase(); return name === 'makefile' ? 'makefile' : name.includes('.') ? name.split('.').pop() : ''; };
 export const iconFor = name => {
   const ext = extOf(name);
-  if (['md', 'txt', 'rst'].includes(ext)) return 'fileText';
+  if (['md', 'txt', 'rst', 'pdf'].includes(ext)) return 'fileText';
   if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico'].includes(ext)) return 'fileImage';
   if (LANGS[ext]) return 'fileCode';
   return 'fileAny';
@@ -93,6 +94,17 @@ function CodeView({ text, ext }) {
   );
 }
 
+function PdfPreview({ dataUrl, name }) {
+  const [url, setUrl] = useState(null);
+  useEffect(() => {
+    const bytes = Uint8Array.from(atob(dataUrl.slice(dataUrl.indexOf(',') + 1)), c => c.charCodeAt(0));
+    const objectUrl = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+    setUrl(objectUrl);
+    return () => URL.revokeObjectURL(objectUrl);
+  }, [dataUrl]);
+  return url ? <iframe className="fp-pdf" src={url} title={`PDF: ${name}`} /> : <div className="fp-empty"><Spinner /></div>;
+}
+
 function Preview({ sessionId, path, refreshKey }) {
   const [file, setFile] = useState(null);
   const [error, setError] = useState(null);
@@ -118,7 +130,8 @@ function Preview({ sessionId, path, refreshKey }) {
       <div className="fp-content" ref={scroller}>
         {error && <div className="fp-empty error"><Icon name="alert" size={15} /> {error}</div>}
         {!error && !file && <div className="fp-empty"><Spinner /></div>}
-        {file?.kind === 'image' && (file.dataUrl ? <div className="fp-image"><img src={file.dataUrl} alt={parts.at(-1)} /></div> : <div className="fp-empty">Image too large to preview · {sizeLabel(file.size)}</div>)}
+        {file?.kind === 'image' && (file.dataUrl ? <div className="fp-image"><ImagePreview src={file.dataUrl} alt={parts.at(-1)} /></div> : <div className="fp-empty">Image too large to preview · {sizeLabel(file.size)}</div>)}
+        {file?.kind === 'pdf' && (file.dataUrl ? <PdfPreview dataUrl={file.dataUrl} name={parts.at(-1)} /> : <div className="fp-empty">PDF too large to preview · {sizeLabel(file.size)} (32 MB limit)</div>)}
         {file?.kind === 'binary' && <div className="fp-empty"><Icon name="fileAny" size={16} /> Binary file · {sizeLabel(file.size)}</div>}
         {file?.kind === 'text' && (ext === 'md' && !source
           ? <div className="fp-markdown"><Markdown text={file.content} sessionId={sessionId} documentPath={file.path ?? path} refreshKey={refreshKey} /></div>

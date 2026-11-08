@@ -10,7 +10,7 @@ export const emptyTranscript = () => ({ messages: [], live: null, tools: {}, loa
 function toolsFromMessages(messages) {
   const tools = {};
   for (const message of messages) {
-    if (message.role === 'toolResult') tools[message.toolCallId] = { status: message.isError ? 'error' : 'done', ...(message.__history && !message.__history.truncated ? { fullHistory: true } : {}), result: { content: message.content, details: message.details } };
+    if (message.role === 'toolResult') tools[message.toolCallId] = { status: message.isError ? 'error' : 'done', ...(message.__history && !message.__history.truncated ? { fullHistory: true } : {}), ...(message.__history?.truncated ? { historyRef: message.__history.ref } : {}), result: { content: message.content, details: message.details } };
   }
   return tools;
 }
@@ -365,16 +365,20 @@ export function displayBlocks(t) {
       const changes = changesOf(turn, t.tools);
       // Keep this footer mounted while the next API call is streaming. Its stable key follows the user
       // prompt, not the changing index at the end of the transcript.
-      if (usage.calls || changes.length) blocks.push({ kind: 'usage', key: `usage:${turnKey}`, usage, text, changes });
+      const hasPendingText = turn.some(m => m.__history?.truncated && (m.content ?? []).some((block, index) => block?.type === 'text' && (!m.__history.deferredContent || m.__history.deferredContent.includes(index))));
+      if (usage.calls || changes.length) blocks.push({ kind: 'usage', key: `usage:${turnKey}`, usage, text: hasPendingText ? '' : text, changes });
     }
     turn = [];
   };
   let ordinal = 0;
   all.forEach((message, mi) => {
     const mk = message.__entryId ?? `${message.role}:${message.timestamp ?? mi}:${message.toolCallId ?? ''}`;
-    if (message.__history?.truncated) {
+    const ref = message.__history?.truncated ? message.__history.ref : null;
+    const contentRef = index => ref && (!message.__history.deferredContent || message.__history.deferredContent.includes(index)) ? ref : null;
+    if (message.__history?.placeholder) {
       flush();
-      blocks.push({ kind: 'deferred', key: `detail:${mk}`, ref: message.__history.ref, role: message.role });
+      blocks.push({ kind: 'pendingHistory', key: `pending:${mk}`, historyRef: ref });
+      return;
     }
     if (message.role === 'assistant') turn.push(message);
     if (message.role === 'user') {
@@ -389,13 +393,13 @@ export function displayBlocks(t) {
       const att = /(?:^|\n\n)Attached files:\n((?:- .+(?:\n|$))+)$/.exec(text);
       if (att) { files = att[1].trim().split('\n').map(l => l.replace(/^- /, '')); text = text.slice(0, att.index); }
       const images = parts.filter(c => c.type === 'image' && c.data);
-      blocks.push({ kind: 'user', key: `u${mk}`, text, files, images, entryId: message.__entryId, truncated: message.__history?.truncated, ordinal: ordinal++ });
+      blocks.push({ kind: 'user', key: `u${mk}`, text, files, images, entryId: message.__entryId, truncated: message.__history?.truncated, historyRef: ref, ordinal: ordinal++ });
       return;
     }
     // A goal started with /goal (the bridge's hidden prompt): show what was set.
     if (message.role === 'custom' && message.customType === 'pidesk-goal') {
       const objective = /^The user set a goal[\s\S]*?<objective>\n([\s\S]*?)\n<\/objective>/.exec(typeof message.content === 'string' ? message.content : '')?.[1];
-      if (objective) { flush(); closeTurn(); turnKey = `goal:${mi}`; blocks.push({ kind: 'goal', key: `g${mk}`, objective }); }
+      if (objective) { flush(); closeTurn(); turnKey = `goal:${mi}`; blocks.push({ kind: 'goal', key: `g${mk}`, objective, historyRef: ref }); }
       // A goal continuation is a new prompt: the reply before it is an answer, not folded work.
       else { flush(); blocks.push({ kind: 'break', key: `x${mk}` }); }
       return;
@@ -421,20 +425,21 @@ export function displayBlocks(t) {
       return;
     }
     if (message.role === 'custom' && message.customType === 'pidesk-subagent-notice') {
-      flush(); blocks.push({ kind: 'notice', key: message.id ?? `notice:${mi}`, text: String(message.content ?? '') }); return;
+      flush(); blocks.push({ kind: 'notice', key: message.id ?? `notice:${mi}`, text: String(message.content ?? ''), historyRef: ref }); return;
     }
     if (message.role === 'toolResult' && message.__history && !declaredCalls.has(message.toolCallId)) {
-      flush(); blocks.push({ kind: 'orphanResult', key: `result:${mk}`, message }); return;
+      flush(); blocks.push({ kind: 'orphanResult', key: `result:${mk}`, message, historyRef: ref }); return;
     }
-    if (message.role === 'bashExecution') { flush(); blocks.push({ kind: 'bash', key: `b${mk}`, message }); return; }
-    if (message.role === 'compactionSummary') { flush(); blocks.push({ kind: 'compaction', key: `c${mk}`, summary: message.summary, tokensBefore: message.tokensBefore }); return; }
+    if (message.role === 'bashExecution') { flush(); blocks.push({ kind: 'bash', key: `b${mk}`, message, historyRef: ref }); return; }
+    if (message.role === 'compactionSummary') { flush(); blocks.push({ kind: 'compaction', key: `c${mk}`, summary: message.summary, tokensBefore: message.tokensBefore, historyRef: ref }); return; }
     if (message.role !== 'assistant') return;
     const reasoning = message.usage?.reasoning ?? 0;
     let sawThinking = false;
     const firstBlock = blocks.length;
     (message.content ?? []).forEach((block, bi) => {
       if (!block) return;
-      if (block.type === 'toolCall' && message.__history?.truncated) block = { ...block, __historyTruncated: true };
+      const historyRef = contentRef(bi);
+      if (block.type === 'toolCall' && historyRef) block = { ...block, __historyTruncated: true, __historyRef: historyRef };
       if (block.type === 'toolCall' && block.name === 'ask_user') { flush(); blocks.push({ kind: 'ask', key: `q${mk}-${bi}`, call: block }); return; }
       if (block.type === 'toolCall' && block.name === 'subagent') { flush(); blocks.push({ kind: 'subagents', key: `subagents:${block.id}`, call: block }); return; }
       // Files handed to the user are cards in the conversation, not a folded tool step.
@@ -444,15 +449,16 @@ export function displayBlocks(t) {
         group.calls.push(block);
         return;
       }
+      if (block.type === 'image') { flush(); blocks.push({ kind: 'image', key: `image:${mk}-${bi}`, image: block, historyRef }); return; }
       if (block.type === 'text' && !block.text?.trim()) return;
       flush();
-      if (block.type === 'text') blocks.push({ kind: 'text', key: `t${mk}-${bi}`, text: block.text, streaming: message === t.live });
+      if (block.type === 'text') blocks.push({ kind: 'text', key: `t${mk}-${bi}`, text: block.text, streaming: message === t.live, historyRef });
       if (block.type === 'thinking' && block.redacted) { sawThinking = true; blocks.push({ kind: 'thinking', key: `k${mk}-${bi}`, redacted: true, tokens: reasoning }); }
       else if (block.type === 'thinking' && block.thinking?.trim()) {
         sawThinking = true;
         // Far fewer characters than reasoning tokens: the provider sent a summary, not the full reasoning.
         const summary = reasoning > 0 && block.thinking.length / 4 < reasoning * 0.5;
-        blocks.push({ kind: 'thinking', key: `k${mk}-${bi}`, text: block.thinking, streaming: message === t.live, summary, tokens: reasoning, durationMs: message.__timing?.think ?? null });
+        blocks.push({ kind: 'thinking', key: `k${mk}-${bi}`, text: block.thinking, streaming: message === t.live, summary, tokens: reasoning, durationMs: message.__timing?.think ?? null, historyRef });
       }
     });
     // Reasoning that was billed but never shown (OpenAI o-series, hidden thinking): say so.

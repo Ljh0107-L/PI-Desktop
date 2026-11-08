@@ -22,6 +22,20 @@ export function mergeHistory(older, newer) {
   return out;
 }
 
+// A tail refresh updates locators and status, not the reader's already loaded window.
+export function mergeReloadedHistory(page, current) {
+  const messages = retainLoadedContent(page.messages, current.messages);
+  const ids = new Set(current.messages.map(m => m.__entryId).filter(Boolean));
+  const fingerprints = new Set(current.messages.filter(m => !m.__entryId).map(historyKey));
+  const overlap = messages.some(m => ids.has(m.__entryId) || fingerprints.has(historyKey(m)));
+  const keepWindow = current.history?.snapshot?.identity === page.snapshot?.identity && overlap && !current.rewinding;
+  return {
+    messages: keepWindow ? mergeHistory(current.messages, messages) : messages,
+    history: { ...(keepWindow ? current.history : {}), snapshot: page.snapshot, next: keepWindow ? current.history.next : page.next,
+      warning: page.warning ?? (keepWindow ? current.history.warning : null), loading: false },
+  };
+}
+
 // Refresh locators/status without collapsing content already received live or explicitly loaded.
 export function retainLoadedContent(page, current) {
   const byId = new Map(current.filter(m => m.__entryId).map(m => [m.__entryId, m]));

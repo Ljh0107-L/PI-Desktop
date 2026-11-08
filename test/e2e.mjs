@@ -70,11 +70,15 @@ const waitText = (selector, text, timeout = 60000) => page.locator(selector, { h
 // Historical assertions must explicitly browse pages; the first paint intentionally contains only
 // recent messages, and off-screen content is not mounted until it approaches the viewport.
 async function loadAllHistory() {
-  for (let i = 0; i < 40 && await page.locator('.session-main .history-earlier').count(); i++) {
-    await page.locator('.session-main .history-earlier').click();
-    await page.waitForFunction(() => !document.querySelector('.session-main .history-earlier')?.disabled);
+  for (let i = 0; i < 40 && await page.locator('.session-main .history-boundary').count(); i++) {
+    const before = await page.evaluate(() => JSON.stringify(window.__pideskState().transcripts[window.__pideskState().activeId].history.next));
+    await mainTranscript().evaluate(el => { el.scrollTop = 0; el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, bubbles: true })); });
+    await page.waitForFunction(before => {
+      const state = window.__pideskState(), history = state.transcripts[state.activeId].history;
+      return !history.loading && JSON.stringify(history.next) !== before;
+    }, before);
   }
-  if (await page.locator('.session-main .history-earlier').count()) throw new Error('History did not finish paging');
+  if (await page.locator('.session-main .history-boundary').count()) throw new Error('History did not finish paging');
 }
 async function revealHistory(selector, text) {
   await loadAllHistory();

@@ -50,12 +50,13 @@ export function VirtualHistory({ items, scroller, renderItem, onMeasure }) {
     });
     return refs.current.get(key);
   };
-  return items.length <= 80 ? items.map(renderItem) : items.map(item => {
-    const mounted = visible.has(item.key);
+  return items.map(item => {
+    const active = visible.has(item.key);
+    const mounted = items.length <= 80 || active;
     return <div key={item.key} className="history-virtual-row" data-history-key={item.key} data-mounted={mounted}
       ref={bind(item.key)}
       style={mounted ? undefined : { height: heights.current.get(item.key) ?? (item.kind === 'text' ? 160 : 70) }}>
-      {mounted ? renderItem(item) : null}
+      {mounted ? renderItem(item, active) : null}
     </div>;
   });
 }

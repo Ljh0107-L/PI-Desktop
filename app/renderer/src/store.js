@@ -3,7 +3,7 @@ import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerD
 import { relativeSessionPath } from './file-paths.js';
 import { useRef, useSyncExternalStore } from 'react';
 import { applyEvent, emptyTranscript, fromHistory, rewindTo } from './transcript.js';
-import { historyKey, mergeHistory, retainLoadedContent } from './history.js';
+import { historyKey, mergeHistory, mergeReloadedHistory } from './history.js';
 import { isSubagentFinished, subagentBatches, subagentHistoryId, visibleSubagentBatches } from './subagent-state.js';
 
 // Generation timing per reply (Pi's history keeps token counts but not timing), so tok/s survives reloads.
@@ -202,9 +202,10 @@ export async function reloadTranscript(id) {
     if (historySeq.get(id) !== seq || deleting.has(id)) return;
     const current = transcriptOf(id);
     const arrived = current.messages.filter(message => !baseline.has(historyKey(message)));
-    const history = fromHistory(mergeHistory(retainLoadedContent(page.messages, current.messages), arrived), timingsOf(id));
+    const pageState = mergeReloadedHistory(page, current);
+    const history = fromHistory(mergeHistory(pageState.messages, arrived), timingsOf(id));
     const active = Object.fromEntries(Object.entries(current.tools).filter(([, tool]) => tool.status === 'running'));
-    setTranscript(id, { ...history, live: current.live, tools: { ...history.tools, ...active }, history: { next: page.next, warning: page.warning, snapshot: page.snapshot } });
+    setTranscript(id, { ...current, ...history, live: current.live, tools: { ...history.tools, ...active }, history: pageState.history });
   } catch (error) {
     if (historySeq.get(id) === seq && !deleting.has(id)) setTranscript(id, { ...transcriptOf(id), loaded: true, error: error.message });
   }
@@ -230,16 +231,26 @@ export async function loadEarlierHistory(id) {
   }
 }
 
-export async function loadHistoryEntry(id, ref) {
-  const seq = historySeq.get(id);
-  try {
+const historyDetails = new Map();
+export function loadHistoryEntry(id, ref) {
+  const current = transcriptOf(id).messages.find(m => m.__entryId === ref.id);
+  if (!current?.__history?.truncated) return Promise.resolve();
+  const key = JSON.stringify([id, ref.snapshot.identity, ref.offset, ref.length, ref.id]);
+  if (historyDetails.has(key)) return historyDetails.get(key);
+  const pending = (async () => {
     const message = await api('historyPage', id, { ref });
-    if (historySeq.get(id) !== seq || deleting.has(id)) return;
+    if (deleting.has(id)) return;
     const now = transcriptOf(id);
+    const target = now.messages.find(m => m.__entryId === ref.id);
+    const locator = target?.__history?.ref;
+    if (now.rewinding || !target?.__history?.truncated || locator?.snapshot.identity !== ref.snapshot.identity || locator.offset !== ref.offset || locator.length !== ref.length) return;
     const messages = now.messages.map(m => m.__entryId === message.__entryId ? { ...message, __retryOmitted: m.__retryOmitted } : m);
     const history = fromHistory(messages, timingsOf(id));
-    setTranscript(id, { ...now, messages: history.messages, tools: { ...now.tools, ...history.tools } });
-  } catch (error) { notify(error.message, 'error'); }
+    const active = Object.fromEntries(Object.entries(now.tools).filter(([, tool]) => tool.status === 'running'));
+    setTranscript(id, { ...now, messages: history.messages, tools: { ...now.tools, ...history.tools, ...active } });
+  })().finally(() => { historyDetails.delete(key); });
+  historyDetails.set(key, pending);
+  return pending;
 }
 
 export async function loadCatalog() {
@@ -286,7 +297,7 @@ export const setView = patch => set(patch);
 // Keep file tabs/selection intact so closing a preview returns to the same child.
 export function openSubagent(id, callId, taskIndex = null) {
   const result = transcriptOf(id).messages.find(m => m.role === 'toolResult' && m.toolCallId === callId && m.__history?.truncated);
-  if (result) loadHistoryEntry(id, result.__history.ref);
+  if (result) loadHistoryEntry(id, result.__history.ref).catch(error => notify(error.message, 'error'));
   set(s => ({ subagentSelection: { ...s.subagentSelection, [id]: { callId, taskIndex } }, rightPanel: true, filePaneOpen: false, filePaneMax: false }));
 }
 // The inspector's controls for an agent running in this session's Pi.

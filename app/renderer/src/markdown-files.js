@@ -16,6 +16,7 @@ export function prepareFileMarkdown(html, documentPath) {
   for (const img of template.content.querySelectorAll('img')) {
     const src = img.getAttribute('src') ?? '';
     const ref = resolveMarkdownReference(src, documentPath);
+    img.setAttribute('referrerpolicy', 'no-referrer');
     img.removeAttribute('srcset');
     // Do not trust data-* attributes supplied by the document.
     img.removeAttribute('data-preview-path');

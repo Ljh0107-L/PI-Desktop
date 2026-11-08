@@ -2,8 +2,10 @@ import { createContext, useCallback, useContext, useEffect, useLayoutEffect, use
 import { Icon } from './Icons.jsx';
 import { Markdown, Spinner } from './ui.jsx';
 import { changesOf, displayBlocks, formatTokens, isAbortText, toolSummary } from './transcript.js';
-import { api, editMessage, loadEarlierHistory, loadHistoryEntry, reloadTranscript, notify, openChanges, openFile } from './store.js';
+import { api, editMessage, loadEarlierHistory, loadHistoryEntry, notify, openChanges, openFile } from './store.js';
 import { VirtualHistory } from './VirtualHistory.jsx';
+import { historyBookmark, restoreHistoryBookmark } from './history-scroll.js';
+import { ImagePreview } from './ImagePreview.jsx';
 import { DownloadButton, iconFor, sizeLabel } from './FilePane.jsx';
 import { changeStats, hunkLines } from './diffs.js';
 import { Composer } from './Composer.jsx';
@@ -98,6 +100,7 @@ const outputText = text => text.length > 8000 ? text.slice(0, 8000) + '\n…' : 
 function ToolCall({ call, tool }) {
   const [open, setOpen] = useDisclosure(`tool:${call.id}`);
   const { onOpenFile } = useContext(DisclosureContext);
+  const detailState = useHistoryDetails([call.__historyRef, tool?.historyRef], open);
   const trace = call.__trace;
   const { verb, subject, detail, mono, title } = describeCall(call);
   const status = tool?.status ?? 'pending';
@@ -124,6 +127,8 @@ function ToolCall({ call, tool }) {
       </div>
       {open && (
         <div className="step-detail tool-detail">
+          {detailState.pending ? <HistoryLoading {...detailState} /> : <>
+          {(tool?.result?.content ?? []).filter(c => c.type === 'image' && c.data).map((image, i) => <ImagePreview key={i} src={`data:${image.mimeType};base64,${image.data}`} alt={`${call.name} image ${i + 1}`} />)}
           {trace && call.name !== 'bash' ? <>
             {trace.input && <pre className="tool-command">{call.name === 'bash' ? '$ ' : ''}{trace.input}</pre>}
             {output && <pre className={`tool-output boxed ${failed ? 'error' : ''}`}>{shownOutput}</pre>}
@@ -140,6 +145,7 @@ function ToolCall({ call, tool }) {
                 {!output && status === 'running' && <div className="tool-running">Running…</div>}
               </>}
           {filePath && <button className="step-open" onClick={() => onOpenFile ? onOpenFile(filePath) : window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: filePath }))}>Open {baseOf(filePath)}</button>}
+          </>}
         </div>
       )}
     </div>
@@ -178,7 +184,7 @@ function WorkNote({ item }) {
         <ReasoningTokens tokens={item.tokens} />
         <Caret open={open} />
       </div>
-      {open && <div className="step-detail step-markdown"><Markdown text={item.text} /></div>}
+      {open && <div className="step-detail step-markdown"><HistoryContent historyRef={item.historyRef}><Markdown text={item.text} /></HistoryContent></div>}
     </div>
   );
 }
@@ -219,7 +225,7 @@ const seconds = ms => ms < 60000 ? `${Math.max(1, Math.round(ms / 1000))}s` : `$
 
 // Reasoning comes in four shapes: streamed in full, summarized by the provider, redacted, or hidden
 // entirely (billed but never sent). Only the first two have text to open.
-function Thinking({ text, streaming, redacted, hidden, durationMs, blockKey, tokens }) {
+function Thinking({ text, streaming, redacted, hidden, durationMs, blockKey, tokens, historyRef }) {
   const [open, setOpen] = useDisclosure([`group:${blockKey}`, `note:${blockKey}`]);
   const label = durationMs > 800 ? `Thought for ${seconds(durationMs)}` : 'Thought';
   if (hidden || redacted || !text) {
@@ -233,7 +239,7 @@ function Thinking({ text, streaming, redacted, hidden, durationMs, blockKey, tok
         <ReasoningTokens tokens={tokens} />
         <Icon name={open ? 'caretDown' : 'caretRight'} size={14} />
       </button>
-      {open && <div className="thinking-body"><Markdown text={text} /></div>}
+      {open && <div className="thinking-body"><HistoryContent historyRef={historyRef}><Markdown text={text} /></HistoryContent></div>}
     </div>
   );
 }
@@ -330,7 +336,7 @@ function UserMessage({ block, sessionId, editable }) {
   return (
     <div className="user-row">
       <div className="user-stack">
-        {block.images?.length > 0 && <div className="user-images">{block.images.map((img, i) => <img key={i} src={`data:${img.mimeType};base64,${img.data}`} alt="" />)}</div>}
+        {block.images?.length > 0 && <div className="user-images">{block.images.map((img, i) => <ImagePreview key={i} src={`data:${img.mimeType};base64,${img.data}`} alt={`Attached image ${i + 1}`} />)}</div>}
         {block.files?.length > 0 && <div className="user-files">{block.files.map(path => <button key={path} className="attachment file" title={path} onClick={() => window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: path }))}><Icon name="fileAny" size={15} /><span>{path.split('/').pop()}</span></button>)}</div>}
         {block.text && <div className="user-bubble"><UserText text={block.text} /></div>}
         <div className="user-actions">
@@ -343,7 +349,7 @@ function UserMessage({ block, sessionId, editable }) {
 }
 
 // Where Pi summarized the earlier conversation (automatically, on return after the cache expired, or by hand).
-function CompactionMarker({ summary, tokensBefore, blockKey }) {
+function CompactionMarker({ summary, tokensBefore, blockKey, historyRef }) {
   const [open, setOpen] = useDisclosure(`compaction:${blockKey}`);
   return (
     <div className="compaction">
@@ -352,7 +358,7 @@ function CompactionMarker({ summary, tokensBefore, blockKey }) {
         <span className="compaction-label"><Icon name="compact" size={14} /> Conversation compacted{tokensBefore ? ` · ${formatTokens(tokensBefore)} → summary` : ''}<Icon name={open ? 'caretDown' : 'caretRight'} size={13} /></span>
         <span className="compaction-rule" />
       </button>
-      {open && <div className="compaction-body"><Markdown text={summary ?? ''} /></div>}
+      {open && <div className="compaction-body"><HistoryContent historyRef={historyRef}><Markdown text={summary ?? ''} /></HistoryContent></div>}
     </div>
   );
 }
@@ -403,6 +409,7 @@ function WorkingRow({ session, transcript }) {
 const NO_QUESTIONS = [];
 // Files the agent handed over with present_files: open one in the file pane, or save it to this Mac.
 function FileCards({ sessionId, call, tool }) {
+  const detailState = useHistoryDetails([call.__historyRef, tool?.historyRef]);
   const details = tool?.result?.details;
   const files = details?.kind === 'pidesk-files' && Array.isArray(details.files) ? details.files : null;
   if (tool?.status === 'error') {
@@ -411,12 +418,14 @@ function FileCards({ sessionId, call, tool }) {
   }
   // Until the result arrives: the paths the model named, without sizes.
   const shown = files ?? (Array.isArray(call.arguments?.paths) ? call.arguments.paths : []).map(path => ({ path: String(path), name: String(path).split('/').pop(), pending: true }));
+  if (detailState.pending) return <HistoryLoading {...detailState} />;
   if (!shown.length) return null;
   return (
     <section className="file-cards" data-call-id={call.id}>
       {details?.caption && <div className="file-cards-caption">{details.caption}</div>}
       {shown.map(file => (
         <div key={file.path} className="file-card">
+          {!file.pending && sessionId && iconFor(file.name) === 'fileImage' && <PresentedImage sessionId={sessionId} file={file} />}
           <button className="file-card-main" disabled={file.pending || !sessionId} onClick={() => openFile(sessionId, file.path)} title={file.path}>
             <Icon name={iconFor(file.name)} size={18} className="file-card-icon" />
             <span className="file-card-text"><span className="file-card-name">{file.name}</span><span className="file-card-meta">{file.pending ? 'Preparing…' : sizeLabel(file.size)}</span></span>
@@ -428,19 +437,49 @@ function FileCards({ sessionId, call, tool }) {
   );
 }
 
-function HistoryDetails({ sessionId, block }) {
-  const [loading, setLoading] = useState(false);
-  return <button className="button small history-detail" disabled={loading || !sessionId}
-    title="Load the original visible content, tool arguments and attachments. Hidden model signatures stay out of the UI."
-    onClick={async () => { setLoading(true); try { await loadHistoryEntry(sessionId, block.ref); } finally { setLoading(false); } }}>
-    {loading ? 'Loading…' : block.role === 'toolResult' ? 'Load full tool result' : 'Load full content'}
-  </button>;
+function useHistoryDetails(refs, enabled = true) {
+  const { sessionId } = useContext(DisclosureContext);
+  const key = JSON.stringify(refs.filter(Boolean));
+  const [error, setError] = useState(null);
+  const [attempt, retry] = useState(0);
+  useEffect(() => {
+    if (!enabled || !sessionId || key === '[]') return;
+    let alive = true;
+    setError(null);
+    Promise.all(JSON.parse(key).map(ref => loadHistoryEntry(sessionId, ref))).catch(e => { if (alive) setError(e.message); });
+    return () => { alive = false; };
+  }, [sessionId, key, enabled, attempt]);
+  return { pending: key !== '[]', error, retry: () => retry(n => n + 1) };
+}
+
+function HistoryLoading({ error, retry }) {
+  return error ? <button className="history-retry" title={error} onClick={retry}><Icon name="refresh" size={14} /> Retry</button>
+    : <span className="history-loading" role="status" aria-label="Loading content"><Spinner /></span>;
+}
+
+function HistoryContent({ historyRef, active = true, children }) {
+  const detailState = useHistoryDetails([historyRef], active);
+  return detailState.pending ? <HistoryLoading {...detailState} /> : children;
+}
+
+function PresentedImage({ sessionId, file }) {
+  const [preview, setPreview] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    api('readFile', sessionId, file.path).then(result => { if (alive) setPreview(result); }, error => { if (alive) setPreview({ error: error.message }); });
+    return () => { alive = false; };
+  }, [sessionId, file.path]);
+  if (!preview) return <Spinner />;
+  return preview.dataUrl ? <ImagePreview src={preview.dataUrl} alt={file.name} onOpen={() => openFile(sessionId, file.path)} />
+    : <span className="markdown-image-error" title={preview.error ?? 'Image too large to preview'}>Could not load image</span>;
 }
 
 export function Transcript({ session, transcript, questions = NO_QUESTIONS, readOnly = false, onOpenFile, renderSubagents, renderAgentReport, copyText }) {
   const scroller = useRef(null);
   const stick = useRef(true);
   const scrollIntent = useRef(false);
+  const bookmark = useRef([]);
+  const previousTop = useRef(0);
   const [following, setFollowing] = useState(true);
   const [expanded, setExpanded] = useState({});
   // "Latest" appears only when there is unseen content below — not merely because you opened a step.
@@ -451,9 +490,9 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
   const pauseFollowing = useCallback(() => {
     stick.current = false;
     scrollIntent.current = false;
+    bookmark.current = historyBookmark(scroller.current);
   }, []);
   const followLatest = () => {
-    if (transcript.history?.viewingOlder && session?.id) reloadTranscript(session.id);
     stick.current = true;
     setFollowing(true);
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
@@ -463,9 +502,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
     const el = scroller.current;
     if (!el || !transcript.history?.next || transcript.history.loading) return;
     pauseFollowing();
-    const height = el.scrollHeight, top = el.scrollTop;
     await loadEarlierHistory(session.id);
-    requestAnimationFrame(() => { if (scroller.current === el) el.scrollTop = top + el.scrollHeight - height; });
   };
   const lastUsage = blocks.findLast(b => b.kind === 'usage');
   const onScroll = e => {
@@ -473,18 +510,25 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
     if (e.target !== scroller.current) return;
     const el = scroller.current;
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-    if (el.scrollTop < 60 && scrollIntent.current && transcript.history?.next) earlier();
+    const movedUp = el.scrollTop < previousTop.current;
+    previousTop.current = el.scrollTop;
     if (!atBottom) stick.current = false;
     else if (scrollIntent.current) stick.current = true;
+    if (!stick.current) bookmark.current = historyBookmark(el);
+    if (el.scrollTop < 160 && movedUp && scrollIntent.current && transcript.history?.next) earlier();
     scrollIntent.current = false;
     updateLatest();
   };
-  useLayoutEffect(() => {
+  const retainPosition = () => {
     if (stick.current && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
+    else restoreHistoryBookmark(scroller.current, bookmark.current);
+    bookmark.current = historyBookmark(scroller.current);
+    previousTop.current = scroller.current?.scrollTop ?? 0;
     updateLatest();
-  }, [blocks, questions]);
+  };
+  useLayoutEffect(retainPosition, [blocks, questions]);
   useEffect(() => { setExpanded({}); followLatest(); }, [session?.id]);
-  const disclosure = useMemo(() => ({ expanded, setExpanded, pauseFollowing, onOpenFile }), [expanded, pauseFollowing, onOpenFile]);
+  const disclosure = useMemo(() => ({ expanded, setExpanded, pauseFollowing, onOpenFile, sessionId: session?.id }), [expanded, pauseFollowing, onOpenFile, session?.id]);
   const working = session?.streaming || session?.compacting || transcript.compacting || session?.status === 'connecting';
   // Only while there is nothing to show yet: history now comes from the session file while Pi starts, and
   // a new conversation already shows your message.
@@ -495,7 +539,10 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
     <div className="transcript" ref={scroller} onScroll={onScroll}
       onWheelCapture={e => {
         if (e.target.closest('.tool-output, .tool-command, .diff')) { pauseFollowing(); return; }
-        if (e.deltaY < 0) pauseFollowing();
+        if (e.deltaY < 0) {
+          pauseFollowing();
+          if (scroller.current?.scrollTop < 160) earlier();
+        }
         scrollIntent.current = true;
       }}
       onPointerDown={e => { if (e.target === scroller.current) scrollIntent.current = true; }}
@@ -506,16 +553,20 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
         {transcript.error && (isAbortText(transcript.error)
           ? <div className="block-notice">Interrupted</div>
           : <div className="block-error"><Icon name="alert" size={15} /> {transcript.error}</div>)}
-        {transcript.history?.next && <button className="button small history-earlier" onClick={earlier} disabled={transcript.history.loading}
-          title="Load an earlier page. Very long turns may span pages; original history is kept in full.">{transcript.history.loading ? 'Loading earlier messages…' : 'Load earlier messages'}</button>}
+        {transcript.history?.next && <div className="history-boundary" data-loading={!!transcript.history.loading}
+          role={transcript.history.loading ? 'status' : undefined} aria-label={transcript.history.loading ? 'Loading earlier messages' : undefined}>
+          {transcript.history.loading && <Spinner size={14} />}
+        </div>}
         {transcript.history?.warning && <div className="block-notice">{transcript.history.warning}</div>}
-        <VirtualHistory items={blocks} scroller={scroller} onMeasure={() => { if (stick.current && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }} renderItem={block => {
+        <VirtualHistory items={blocks} scroller={scroller} onMeasure={retainPosition} renderItem={(block, active) => {
+          const render = () => {
           switch (block.kind) {
-            case 'orphanResult': return <div key={block.key} className="history-result"><div title="The tool call is on an earlier page">{block.message.toolName ?? 'Tool'} result · earlier call</div><pre className="tool-output">{textOf({ content: block.message.content })}</pre></div>;
-            case 'deferred': return <HistoryDetails key={block.key} sessionId={session?.id} block={block} />;
+            case 'orphanResult': return <ToolCall key={block.key} call={{ id: block.message.toolCallId, name: block.message.toolName ?? 'tool', arguments: { description: 'Command result' } }} tool={transcript.tools[block.message.toolCallId]} />;
+            case 'pendingHistory': return null;
+            case 'image': return <ImagePreview key={block.key} src={`data:${block.image.mimeType};base64,${block.image.data}`} alt="Assistant image" />;
             case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!block.truncated && (!transcript.history || !!block.entryId) && !readOnly && session?.engine !== 'cursor' && !!session && session.id !== 'pending' && session.status === 'connected' && !session.streaming && !block.text.startsWith('/')} />;
             case 'goal': return <GoalMarker key={block.key} objective={block.objective} />;
-            case 'text': return <Markdown key={block.key} text={block.text} streaming={block.streaming} />;
+            case 'text': return <Markdown key={block.key} text={block.text} streaming={block.streaming} sessionId={session?.id} documentPath="" />;
             case 'usage': return <TurnFooter key={block.key} text={block.text} changes={readOnly ? [] : block.changes} sessionId={session?.id} last={block === lastUsage} />;
             case 'compaction': return <CompactionMarker key={block.key} {...block} blockKey={block.key} />;
             case 'thinking': return <Thinking key={block.key} {...block} blockKey={block.key} />;
@@ -530,6 +581,9 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             case 'notice': return <div key={block.key} className="block-notice">{block.text}</div>;
             default: return null;
           }
+          };
+          const automatic = ['text', 'user', 'goal', 'bash', 'notice', 'pendingHistory', 'image'].includes(block.kind);
+          return <HistoryContent key={block.key} historyRef={automatic ? block.historyRef : null} active={active}>{render()}</HistoryContent>;
         }} />
         {readOnly && copyText && <TurnFooter text={copyText} last />}
         {(transcript.queued ?? []).map(q => (

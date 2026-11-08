@@ -8,6 +8,7 @@ import { homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';
+import { pdfFixture } from './pdf-fixture.mjs';
 import { decodeRemoteFilePreview, filePreview, remoteFilePreviewScript } from '../app/main/file-preview.mjs';
 
 const exec = promisify(execFile);
@@ -45,6 +46,22 @@ function memoryFile(content, { size = content.length, chunk = Infinity, regular 
   };
   return { fs, state };
 }
+
+test('PDF previews preserve all bytes locally and through the serialized remote reader', async t => {
+  const root = await fixture(t), data = pdfFixture();
+  await writeFile(join(root, 'Report.PDF'), data);
+  for (const preview of [await filePreview('read', root, 'Report.PDF'), await shellPreview('read', root, 'Report.PDF')]) {
+    assert.equal(preview.kind, 'pdf');
+    assert.equal(preview.truncated, false);
+    assert.deepEqual(Buffer.from(preview.dataUrl.split(',')[1], 'base64'), data);
+  }
+  const large = memoryFile(Buffer.alloc((32 << 20) + 1));
+  const preview = await filePreview('read', root, 'large.pdf', { fs: large.fs });
+  assert.equal(preview.kind, 'pdf');
+  assert.equal(preview.dataUrl, null);
+  assert.equal(preview.truncated, true);
+  assert.equal(large.state.closed, true);
+});
 
 const shellPreview = async (operation, cwd, rel = '', options = {}) => {
   const { stdout } = await exec('sh', ['-c', remoteFilePreviewScript(process.execPath, operation, cwd, rel)], { timeout: 15000, maxBuffer: 20 << 20, ...options });

@@ -2,6 +2,7 @@
 // Fixtures live on the same host as test/sshd.sh; reads still go through each session's API.
 import assert from 'node:assert/strict';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { pdfFixture } from './pdf-fixture.mjs';
 import { dirname, join } from 'node:path';
 
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
@@ -43,6 +44,7 @@ export async function checkFilePreview({ page, id, project, environmentId, shots
   put(`${fixture}/docs/assets/corrupt.svg`, 'This is not valid SVG data.');
   put(broken, '# Image failure feedback\n\n![Missing asset](../assets/missing.svg)\n\n![Corrupt asset](../assets/corrupt.svg)\n');
   put(source, longText);
+  put(`${fixture}/report.pdf`, pdfFixture());
 
   let step = 'start';
   const open = path => page.evaluate(path => window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: path })), path);
@@ -150,6 +152,25 @@ export async function checkFilePreview({ page, id, project, environmentId, shots
       const description = await errors.nth(i).evaluate(el => `${el.getAttribute('title') ?? ''} ${el.textContent}`.trim());
       assert.match(description, /could not|unable|fail|error|unavailable|load|missing|invalid|not (?:found|a file)|ENOENT/i, 'feedback must explain the image failure rather than silently showing a broken icon');
     }
+
+    step = 'PDF document renders both pages';
+    await open(`${fixture}/report.pdf`);
+    await page.locator('.fp-pdf').waitFor({ timeout: 30000 });
+    const pdf = await page.evaluate(async ([id, path]) => window.pidesk.invoke('readFile', id, path), [id, `${fixture}/report.pdf`]);
+    assert.equal(pdf.kind, 'pdf');
+    assert.deepEqual(Buffer.from(pdf.dataUrl.split(',')[1], 'base64'), pdfFixture());
+    await page.waitForFunction(() => document.querySelector('.fp-pdf')?.src.startsWith('blob:'));
+    let viewer;
+    for (let attempt = 0; attempt < 100; attempt++) {
+      for (const frame of page.frames()) {
+        if (await frame.locator('pdf-viewer').count().catch(() => 0)) { viewer = frame; break; }
+      }
+      if (viewer) break;
+      await page.waitForTimeout(100);
+    }
+    assert.ok(viewer, `PDF viewer did not open: ${page.frames().map(f => f.url().split('?')[0]).join(', ')}`);
+    await viewer.waitForFunction(() => document.querySelector('pdf-viewer')?.shadowRoot?.querySelector('viewer-toolbar')?.docLength === 2, undefined, { timeout: 30000 });
+    await page.screenshot({ path: join(shots, `file-preview-pdf-${environmentId.replace(/\W+/g, '-')}.png`) });
 
     step = 'complete unknown-extension source';
     await open(source);

@@ -128,7 +128,7 @@ renderer.code = ({ text, lang }) => {
   return `<div class="code-block"><div class="code-head"><span>${escapeHtml(language || 'text')}</span><button type="button" class="code-copy" data-copy="1">Copy</button></div><pre><code class="hljs">${body}</code></pre></div>`;
 };
 // Inline code that looks like a file path (`src/app.ts`, `README.md`) opens in the file preview, like Claude.
-const FILE_EXT = /\.(md|mdx|txt|rst|py|js|mjs|cjs|jsx|ts|tsx|json|ya?ml|toml|ini|cfg|sh|bash|zsh|c|h|cc|cpp|hpp|cu|cuh|rs|go|java|kt|swift|rb|php|css|scss|html|xml|sql|lua|r|pl|diff|patch|cmake|f90|f|png|jpe?g|gif|svg|webp|csv|tsv|log|lock|env)$/i;
+const FILE_EXT = /\.(md|mdx|txt|rst|py|js|mjs|cjs|jsx|ts|tsx|json|ya?ml|toml|ini|cfg|sh|bash|zsh|c|h|cc|cpp|hpp|cu|cuh|rs|go|java|kt|swift|rb|php|css|scss|html|xml|sql|lua|r|pl|diff|patch|cmake|f90|f|png|jpe?g|gif|svg|webp|csv|tsv|pdf|log|lock|env)$/i;
 export const looksLikePath = text => text.length < 240 && !/\s/.test(text) && !/^[a-z]+:\/\//i.test(text) && !text.startsWith('-')
   && /^(~|\.{1,2})?\/?[\w.@+-]+(\/[\w.@+-]+)*\/?$/.test(text) && (text.includes('/') ? /[\w-]/.test(text.split('/').pop() || 'x') : FILE_EXT.test(text) || /^(Makefile|Dockerfile|LICENSE|CMakeLists\.txt)$/.test(text));
 renderer.codespan = ({ text }) => looksLikePath(text.replace(/&amp;/g, '&')) ? `<code class="file-ref" data-path="${text.replace(/"/g, '&quot;')}">${text}</code>` : `<code>${text}</code>`;
@@ -161,6 +161,8 @@ export function Markdown({ text, streaming, sessionId, documentPath, refreshKey 
       else window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: path }));
       return;
     }
+    const image = e.target.closest('img[data-preview-path]');
+    if (image && sessionId) { openFile(sessionId, image.dataset.previewPath); return; }
     const link = e.target.closest('a');
     if (!link) return;
     e.preventDefault();

@@ -33,6 +33,20 @@ function clean(value, preview, state, depth = 0) {
       continue;
     }
     if (preview && key === 'steps') { if (v?.length) state.clipped = true; continue; }
+    if (preview && key === 'content' && depth === 0 && Array.isArray(v)) {
+      state.deferredContent = [];
+      if (v.length > 32) { state.clipped = true; state.structural = true; }
+      out[key] = v.slice(0, 32).map((block, index) => {
+        const part = { left: state.left, nodes: 0, clipped: false };
+        const projected = clean(block, preview, part, depth + 1);
+        state.left = part.left;
+        state.clipped ||= part.clipped;
+        state.structural ||= part.structural;
+        if (part.clipped) state.deferredContent.push(index);
+        return projected;
+      });
+      continue;
+    }
     out[key] = typeof v === 'string' && ['id', 'type', 'name', 'path', 'file_path', 'toolCallId', 'toolName', 'customType', 'api', 'provider', 'model', 'status', 'stopReason', 'kind', 'failureKind', 'mimeType', 'thinkingLevel'].includes(key)
       ? v : clean(v, preview, state, depth + 1);
   }
@@ -48,15 +62,16 @@ export function projectEntry(entry, ref, { preview = true, omitted = false } = {
   if (!message) return null;
   const state = { left: 6000, nodes: 0, clipped: false };
   let out = clean(message, preview, state);
-  if (preview && (state.structural || bytes(out) > 32 * 1024)) {
+  const placeholder = preview && (state.structural || bytes(out) > 32 * 1024);
+  if (placeholder) {
     state.clipped = true;
     out = { role: message.role, timestamp: message.timestamp, stopReason: message.stopReason, toolName: message.toolName, toolCallId: message.toolCallId,
-      content: [{ type: 'text', text: 'Large history entry. Load its full content to inspect it.' }] };
+      content: [] };
   }
   // Usage/timing are compact metadata, not excerpts; never calculate costs from truncated fields.
   for (const key of ['usage', '__timing', '__speed', '__usageProvenance']) if (message[key] && bytes(message[key]) < 8192) out[key] = message[key];
   return { ...out, __entryId: entry.id, ...(omitted && message.stopReason === 'error' ? { __retryOmitted: true } : {}),
-    __history: { ref, truncated: state.clipped } };
+    __history: { ref, truncated: state.clipped, ...(state.deferredContent ? { deferredContent: state.deferredContent } : {}), ...(placeholder ? { placeholder: true } : {}) } };
 }
 
 // LF only: Unicode line separators inside JSON strings are not record boundaries.

@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { PAGE_BYTES, PAGE_MESSAGES, projectEntry, readHistory } from '../agent/pidesk-history.mjs';
-import { historyKey, mergeHistory, retainLoadedContent } from '../app/renderer/src/history.js';
+import { historyKey, mergeHistory, retainLoadedContent, mergeReloadedHistory } from '../app/renderer/src/history.js';
 import { displayBlocks, fromHistory, rewindTo } from '../app/renderer/src/transcript.js';
 import { SessionManager } from '../app/main/session-manager.mjs';
 import { historyEvent } from '../core/history-view.mjs';
@@ -171,10 +171,40 @@ test('a page beginning with a tool result remains inspectable without its earlie
   const page = await readHistory(file);
   const blocks = displayBlocks(fromHistory(page.messages));
   assert.ok(blocks.some(block => block.kind === 'orphanResult'));
-  assert.ok(blocks.some(block => block.kind === 'deferred'));
+  assert.ok(!blocks.some(block => block.kind === 'deferred'));
   const full = await readHistory(file, { ref: page.messages[0].__history.ref });
   assert.equal(fromHistory([full]).tools['older-call'].fullHistory, true);
   assert.equal(full.content[0].text, 'result '.repeat(5000));
+});
+
+test('deferred tool details do not split a continuous work group or hide complete prose', () => {
+  const rows = [entry(0, null, { role: 'assistant', content: [{ type: 'text', text: 'Complete answer' }, { type: 'toolCall', id: 'c1', name: 'write', arguments: { path: 'a.txt', content: 'x'.repeat(10000) } }] }),
+    entry(1, 'e0', { role: 'toolResult', toolCallId: 'c1', content: [{ type: 'text', text: 'result'.repeat(10000) }] }),
+    entry(2, 'e1', { role: 'assistant', content: [{ type: 'toolCall', id: 'c2', name: 'read', arguments: { path: 'a.txt' } }] })];
+  const messages = rows.map(row => projectEntry(row, { id: row.id }));
+  assert.deepEqual(messages[0].__history.deferredContent, [1]);
+  const blocks = displayBlocks(fromHistory(messages));
+  assert.equal(blocks.filter(b => b.kind === 'work').length, 1);
+  assert.equal(blocks.find(b => b.kind === 'text').historyRef, null);
+  assert.equal(blocks.some(b => b.kind === 'deferred'), false);
+  assert.equal(fromHistory(messages).tools.c1.historyRef.id, 'e1');
+});
+
+test('tail refresh keeps the loaded reading window and never replaces full content with excerpts', () => {
+  const rows = Array.from({ length: 100 }, (_, i) => projectEntry(entry(i), { id: `e${i}` }));
+  const current = { messages: rows, history: { snapshot: { identity: 'same-file' }, next: { id: 'older' }, viewingOlder: true } };
+  const page = { messages: rows.slice(-40), snapshot: { identity: 'same-file' }, next: { id: 'e59' } };
+  const merged = mergeReloadedHistory(page, current);
+  assert.equal(merged.messages.length, 100);
+  assert.equal(merged.history.next.id, 'older');
+  assert.equal(merged.history.viewingOlder, true);
+  assert.equal(mergeReloadedHistory({ ...page, snapshot: { identity: 'other-file' } }, current).messages.length, 40);
+});
+
+test('assistant image blocks survive history projection as displayable content', () => {
+  const image = { type: 'image', mimeType: 'image/png', data: 'small-base64' };
+  const blocks = displayBlocks(fromHistory([projectEntry(entry(1, null, { content: [image] }), {})]));
+  assert.deepEqual(blocks.find(b => b.kind === 'image').image, image);
 });
 
 test('editing a paged message uses its id, not the ordinal or a later duplicate text', async () => {
