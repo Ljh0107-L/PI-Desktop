@@ -142,7 +142,7 @@ code, pre, kbd { font-family: var(--mono); }
 .composer:focus-within { border-color: rgba(255, 255, 255, .24); box-shadow: inset 0 0.5px 0 rgba(255, 255, 255, .08), 0 8px 28px rgba(0, 0, 0, .34), 0 0 0 3px rgba(255, 255, 255, .03); }
 .composer-plus { width: 32px; height: 32px; border-radius: 10px; display: grid; place-items: center; color: var(--muted); flex-shrink: 0; transition: background .12s, color .12s; }
 .composer-plus:hover { background: rgba(255, 255, 255, .08); color: var(--text); }
-.composer textarea { flex: 1; min-height: 32px; max-height: 240px; resize: none; background: none; border: 0; color: var(--text); font-size: 15px; line-height: 22px; padding: 5px 2px; user-select: text; }
+.composer textarea { flex: 1; min-width: 0; overflow-y: auto; scrollbar-gutter: stable; min-height: 32px; max-height: 240px; resize: none; background: none; border: 0; color: var(--text); font-size: 15px; line-height: 22px; padding: 5px 2px; user-select: text; }
 .composer textarea::placeholder { color: #85837e; }
 .composer textarea:focus-visible { outline: none; }
 /* Send: a coral disc with a white arrow; muted when empty. Stop: a light disc with a rounded square. */

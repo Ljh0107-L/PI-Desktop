@@ -480,6 +480,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
   const scrollIntent = useRef(false);
   const bookmark = useRef([]);
   const previousTop = useRef(0);
+  const initialFill = useRef(0);
   const [following, setFollowing] = useState(true);
   const [expanded, setExpanded] = useState({});
   // "Latest" appears only when there is unseen content below — not merely because you opened a step.
@@ -519,7 +520,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
       if (stick.current || scrollIntent.current || moved) bookmark.current = historyBookmark(el);
       stick.current = false;
     } else if (scrollIntent.current) stick.current = true;
-    if (el.scrollTop < 160 && movedUp && scrollIntent.current && transcript.history?.next) earlier();
+    if (el.scrollTop < el.clientHeight * 3 && movedUp && scrollIntent.current && transcript.history?.next) earlier();
     scrollIntent.current = false;
     updateLatest();
   };
@@ -531,7 +532,17 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
     updateLatest();
   };
   useLayoutEffect(retainPosition, [blocks, questions]);
-  useEffect(() => { setExpanded({}); followLatest(); }, [session?.id]);
+  useEffect(() => { initialFill.current = 0; setExpanded({}); followLatest(); }, [session?.id]);
+  useEffect(() => {
+    const el = scroller.current;
+    if (readOnly || !session?.id || !transcript.loaded || !transcript.history?.next || transcript.history.loading || transcript.history.error || !stick.current || initialFill.current >= 8) return;
+    // A page full of folded tool calls may occupy only a few lines. Fill a useful
+    // reading window in the background instead of exposing tiny raw-record pages.
+    if (el?.clientHeight > 0 && el.scrollHeight < el.clientHeight * 3) {
+      initialFill.current++;
+      void loadEarlierHistory(session.id, { background: true });
+    }
+  }, [blocks, transcript.history, transcript.loaded, session?.id, readOnly]);
   const disclosure = useMemo(() => ({ expanded, setExpanded, pauseFollowing, onOpenFile, sessionId: session?.id }), [expanded, pauseFollowing, onOpenFile, session?.id]);
   const working = session?.streaming || session?.compacting || transcript.compacting || session?.status === 'connecting';
   // Only while there is nothing to show yet: history now comes from the session file while Pi starts, and
@@ -545,7 +556,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
         if (e.target.closest('.tool-output, .tool-command, .diff')) { pauseFollowing(); return; }
         if (e.deltaY < 0) {
           pauseFollowing();
-          if (scroller.current?.scrollTop < 160) earlier();
+          if (scroller.current && scroller.current.scrollTop < scroller.current.clientHeight * 3) earlier();
         }
         scrollIntent.current = true;
       }}
@@ -558,10 +569,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
         {transcript.error && (isAbortText(transcript.error)
           ? <div className="block-notice">Interrupted</div>
           : <div className="block-error"><Icon name="alert" size={15} /> {transcript.error}</div>)}
-        {transcript.history?.next && <div className="history-boundary" data-loading={!!transcript.history.loading}
-          role={transcript.history.loading ? 'status' : undefined} aria-label={transcript.history.loading ? 'Loading earlier messages' : undefined}>
-          {transcript.history.loading && <Spinner size={14} />}
-        </div>}
+        {transcript.history?.next && <div className="history-boundary" data-loading={!!transcript.history.loading} aria-busy={!!transcript.history.loading} />}
         {transcript.history?.warning && <div className="block-notice">{transcript.history.warning}</div>}
         <VirtualHistory items={blocks} scroller={scroller} onMeasure={retainPosition} renderItem={(block, active) => {
           const render = () => {

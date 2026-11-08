@@ -4,7 +4,7 @@ import { open } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
-export const PAGE_MESSAGES = 80;
+export const PAGE_MESSAGES = 320;
 export const PAGE_BYTES = 256 * 1024;
 const MAX_LINE = 64 * 1024 * 1024;
 const CHUNK = 64 * 1024;
@@ -13,7 +13,7 @@ const bytes = value => Buffer.byteLength(JSON.stringify(value));
 
 function clean(value, preview, state, depth = 0) {
   if (typeof value === 'string') {
-    const limit = preview ? Math.min(2048, state.left) : value.length;
+    const limit = preview ? Math.min(state.stringLimit ?? 2048, state.left) : value.length;
     state.left -= Math.min(limit, value.length);
     if (value.length > limit) { state.clipped = true; return value.slice(0, limit) + '…'; }
     return value;
@@ -37,14 +37,22 @@ function clean(value, preview, state, depth = 0) {
       state.deferredContent = [];
       if (v.length > 32) { state.clipped = true; state.structural = true; }
       out[key] = v.slice(0, 32).map((block, index) => {
-        const part = { left: state.left, nodes: 0, clipped: false };
+        const budget = Math.min(state.left, block?.type === 'toolCall' ? 6000 : state.left);
+        const part = { left: budget, textLimit: state.textLimit, nodes: 0, clipped: false };
         const projected = clean(block, preview, part, depth + 1);
-        state.left = part.left;
+        state.left -= budget - part.left;
         state.clipped ||= part.clipped;
         state.structural ||= part.structural;
         if (part.clipped) state.deferredContent.push(index);
         return projected;
       });
+      continue;
+    }
+    if (key === 'text' && value.type === 'text' && typeof v === 'string') {
+      const limit = state.stringLimit;
+      state.stringLimit = state.textLimit;
+      out[key] = clean(v, preview, state, depth + 1);
+      state.stringLimit = limit;
       continue;
     }
     out[key] = typeof v === 'string' && ['id', 'type', 'name', 'path', 'file_path', 'toolCallId', 'toolName', 'customType', 'api', 'provider', 'model', 'status', 'stopReason', 'kind', 'failureKind', 'mimeType', 'thinkingLevel'].includes(key)
@@ -60,7 +68,9 @@ export function projectEntry(entry, ref, { preview = true, omitted = false } = {
   else if (entry.type === 'custom_message' && entry.customType === 'pidesk-goal') message = { role: 'custom', customType: entry.customType, content: entry.content, timestamp: Date.parse(entry.timestamp) || 0 };
   else if (entry.type === 'compaction') message = { role: 'compactionSummary', summary: entry.summary, tokensBefore: entry.tokensBefore, timestamp: Date.parse(entry.timestamp) || 0 };
   if (!message) return null;
-  const state = { left: 6000, nodes: 0, clipped: false };
+  const prose = message.role === 'user' || message.role === 'assistant';
+  const folded = message.role === 'toolResult' && ['read', 'bash', 'write', 'edit', 'grep', 'find', 'ls', 'powershell'].includes(message.toolName);
+  const state = { left: prose ? 24000 : folded ? 512 : 6000, textLimit: prose ? 16384 : folded ? 256 : 2048, nodes: 0, clipped: false };
   let out = clean(message, preview, state);
   const placeholder = preview && (state.structural || bytes(out) > 32 * 1024);
   if (placeholder) {
@@ -127,7 +137,7 @@ export async function readHistory(file, options = {}) {
     if (cursor && (!Number.isSafeInteger(cursor.offset) || cursor.offset < 0 || cursor.offset > snapshot.end || typeof cursor.id !== 'string')) throw new Error('Invalid history cursor.');
     let target = cursor?.id ?? null, remaining = cursor?.offset ?? snapshot.end;
     const messages = [], omitted = new Map(cursor?.omitted ?? []);
-    let total = 2, next = null, warning = null, first = true;
+    let total = 2, visibleMessages = 0, next = null, warning = null, first = true;
     const stats = { scannedBytes: 0 };
     for await (const row of reverseLines(handle, remaining, stats)) {
       let entry;
@@ -147,11 +157,15 @@ export async function readHistory(file, options = {}) {
         next = { snapshot, offset: row.offset + row.length, id: entry.id, omitted: [...omitted] };
         break;
       }
-      if (message) { messages.push(message); total += cost; omitted.delete(entry.id); }
+      if (message) {
+        messages.push(message); total += cost; omitted.delete(entry.id);
+        const content = entry.message?.content;
+        if (message.role === 'user' || message.role === 'compactionSummary' || (message.role === 'assistant' && Array.isArray(content) && content.some(block => block?.type === 'text' && block.text?.trim()))) visibleMessages++;
+      }
       target = entry.parentId;
       remaining = row.offset;
       if (!target) break;
-      if (message?.role === 'user' && messages.length >= 40) {
+      if (visibleMessages >= 40 && (message?.role === 'user' || messages.length >= 80)) {
         next = { snapshot, offset: row.offset, id: target, omitted: [...omitted] };
         break;
       }

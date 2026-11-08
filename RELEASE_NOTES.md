@@ -2,6 +2,12 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## Unreleased — Prefetched history and steady typing
+
+- **A useful history window from the start.** Pages now target visible conversation content and carry up to 320 records without inflating hidden tool output. Short opening windows are filled in the background instead of exposing only a few folded work rows.
+- **Read ahead, not at the edge.** Two pages are prepared ahead of the reader, including bounded warmup of long prose. Upward scrolling inserts cached history before the boundary reaches the viewport; speculative reads do not steal focus or start Pi processes.
+- **Stable composer sizing.** Textarea height is measured off-screen and applied before paint only when needed. Typing no longer collapses the focused editor on every keystroke, and width changes are measured without resetting its caret or scroll position.
+
 ## 0.2.5 — Seamless history and document previews
 
 - **Normal conversation browsing.** Removed per-message load buttons. Visible replies and images load automatically; scrolling upward loads older history without moving the reading position. Folded work remains grouped, tools load details through their normal disclosure, and tail refreshes preserve already loaded content.

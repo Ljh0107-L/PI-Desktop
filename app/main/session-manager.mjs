@@ -949,13 +949,13 @@ export class SessionManager extends EventEmitter {
 
   // UI pages are projected on the session's machine; never transport get_entries for opening a chat.
   async historyPage(id, options = {}) {
-    this.focus(id);
+    if (!options.prefetch) this.focus(id);
     const record = this.record(id);
     const encoded = JSON.stringify(options);
     if (encoded.length > 65536) throw new Error('History cursor is too large. Reload the conversation.');
-    if (record.engine !== 'cursor') this.ensureStarted(id).catch(() => {});
+    if (!options.prefetch && record.engine !== 'cursor') this.ensureStarted(id).catch(() => {});
     if (!record.piSessionFile) {
-      if (record.engine === 'cursor') return { messages: [], next: null };
+      if (record.engine === 'cursor' || options.prefetch) return { messages: [], next: null };
       const session = await this.ensureStarted(id);
       const state = await session.state();
       if (!state.sessionFile) return { messages: [], next: null };

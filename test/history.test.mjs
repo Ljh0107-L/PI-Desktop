@@ -10,6 +10,7 @@ import { historyKey, mergeHistory, retainLoadedContent, mergeReloadedHistory } f
 import { displayBlocks, fromHistory, retainWorkKeys, rewindTo } from '../app/renderer/src/transcript.js';
 import { SessionManager } from '../app/main/session-manager.mjs';
 import { historyEvent } from '../core/history-view.mjs';
+import { HistoryBuffer, prepareHistoryPage } from '../app/renderer/src/history-buffer.js';
 
 const entry = (i, parentId = i ? `e${i - 1}` : null, message = {}) => ({ type: 'message', id: `e${i}`, parentId,
   message: { role: i % 2 ? 'assistant' : 'user', timestamp: i + 1, content: [{ type: 'text', text: `message ${i}` }], ...message } });
@@ -21,6 +22,64 @@ function fixture(t, entries) {
   return file;
 }
 const hash = file => createHash('sha256').update(readFileSync(file)).digest('hex');
+
+test('tool-heavy pages contain useful context instead of stopping after eighty hidden results', async t => {
+  const rows = [entry(0, null, { role: 'user', content: [{ type: 'text', text: 'The task that started this work' }] })];
+  for (let i = 1; i < 241; i++) rows.push(entry(i, `e${i - 1}`, i % 2
+    ? { role: 'assistant', content: [{ type: 'toolCall', id: `call-${i}`, name: 'bash', arguments: { command: 'true' } }] }
+    : { role: 'toolResult', toolName: 'bash', toolCallId: `call-${i - 1}`, content: [{ type: 'text', text: 'hidden output '.repeat(3000) }] }));
+  const page = await readHistory(fixture(t, rows));
+  assert.equal(page.messages[0].__entryId, 'e0');
+  assert.equal(page.messages.length, 241);
+  assert.ok(Buffer.byteLength(JSON.stringify(page.messages)) <= PAGE_BYTES);
+  const prose = 'normal visible reply '.repeat(500);
+  assert.equal(projectEntry(entry(1, null, { content: [{ type: 'text', text: prose }] }), {}).content[0].text, prose);
+});
+
+test('prefetch keeps two pages ready, coalesces readers and discards obsolete generations', async () => {
+  const calls = [], finish = new Map();
+  const buffer = new HistoryBuffer(cursor => { calls.push(cursor); return new Promise(resolve => finish.set(cursor, resolve)); });
+  const warming = buffer.prefetch('a');
+  await Promise.resolve();
+  const foreground = buffer.get('a');
+  assert.deepEqual(calls, ['a']);
+  finish.get('a')({ messages: [], next: 'b' });
+  await foreground;
+  assert.ok(buffer.peek('a'));
+  for (let i = 0; i < 8 && !finish.has('b'); i++) await Promise.resolve();
+  finish.get('b')({ messages: [], next: 'c' });
+  await warming;
+  assert.deepEqual(calls, ['a', 'b']);
+  assert.ok(buffer.peek('b'));
+  buffer.consume('a');
+  assert.equal(buffer.peek('a'), undefined);
+  const stale = buffer.get('c');
+  await Promise.resolve();
+  buffer.clear();
+  finish.get('c')({ messages: [], next: 'd' });
+  await stale;
+  assert.equal(buffer.peek('c'), undefined);
+});
+
+test('prefetch prepares long visible prose but not folded tool results', async () => {
+  const text = 'visible '.repeat(10000);
+  const full = entry(1, null, { content: [{ type: 'text', text }] });
+  const ref = { id: 'e1', length: 100000 };
+  const page = { messages: [projectEntry(full, ref), projectEntry(entry(2, 'e1', { role: 'toolResult', toolName: 'bash', content: [{ type: 'text', text }] }), { id: 'e2', length: 100000 })], next: null };
+  const seen = [];
+  const ready = await prepareHistoryPage(page, async ref => { seen.push(ref.id); return projectEntry(full, ref, { preview: false }); });
+  assert.deepEqual(seen, ['e1']);
+  assert.equal(ready.messages[0].content[0].text, text);
+  assert.equal(ready.messages[1].__history.truncated, true);
+});
+
+test('speculative history reads do not change focus or start a Pi', async t => {
+  const file = fixture(t, [entry(0), entry(1)]);
+  const manager = new SessionManager({ store: { settings: {}, sessions: [{ id: 's', environmentId: 'local', piSessionFile: file }] }, environments: () => [{ id: 'local', kind: 'local' }], local: {} });
+  manager.focus = () => assert.fail('prefetch changed focus');
+  manager.ensureStarted = () => assert.fail('prefetch started Pi');
+  assert.equal((await manager.historyPage('s', { prefetch: true })).messages.length, 2);
+});
 
 test('CLI history entrypoint works through symlinked deployment paths', { skip: !process.env.CI }, t => {
   const file = fixture(t, [entry(0), entry(1)]);

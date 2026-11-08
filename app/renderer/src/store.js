@@ -4,6 +4,7 @@ import { relativeSessionPath } from './file-paths.js';
 import { useRef, useSyncExternalStore } from 'react';
 import { applyEvent, emptyTranscript, fromHistory, rewindTo } from './transcript.js';
 import { historyKey, mergeHistory, mergeReloadedHistory } from './history.js';
+import { HistoryBuffer, prepareHistoryPage } from './history-buffer.js';
 import { isSubagentFinished, subagentBatches, subagentHistoryId, visibleSubagentBatches } from './subagent-state.js';
 
 // Generation timing per reply (Pi's history keeps token counts but not timing), so tok/s survives reloads.
@@ -194,6 +195,23 @@ export async function bootstrap() {
 
 // Page generations prevent a slow response from restoring a deleted/edited branch.
 const historySeq = new Map();
+const historyBuffers = new Map();
+function historyBuffer(id) {
+  if (!historyBuffers.has(id)) {
+    if (historyBuffers.size >= 4) {
+      const oldest = historyBuffers.keys().next().value;
+      historyBuffers.get(oldest).clear(); historyBuffers.delete(oldest);
+    }
+    historyBuffers.set(id, new HistoryBuffer(cursor => api('historyPage', id, { cursor, prefetch: true }), page => prepareHistoryPage(page, ref => api('historyPage', id, { ref, prefetch: true }))));
+  }
+  return historyBuffers.get(id);
+}
+export function prefetchHistory(id) {
+  const cursor = transcriptOf(id).history?.next;
+  if (!cursor || state.activeId !== id || deleting.has(id)) return;
+  const buffer = historyBuffer(id);
+  void buffer.prefetch(cursor, () => state.activeId === id && historyBuffers.get(id) === buffer && !deleting.has(id));
+}
 export async function reloadTranscript(id) {
   const seq = (historySeq.get(id) ?? 0) + 1; historySeq.set(id, seq);
   const baseline = new Set(transcriptOf(id).messages.map(historyKey));
@@ -203,30 +221,34 @@ export async function reloadTranscript(id) {
     const current = transcriptOf(id);
     const arrived = current.messages.filter(message => !baseline.has(historyKey(message)));
     const pageState = mergeReloadedHistory(page, current);
+    if (JSON.stringify(current.history?.next) !== JSON.stringify(pageState.history.next)) historyBuffers.get(id)?.clear();
     const history = fromHistory(mergeHistory(pageState.messages, arrived), timingsOf(id));
     const active = Object.fromEntries(Object.entries(current.tools).filter(([, tool]) => tool.status === 'running'));
     setTranscript(id, { ...current, ...history, live: current.live, tools: { ...history.tools, ...active }, history: pageState.history });
+    prefetchHistory(id);
   } catch (error) {
     if (historySeq.get(id) === seq && !deleting.has(id)) setTranscript(id, { ...transcriptOf(id), loaded: true, error: error.message });
   }
 }
 
-export async function loadEarlierHistory(id) {
+export async function loadEarlierHistory(id, { background = false } = {}) {
   const current = transcriptOf(id), cursor = current.history?.next;
   if (!cursor || current.history.loading) return;
-  const seq = historySeq.get(id);
-  setTranscript(id, { ...current, history: { ...current.history, loading: true, viewingOlder: true } });
+  const seq = historySeq.get(id), buffer = historyBuffer(id), ready = buffer.peek(cursor);
+  if (!ready) setTranscript(id, { ...current, history: { ...current.history, loading: true, error: null, viewingOlder: current.history.viewingOlder || !background } });
   try {
-    const page = await api('historyPage', id, { cursor });
+    const page = ready ?? await buffer.get(cursor);
     if (historySeq.get(id) !== seq || deleting.has(id)) return;
     const now = transcriptOf(id);
     const history = fromHistory(mergeHistory(page.messages, now.messages), timingsOf(id));
     setTranscript(id, { ...now, messages: history.messages, tools: { ...history.tools, ...now.tools },
-      history: { ...now.history, next: page.next, warning: page.warning ?? now.history.warning, loading: false } });
+      history: { ...now.history, next: page.next, warning: page.warning ?? now.history.warning, loading: false, error: null, viewingOlder: now.history.viewingOlder || !background } });
+    buffer.consume(cursor);
+    prefetchHistory(id);
   } catch (error) {
     if (historySeq.get(id) !== seq || deleting.has(id)) return;
     const now = transcriptOf(id);
-    setTranscript(id, { ...now, history: { ...now.history, loading: false } });
+    setTranscript(id, { ...now, history: { ...now.history, loading: false, error: error.message } });
     notify(error.message, 'error');
   }
 }
@@ -374,7 +396,7 @@ export async function openSession(id, { record = true } = {}) {
   // Once it is open, keep a spare Pi in its folder so Fork (or a new session there) needn't start one.
   setTimeout(() => { if (state.activeId === id) api('warmFolder', id).catch(() => {}); }, 1500);
   const t = transcriptOf(id);
-  if (t.loaded) { api('focusSession', id).catch(() => {}); return; } // the sweep never stops the open conversation
+  if (t.loaded) { api('focusSession', id).catch(() => {}); prefetchHistory(id); return; } // the sweep never stops the open conversation
   try {
     await reloadTranscript(id);
     refreshStats(id);
@@ -473,6 +495,7 @@ export async function deleteSession(id) {
   const removed = state.sessions.find(s => s.id === id);
   const index = state.sessions.findIndex(s => s.id === id);
   deleting.add(id);
+  historyBuffers.get(id)?.clear(); historyBuffers.delete(id);
   // The click takes effect immediately; SSH/process cleanup must not hold the interface hostage.
   set(s => ({ sessions: s.sessions.filter(x => x.id !== id) }));
   if (state.activeId === id) newSession();
@@ -494,6 +517,7 @@ export async function deleteSession(id) {
 
 export async function editMessage(id, ordinal, originalText, text, attachments = []) {
   historySeq.set(id, (historySeq.get(id) ?? 0) + 1);
+  historyBuffers.get(id)?.clear();
   // Show the rewound conversation immediately; events from the old branch (an aborted reply) are
   // ignored until Pi reports the branch switch.
   setTranscript(id, rewindTo(transcriptOf(id), ordinal, text, attachments.filter(a => a.kind === 'image')));

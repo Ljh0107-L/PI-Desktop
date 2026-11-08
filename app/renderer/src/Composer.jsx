@@ -4,6 +4,7 @@ import { EffortTrigger, MenuItem, MenuSection, Modal, SpeedTrigger, Spinner, Tri
 import { effectiveSpeed } from '../../../agent/pidesk-speed.mjs';
 import { api, captureComposerDraft, clearQueued, defaultFolder, getState, notify, openSettings, recoverComposerDraft, restoreComposerDraft, setComposerDraft, setDraft, setEnvironments, takeComposerDraft, useStore } from './store.js';
 import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerDraft as takeDraft, restoreComposerDraft as restoreDraft, recoverComposerDraft as recoverDraft } from './composer-draft.js';
+import { createComposerSizer } from './composer-size.js';
 import { cachedDir, listDir, prefetchDir } from './dirs.js';
 
 const EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
@@ -287,12 +288,18 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   const [pi, setPi] = useState([]);
   const ref = useRef(null);
   const streaming = session?.streaming;
-  useEffect(() => { if (autoFocus) ref.current?.focus(); }, [autoFocus, session?.id]);
-  useEffect(() => {
+  const size = useRef(null);
+  useEffect(() => { if (autoFocus) ref.current?.focus({ preventScroll: true }); }, [autoFocus, session?.id]);
+  useLayoutEffect(() => {
     const el = ref.current; if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, 240) + 'px';
-  }, [text]);
+    const sizer = createComposerSizer(el);
+    size.current = sizer;
+    sizer.update();
+    const observer = new ResizeObserver(() => sizer.update());
+    observer.observe(el);
+    return () => { observer.disconnect(); sizer.destroy(); size.current = null; };
+  }, []);
+  useLayoutEffect(() => { size.current?.update(); }, [text]);
   // Slash commands: shown while the message is a single "/word" being typed.
   const slashQuery = /^\/[\w:.-]*$/.test(text) ? text.slice(1).toLowerCase() : null;
   useEffect(() => { if (slashQuery !== null && session?.id) api('commands', session.id).then(setPi).catch(() => {}); }, [slashQuery !== null, session?.id]);

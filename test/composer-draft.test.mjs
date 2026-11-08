@@ -1,9 +1,28 @@
 import assert from 'node:assert/strict';
+import { createComposerSizer } from '../app/renderer/src/composer-size.js';
 import test from 'node:test';
 import {
   createComposerDraft, draftReadToken, updateComposerDraft,
   takeComposerDraft, restoreComposerDraft, recoverComposerDraft,
 } from '../app/renderer/src/composer-draft.js';
+
+test('composer sizing never collapses the focused editor to measure it', () => {
+  const writes = [];
+  let removed = false;
+  const mirror = { style: {}, value: '', setAttribute() {}, remove() { removed = true; }, get scrollHeight() { return this.value.split('\n').length * 22 + 10; } };
+  const editor = { value: 'one\ntwo\nthree', clientWidth: 400, style: new Proxy({}, { set(target, key, value) { writes.push(value); target[key] = value; return true; } }), ownerDocument: {
+    createElement: () => mirror, body: { append() {} }, defaultView: { getComputedStyle: () => ({ minHeight: '32px', maxHeight: '240px', font: '15px sans-serif', letterSpacing: '0px' }) },
+  } };
+  const sizing = createComposerSizer(editor);
+  sizing.update();
+  assert.equal(editor.style.height, '76px');
+  editor.value += ' more text'; sizing.update();
+  assert.deepEqual(writes, ['76px']);
+  editor.value = 'short'; sizing.update();
+  assert.equal(editor.style.height, '32px');
+  assert.ok(!writes.includes('auto'));
+  sizing.destroy(); assert.ok(removed);
+});
 
 const image = { kind: 'image', key: 'old', data: 'old image' };
 const message = () => updateComposerDraft(createComposerDraft(' original text '), 'attachments', [image]);
