@@ -2,7 +2,7 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## Unreleased — Seamless history and document previews
+## 0.2.5 — Seamless history and document previews
 
 - **Normal conversation browsing.** Removed per-message load buttons. Visible replies and images load automatically; scrolling upward loads older history without moving the reading position. Folded work remains grouped, tools load details through their normal disclosure, and tail refreshes preserve already loaded content.
 - **PDF preview.** Local and SSH PDFs up to 32 MiB open inside the file panel using the built-in PDF viewer, with the original file still available to download.
