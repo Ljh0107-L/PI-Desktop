@@ -3,7 +3,7 @@ import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerD
 import { relativeSessionPath } from './file-paths.js';
 import { useRef, useSyncExternalStore } from 'react';
 import { applyEvent, emptyTranscript, fromHistory, rewindTo } from './transcript.js';
-import { historyKey, mergeHistory } from './history.js';
+import { historyKey, mergeHistory, retainLoadedContent } from './history.js';
 import { isSubagentFinished, subagentBatches, subagentHistoryId, visibleSubagentBatches } from './subagent-state.js';
 
 // Generation timing per reply (Pi's history keeps token counts but not timing), so tok/s survives reloads.
@@ -201,7 +201,7 @@ export async function reloadTranscript(id) {
     if (historySeq.get(id) !== seq || deleting.has(id)) return;
     const current = transcriptOf(id);
     const arrived = current.messages.filter(message => !baseline.has(historyKey(message)));
-    const history = fromHistory(mergeHistory(page.messages, arrived), timingsOf(id));
+    const history = fromHistory(mergeHistory(retainLoadedContent(page.messages, current.messages), arrived), timingsOf(id));
     const active = Object.fromEntries(Object.entries(current.tools).filter(([, tool]) => tool.status === 'running'));
     setTranscript(id, { ...history, live: current.live, tools: { ...history.tools, ...active }, history: { next: page.next, warning: page.warning, snapshot: page.snapshot } });
   } catch (error) {

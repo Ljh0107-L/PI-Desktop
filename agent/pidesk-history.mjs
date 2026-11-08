@@ -1,6 +1,7 @@
 // Read-only UI history projection. Never changes Pi's transcript or model context.
 // Runs beside the session file, locally or over SSH; only bounded pages cross the transport.
 import { open } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export const PAGE_MESSAGES = 80;
@@ -26,7 +27,11 @@ function clean(value, preview, state, depth = 0) {
   const out = {};
   for (const [key, v] of Object.entries(value)) {
     if (signatures.has(key) && ['thinking', 'text', 'toolCall'].includes(value.type)) continue;
-    if (preview && key === 'data' && value.type === 'image') { state.clipped = true; continue; }
+    if (preview && key === 'data' && value.type === 'image') {
+      if (typeof v === 'string' && v.length <= 2048 && state.left >= v.length) { out[key] = v; state.left -= v.length; }
+      else state.clipped = true;
+      continue;
+    }
     if (preview && key === 'steps') { if (v?.length) state.clipped = true; continue; }
     out[key] = typeof v === 'string' && ['id', 'type', 'name', 'path', 'file_path', 'toolCallId', 'toolName', 'customType', 'api', 'provider', 'model', 'status', 'stopReason', 'kind', 'failureKind', 'mimeType', 'thinkingLevel'].includes(key)
       ? v : clean(v, preview, state, depth + 1);
@@ -141,7 +146,9 @@ export async function readHistory(file, options = {}) {
   } finally { await handle.close(); }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+let main = false;
+try { main = !!process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; } catch { /* imported from stdin or an embedded runtime */ }
+if (main) {
   try { process.stdout.write(JSON.stringify(await readHistory(process.argv[2], JSON.parse(process.argv[3] ?? '{}'))) + '\n'); }
   catch (error) { process.stderr.write(error.message + '\n'); process.exitCode = 1; }
 }

@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { PAGE_BYTES, PAGE_MESSAGES, projectEntry, readHistory } from '../agent/pidesk-history.mjs';
-import { historyKey, mergeHistory } from '../app/renderer/src/history.js';
+import { historyKey, mergeHistory, retainLoadedContent } from '../app/renderer/src/history.js';
 import { displayBlocks, fromHistory, rewindTo } from '../app/renderer/src/transcript.js';
 import { SessionManager } from '../app/main/session-manager.mjs';
 
@@ -19,6 +20,27 @@ function fixture(t, entries) {
   return file;
 }
 const hash = file => createHash('sha256').update(readFileSync(file)).digest('hex');
+
+test('CLI history entrypoint works through symlinked deployment paths', { skip: !process.env.CI }, t => {
+  const file = fixture(t, [entry(0), entry(1)]);
+  const alias = join(dirname(file), 'reader-link.mjs');
+  symlinkSync(resolve('agent/pidesk-history.mjs'), alias);
+  const output = execFileSync(process.execPath, [alias, file, '{}'], { encoding: 'utf8', timeout: 10000 });
+  assert.deepEqual(JSON.parse(output).messages.map(m => m.__entryId), ['e0', 'e1']);
+});
+
+test('refresh preserves already received text and images without keeping hidden signatures', () => {
+  const original = { role: 'assistant', timestamp: 1, content: [{ type: 'text', text: 'answer'.repeat(2000), textSignature: 'PRIVATE' }, { type: 'image', data: 'image'.repeat(2000), mimeType: 'image/png' }] };
+  const projected = projectEntry(entry(0, null, original), {});
+  assert.equal(projected.__history.truncated, true);
+  const retained = retainLoadedContent([projected], [original])[0];
+  assert.equal(retained.content[0].text, original.content[0].text);
+  assert.equal(retained.content[1].data, original.content[1].data);
+  assert.equal(retained.__history.truncated, false);
+  assert.ok(!JSON.stringify(retained).includes('PRIVATE'));
+  assert.equal(retainLoadedContent([projected], [])[0], projected, 'cold history remains bounded');
+  assert.equal(retainLoadedContent([projected], [{ ...original, __entryId: 'different-entry' }])[0], projected);
+});
 
 test('large signed history reads only a tail page and never transmits signatures or edits the file', async t => {
   const rows = Array.from({ length: 1600 }, (_, i) => entry(i, i ? `e${i - 1}` : null,

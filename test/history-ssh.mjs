@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { shellQuote } from '../core/transports.mjs';
@@ -15,8 +15,10 @@ try {
     message: { role: 'assistant', timestamp: i, content: [{ type: 'thinking', thinking: '', thinkingSignature: 'opaque-signature'.repeat(2000) }, { type: 'text', text: `row ${i}` }] } }) + '\n');
   const hash = () => createHash('sha256').update(readFileSync(file)).digest('hex');
   const before = hash();
+  const reader = join(dir, 'reader-link.mjs');
+  symlinkSync(resolve('agent/pidesk-history.mjs'), reader);
   const read = options => execFileSync('ssh', ['-F', '/tmp/pidesk-sshd/ssh_config', 'pidesk-test',
-    [process.execPath, resolve('agent/pidesk-history.mjs'), file, JSON.stringify(options)].map(shellQuote).join(' ')], { encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024 });
+    [process.execPath, reader, file, JSON.stringify(options)].map(shellQuote).join(' ')], { encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024 });
   const started = Date.now(), output = read({}), page = JSON.parse(output);
   assert.ok(Buffer.byteLength(output) < 300000);
   assert.ok(page.scannedBytes < statSync(file).size / 4);
