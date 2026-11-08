@@ -128,6 +128,17 @@ test('page merging preserves live output and persisted identity; prepending keep
   assert.notEqual(historyKey(messages[0]), historyKey(messages[1]));
 });
 
+test('a page beginning with a tool result remains inspectable without its earlier call', async t => {
+  const file = fixture(t, [entry(0, null, { role: 'toolResult', toolCallId: 'older-call', toolName: 'bash', content: [{ type: 'text', text: 'result '.repeat(5000) }] })]);
+  const page = await readHistory(file);
+  const blocks = displayBlocks(fromHistory(page.messages));
+  assert.ok(blocks.some(block => block.kind === 'orphanResult'));
+  assert.ok(blocks.some(block => block.kind === 'deferred'));
+  const full = await readHistory(file, { ref: page.messages[0].__history.ref });
+  assert.equal(fromHistory([full]).tools['older-call'].fullHistory, true);
+  assert.equal(full.content[0].text, 'result '.repeat(5000));
+});
+
 test('editing a paged message uses its id, not the ordinal or a later duplicate text', async () => {
   const record = { id: 's', cwd: '/workspace' };
   const store = { settings: {}, sessions: [record], saveSessions() {} };

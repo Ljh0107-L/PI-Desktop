@@ -52,7 +52,7 @@ try {
   console.log('PASS explicit detail loading restores the whole visible message');
   for (let i = 0; i < 5; i++) {
     await page.locator('.session-main .history-earlier').click();
-    await page.locator('.session-main .history-earlier').filter({ hasText: 'Load earlier messages' }).waitFor();
+    await page.waitForFunction(() => { const button = document.querySelector('.session-main .history-earlier'); return button && !button.disabled && button.textContent === 'Load earlier messages'; });
   }
   await page.waitForFunction(() => document.querySelectorAll('.session-main .history-virtual-row').length > 80);
   const mounted = await page.locator('.session-main .history-virtual-row[data-mounted="true"]').count();

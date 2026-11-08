@@ -67,6 +67,27 @@ const conversationSnapshot = () => page.evaluate(() => {
 });
 async function send(text) { await composer().fill(text); await composer().press('Enter'); }
 const waitText = (selector, text, timeout = 60000) => page.locator(selector, { hasText: text }).last().waitFor({ timeout });
+// Historical assertions must explicitly browse pages; the first paint intentionally contains only
+// recent messages, and off-screen content is not mounted until it approaches the viewport.
+async function loadAllHistory() {
+  for (let i = 0; i < 40 && await page.locator('.session-main .history-earlier').count(); i++) {
+    await page.locator('.session-main .history-earlier').click();
+    await page.waitForFunction(() => !document.querySelector('.session-main .history-earlier')?.disabled);
+  }
+  if (await page.locator('.session-main .history-earlier').count()) throw new Error('History did not finish paging');
+}
+async function revealHistory(selector, text) {
+  await loadAllHistory();
+  await mainTranscript().evaluate(el => { el.scrollTop = 0; });
+  for (let i = 0; i < 80; i++) {
+    await page.waitForTimeout(60);
+    const match = page.locator(selector, { hasText: text }).last();
+    if (await match.count()) { await match.scrollIntoViewIfNeeded(); return; }
+    const moved = await mainTranscript().evaluate(el => { const before = el.scrollTop; el.scrollTop += el.clientHeight * 0.7; return el.scrollTop !== before; });
+    if (!moved) break;
+  }
+  throw new Error(`Historical content not found after paging: ${text}`);
+}
 // Wait for one more match than there is now (earlier messages may contain the same text).
 async function waitNew(selector, text, action, timeout = 60000) {
   const count = await page.locator(selector, { hasText: text }).count();
@@ -714,7 +735,7 @@ try {
   await page.locator('.session-row', { hasText: 'hello from the desktop' }).click({ button: 'right' });
   await page.click('.popover .menu-item:has-text("Fork")');
   await page.locator('.session-row', { hasText: '(fork)' }).waitFor({ timeout: 30000 });
-  await waitText('.markdown', 'echo: hello from the desktop', 30000);
+  await revealHistory('.session-main .markdown', 'echo: hello from the desktop');
   check('fork opens a copy of the conversation', await page.locator('.session-row.active', { hasText: '(fork)' }).count() === 1);
   await page.locator('.session-row', { hasText: '(fork)' }).click({ button: 'right' });
   const menuItems = (await page.locator('.popover .menu-item').allInnerTexts()).map(t => t.trim()).join('|');
@@ -781,10 +802,12 @@ try {
   check('sessions restored after restart', await page.locator('.session-row').count() === 2);
   check('a presented file is still a card after an app restart', await mainTranscript().locator('.file-card', { hasText: 'export.bin' }).count() === 1);
   await page.waitForFunction(() => { const s = window.__pideskState(), session = s.sessions.find(row => row.id === s.activeId); return session?.status === 'connected' && !session.streaming; }, undefined, { timeout: 90000 });
+  await loadAllHistory();
   check('single-task clearing survives an app restart in the sidebar and delegation card',
     await mainTranscript().locator('.subagent-task-row', { hasText: 'Inspect cwd' }).count() === 0 &&
     await page.locator('.subagent-list .subagent-task-row').count() === 3 &&
     (await activeRecord()).clearedSubagentIds?.length === 1);
+  await revealHistory('.session-main .subagent-task-row', 'Write delegated file');
   await mainTranscript().locator('.subagent-task-row', { hasText: 'Write delegated file' }).click();
   await inspector().locator('.tool-group.work .tool-group-head').click();
   await inspector().locator('.tool-call-head').click();

@@ -103,6 +103,7 @@ function ToolCall({ call, tool }) {
   const status = tool?.status ?? 'pending';
   const failed = ['error', 'cancelled', 'timed_out'].includes(status);
   const output = textOf(tool?.result);
+  const shownOutput = tool?.fullHistory ? output : outputText(output);
   const filePath = call.__historyTruncated ? null : trace?.path ?? (['read', 'edit', 'write', 'cursor_edit'].includes(call.name) && !failed ? (call.arguments?.path ?? call.arguments?.file_path) : null);
   const hunks = trace || call.__historyTruncated ? [] : call.name === 'edit' ? editHunks(call.arguments) : call.name === 'write' ? [{ oldText: null, newText: String(call.arguments?.content ?? '') }] : [];
   const stats = hunks.length && status !== 'error' ? changeStats({ hunks }) : null;
@@ -125,17 +126,17 @@ function ToolCall({ call, tool }) {
         <div className="step-detail tool-detail">
           {trace && call.name !== 'bash' ? <>
             {trace.input && <pre className="tool-command">{call.name === 'bash' ? '$ ' : ''}{trace.input}</pre>}
-            {output && <pre className={`tool-output boxed ${failed ? 'error' : ''}`}>{outputText(output)}</pre>}
+            {output && <pre className={`tool-output boxed ${failed ? 'error' : ''}`}>{shownOutput}</pre>}
             {!output && status === 'running' && <div className="tool-running">Running…</div>}
           </> : call.name === 'bash'
             ? <div className={`tool-console ${status === 'error' ? 'error' : ''}`}>
                 <pre className="tool-command"><span className="prompt">$</span> {call.arguments?.command}</pre>
-                {output && <pre className="tool-output">{outputText(output)}</pre>}
+                {output && <pre className="tool-output">{shownOutput}</pre>}
                 {!output && status === 'running' && <div className="tool-running">Running…</div>}
               </div>
             : <>
                 {hunks.length > 0 && <EditDiff hunks={hunks} />}
-                {output && call.name !== 'write' && (call.name !== 'edit' || status === 'error') && <pre className={`tool-output boxed ${status === 'error' ? 'error' : ''}`}>{outputText(output)}</pre>}
+                {output && call.name !== 'write' && (call.name !== 'edit' || status === 'error') && <pre className={`tool-output boxed ${status === 'error' ? 'error' : ''}`}>{shownOutput}</pre>}
                 {!output && status === 'running' && <div className="tool-running">Running…</div>}
               </>}
           {filePath && <button className="step-open" onClick={() => onOpenFile ? onOpenFile(filePath) : window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: filePath }))}>Open {baseOf(filePath)}</button>}
@@ -510,6 +511,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
         {transcript.history?.warning && <div className="block-notice">{transcript.history.warning}</div>}
         <VirtualHistory items={blocks} scroller={scroller} onMeasure={() => { if (stick.current && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }} renderItem={block => {
           switch (block.kind) {
+            case 'orphanResult': return <div key={block.key} className="history-result"><div title="The tool call is on an earlier page">{block.message.toolName ?? 'Tool'} result · earlier call</div><pre className="tool-output">{textOf({ content: block.message.content })}</pre></div>;
             case 'deferred': return <HistoryDetails key={block.key} sessionId={session?.id} block={block} />;
             case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!block.truncated && (!transcript.history || !!block.entryId) && !readOnly && session?.engine !== 'cursor' && !!session && session.id !== 'pending' && session.status === 'connected' && !session.streaming && !block.text.startsWith('/')} />;
             case 'goal': return <GoalMarker key={block.key} objective={block.objective} />;

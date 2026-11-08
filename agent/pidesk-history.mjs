@@ -28,7 +28,7 @@ function clean(value, preview, state, depth = 0) {
     if (signatures.has(key) && ['thinking', 'text', 'toolCall'].includes(value.type)) continue;
     if (preview && key === 'data' && value.type === 'image') { state.clipped = true; continue; }
     if (preview && key === 'steps') { if (v?.length) state.clipped = true; continue; }
-    out[key] = typeof v === 'string' && ['id', 'type', 'name', 'path', 'file_path', 'toolCallId', 'toolName', 'customType'].includes(key)
+    out[key] = typeof v === 'string' && ['id', 'type', 'name', 'path', 'file_path', 'toolCallId', 'toolName', 'customType', 'api', 'provider', 'model', 'status', 'stopReason', 'kind', 'failureKind', 'mimeType', 'thinkingLevel'].includes(key)
       ? v : clean(v, preview, state, depth + 1);
   }
   return out;
@@ -127,7 +127,7 @@ export async function readHistory(file, options = {}) {
         next = { snapshot, offset: row.offset + row.length, id: entry.id, omitted: [...omitted] };
         break;
       }
-      if (message) { messages.push(message); total += cost; }
+      if (message) { messages.push(message); total += cost; omitted.delete(entry.id); }
       target = entry.parentId;
       remaining = row.offset;
       if (!target) break;

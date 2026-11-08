@@ -10,7 +10,7 @@ export const emptyTranscript = () => ({ messages: [], live: null, tools: {}, loa
 function toolsFromMessages(messages) {
   const tools = {};
   for (const message of messages) {
-    if (message.role === 'toolResult') tools[message.toolCallId] = { status: message.isError ? 'error' : 'done', result: { content: message.content, details: message.details } };
+    if (message.role === 'toolResult') tools[message.toolCallId] = { status: message.isError ? 'error' : 'done', ...(message.__history && !message.__history.truncated ? { fullHistory: true } : {}), result: { content: message.content, details: message.details } };
   }
   return tools;
 }
@@ -354,6 +354,7 @@ export function applyEvent(t, event) {
 export function displayBlocks(t) {
   const blocks = [];
   const all = t.live ? [...t.messages, t.live] : t.messages;
+  const declaredCalls = new Set(all.flatMap(m => m.role === 'assistant' && Array.isArray(m.content) ? m.content.filter(b => b?.type === 'toolCall').map(b => b.id) : []));
   let group = null;
   const flush = () => { if (group) { blocks.push(group); group = null; } };
   let turn = [], turnKey = 'start';
@@ -421,6 +422,9 @@ export function displayBlocks(t) {
     }
     if (message.role === 'custom' && message.customType === 'pidesk-subagent-notice') {
       flush(); blocks.push({ kind: 'notice', key: message.id ?? `notice:${mi}`, text: String(message.content ?? '') }); return;
+    }
+    if (message.role === 'toolResult' && message.__history && !declaredCalls.has(message.toolCallId)) {
+      flush(); blocks.push({ kind: 'orphanResult', key: `result:${mk}`, message }); return;
     }
     if (message.role === 'bashExecution') { flush(); blocks.push({ kind: 'bash', key: `b${mk}`, message }); return; }
     if (message.role === 'compactionSummary') { flush(); blocks.push({ kind: 'compaction', key: `c${mk}`, summary: message.summary, tokensBefore: message.tokensBefore }); return; }

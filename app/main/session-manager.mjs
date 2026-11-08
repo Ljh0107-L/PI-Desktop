@@ -962,7 +962,7 @@ export class SessionManager extends EventEmitter {
     const env = this.env(record.environmentId);
     if (env.kind === 'local') {
       try { return await readHistory(record.piSessionFile, options); }
-      catch (error) { if (error.code === 'ENOENT') return { messages: [], next: null }; throw error; }
+      catch (error) { if (error.code === 'ENOENT' && !options.cursor && !options.ref) return { messages: [], next: null }; throw error; }
     }
     const readRemote = async facts => {
       const reader = `${facts.root}/ext/pidesk-history.mjs`;

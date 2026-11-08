@@ -2,6 +2,12 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.4 — Fast reopening for long conversations (unreleased)
+
+- **Bounded first paint, on this Mac and SSH hosts.** The conversation view no longer downloads and parses the entire session tree before showing it. A read-only history reader walks backward on the session's machine, follows parent links, and returns a page capped at 80 messages and 256 KiB of visible message data. Existing installation hints let SSH history load while Pi starts. Scroll upward or choose **Load earlier messages** to continue; very long turns can span pages.
+- **Only load what the view needs.** Encrypted reasoning signatures are never sent to the conversation renderer. Long text, tool arguments/results, image attachments and historical agent traces use previews with an explicit full-content action. Opening an agent inspector loads its full history entry. Off-screen Markdown, diffs and tool cards use measured height placeholders instead of remaining mounted.
+- **Keep history and message identity intact.** The original JSONL and the model's compacted context are untouched. Pages stay on the chosen parent chain, retain compaction markers and retry-omission information, and use a fixed file snapshot while new messages arrive. User-message edits use stable entry IDs so repeated text or pagination cannot select the wrong turn. Live events arriving during page reads are merged rather than discarded.
+
 ## 0.2.3 — Session tool recovery and custom Gemini models
 
 - **Keep coding tools when a session's history is damaged.** A broken parent chain could make a reopened conversation lose `read`, `bash`, `edit` and `write`, even though its latest compaction held the complete tool list. The desktop bridge now restores that checkpoint and applies later tool changes, on this Mac and SSH hosts. It warns about missing history instead of silently degrading; without a complete checkpoint, model requests stop. Intentionally removed tools and explicit CLI tool selections are not automatically re-enabled.
