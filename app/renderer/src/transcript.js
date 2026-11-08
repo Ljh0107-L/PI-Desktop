@@ -509,6 +509,20 @@ export function collapseWork(blocks) {
   return out;
 }
 
+// A page join can extend the first work group. Reuse its committed identity so its
+// DOM, disclosure and reading anchors do not become a different group on prepend.
+export function retainWorkKeys(previous, next) {
+  const members = block => block.kind === 'work' ? block.items.flatMap(members) : block.kind === 'tools' ? block.calls.map(call => call.id) : [];
+  const owners = new Map(previous.flatMap(block => members(block).map(id => [id, block.key])));
+  const used = new Set();
+  return next.map(block => {
+    const retained = members(block).map(id => owners.get(id)).find(key => key && !used.has(key));
+    const key = retained ?? block.key;
+    used.add(key);
+    return key === block.key ? block : { ...block, key };
+  });
+}
+
 // Files the agent wrote or edited, most recent first.
 export function outputs(t) {
   const seen = new Map();

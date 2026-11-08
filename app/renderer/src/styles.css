@@ -208,6 +208,7 @@ code, pre, kbd { font-family: var(--mono); }
 .transcript { flex: 1; overflow-y: auto; padding: 24px 24px 8px; scrollbar-gutter: stable; }
 .transcript-inner { overflow-anchor: none; max-width: 720px; margin: 0 auto; display: flex; flex-direction: column; gap: 14px; user-select: text; }
 .transcript-inner > * { animation: enter .22s var(--ease); }
+.transcript-inner > .history-virtual-row { animation: none; }
 .history-virtual-row { display: flow-root; overflow-anchor: none; }
 .history-boundary { height: 20px; display: flex; align-items: center; justify-content: center; }
 .history-loading { display: inline-flex; min-height: 28px; align-items: center; }

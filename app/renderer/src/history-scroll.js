@@ -2,15 +2,16 @@
 export function historyBookmark(scroller) {
   if (!scroller) return [];
   const top = scroller.getBoundingClientRect().top;
-  return [...scroller.querySelectorAll('[data-history-key]')].filter(node => {
+  return [...scroller.querySelectorAll('[data-tool-id], [data-history-key]')].filter(node => {
     const rect = node.getBoundingClientRect();
-    return rect.bottom > top && rect.top < top + scroller.clientHeight;
-  }).map(node => ({ key: node.dataset.historyKey, offset: node.getBoundingClientRect().top - top }));
+    return rect.height > 0 && rect.bottom > top && rect.top < top + scroller.clientHeight;
+  }).sort((a, b) => Number(!!b.dataset.toolId) - Number(!!a.dataset.toolId))
+    .map(node => ({ key: node.dataset.toolId ? `tool:${node.dataset.toolId}` : `row:${node.dataset.historyKey}`, offset: node.getBoundingClientRect().top - top }));
 }
 
 export function restoreHistoryBookmark(scroller, bookmark) {
   if (!scroller || !bookmark?.length) return;
-  const nodes = new Map([...scroller.querySelectorAll('[data-history-key]')].map(node => [node.dataset.historyKey, node]));
+  const nodes = new Map([...scroller.querySelectorAll('[data-tool-id], [data-history-key]')].map(node => [node.dataset.toolId ? `tool:${node.dataset.toolId}` : `row:${node.dataset.historyKey}`, node]));
   for (const anchor of bookmark) {
     const node = nodes.get(anchor.key);
     if (!node) continue;

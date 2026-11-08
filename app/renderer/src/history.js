@@ -29,8 +29,11 @@ export function mergeReloadedHistory(page, current) {
   const fingerprints = new Set(current.messages.filter(m => !m.__entryId).map(historyKey));
   const overlap = messages.some(m => ids.has(m.__entryId) || fingerprints.has(historyKey(m)));
   const keepWindow = current.history?.snapshot?.identity === page.snapshot?.identity && overlap && !current.rewinding;
+  const first = messages[0];
+  const start = first ? current.messages.findIndex(m => m.__entryId === first.__entryId || (!m.__entryId && historyKey(m) === historyKey(first))) : -1;
+  const older = start < 0 ? [] : current.messages.slice(0, start).filter(m => m.__entryId);
   return {
-    messages: keepWindow ? mergeHistory(current.messages, messages) : messages,
+    messages: keepWindow ? mergeHistory(older, messages) : messages,
     history: { ...(keepWindow ? current.history : {}), snapshot: page.snapshot, next: keepWindow ? current.history.next : page.next,
       warning: page.warning ?? (keepWindow ? current.history.warning : null), loading: false },
   };

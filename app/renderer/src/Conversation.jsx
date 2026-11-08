@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { Markdown, Spinner } from './ui.jsx';
-import { changesOf, displayBlocks, formatTokens, isAbortText, toolSummary } from './transcript.js';
+import { changesOf, displayBlocks, formatTokens, isAbortText, retainWorkKeys, toolSummary } from './transcript.js';
 import { api, editMessage, loadEarlierHistory, loadHistoryEntry, notify, openChanges, openFile } from './store.js';
 import { VirtualHistory } from './VirtualHistory.jsx';
 import { historyBookmark, restoreHistoryBookmark } from './history-scroll.js';
@@ -497,7 +497,9 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
     setFollowing(true);
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
   };
-  const blocks = useMemo(() => displayBlocks(transcript), [transcript]);
+  const committed = useRef({ sessionId: session?.id, blocks: [] });
+  const blocks = useMemo(() => retainWorkKeys(committed.current.sessionId === session?.id ? committed.current.blocks : [], displayBlocks(transcript)), [transcript, session?.id]);
+  useLayoutEffect(() => { committed.current = { sessionId: session?.id, blocks }; }, [blocks, session?.id]);
   const earlier = async () => {
     const el = scroller.current;
     if (!el || !transcript.history?.next || transcript.history.loading) return;
@@ -512,9 +514,10 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
     const movedUp = el.scrollTop < previousTop.current;
     previousTop.current = el.scrollTop;
-    if (!atBottom) stick.current = false;
-    else if (scrollIntent.current) stick.current = true;
-    if (!stick.current) bookmark.current = historyBookmark(el);
+    if (!atBottom) {
+      if (stick.current || scrollIntent.current) bookmark.current = historyBookmark(el);
+      stick.current = false;
+    } else if (scrollIntent.current) stick.current = true;
     if (el.scrollTop < 160 && movedUp && scrollIntent.current && transcript.history?.next) earlier();
     scrollIntent.current = false;
     updateLatest();
@@ -522,7 +525,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
   const retainPosition = () => {
     if (stick.current && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight;
     else restoreHistoryBookmark(scroller.current, bookmark.current);
-    bookmark.current = historyBookmark(scroller.current);
+    if (stick.current) bookmark.current = historyBookmark(scroller.current);
     previousTop.current = scroller.current?.scrollTop ?? 0;
     updateLatest();
   };
@@ -546,6 +549,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
         scrollIntent.current = true;
       }}
       onPointerDown={e => { if (e.target === scroller.current) scrollIntent.current = true; }}
+      onPointerMove={e => { if (e.buttons && e.target === scroller.current) scrollIntent.current = true; }}
       onKeyDown={e => {
         if (['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'].includes(e.key)) scrollIntent.current = true;
       }}>

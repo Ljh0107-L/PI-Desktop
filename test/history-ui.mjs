@@ -34,7 +34,7 @@ for (let i = 0; i < 800; i++) {
   append({ role, content: [...(role === 'assistant' ? [{ type: 'thinking', thinking: '', thinkingSignature: 'PRIVATE_OPAQUE_SIGNATURE'.repeat(2500) }] : []), { type: 'text', text: `History ${role} ${i}` }] });
 }
 append({ role: 'user', content: [{ type: 'text', text: 'Inspect and show the plot' }] });
-for (let i = 0; i < 12; i++) {
+for (let i = 0; i < 120; i++) {
   append({ role: 'assistant', content: [{ type: 'toolCall', name: 'read', id: `read-${i}`, arguments: { path: 'plot.svg' } }] });
   append({ role: 'toolResult', toolCallId: `read-${i}`, toolName: 'read', content: [{ type: 'text', text: `OUTPUT_START_${i} ` + 'tool output '.repeat(2000) + ` OUTPUT_END_${i}` }, { type: 'image', mimeType: 'image/png', data: png }] });
 }
@@ -55,7 +55,8 @@ try {
   const first = await state();
   assert.ok(first.messages.length <= 80);
   assert.ok(!JSON.stringify(first).includes('PRIVATE_OPAQUE_SIGNATURE'));
-  assert.equal(first.messages.filter(m => m.role === 'toolResult' && m.__history?.truncated).length, 12, 'folded tool outputs are not fetched eagerly');
+  const deferredTools = first.messages.filter(m => m.role === 'toolResult' && m.__history?.truncated).length;
+  assert.ok(deferredTools > 30, 'folded tool outputs are not fetched eagerly');
   await page.waitForTimeout(600);
   assert.equal((await state()).messages.length, first.messages.length, 'idle opening does not page backward automatically');
   assert.equal(await page.locator('.session-main .tool-group.work').count(), 1, 'large results must not fragment a continuous work group');
@@ -70,13 +71,13 @@ try {
   await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).click();
   const group = page.locator('.session-main .tool-group.work > .tool-group-head');
   await group.click();
-  const call = page.locator('.session-main [data-tool-id="read-11"]');
+  const call = page.locator('.session-main [data-tool-id="read-119"]');
   await call.locator('.tool-call-head').click();
-  await call.locator('.tool-output', { hasText: 'OUTPUT_END_11' }).waitFor();
+  await call.locator('.tool-output', { hasText: 'OUTPUT_END_119' }).waitFor();
   await call.locator('img').waitFor();
-  assert.equal((await state()).messages.filter(m => m.role === 'toolResult' && m.__history?.truncated).length, 11);
+  assert.equal((await state()).messages.filter(m => m.role === 'toolResult' && m.__history?.truncated).length, deferredTools - 1);
   await call.locator('.tool-call-head').click();
-  await group.click();
+  // Keep the group open: older pages must preserve a tool's reading position inside it.
   console.log('PASS tool images, response images, Markdown session images and presented image thumbnails');
   await shot(page, '/tmp/pidesk-e2e/shots', '15-seamless-history');
 
@@ -87,15 +88,16 @@ try {
       el.scrollTop = 40;
       el.dispatchEvent(new Event('scroll', { bubbles: true }));
       const top = el.getBoundingClientRect().top;
-      const node = [...el.querySelectorAll('[data-history-key]')].find(n => n.getBoundingClientRect().bottom > top && n.getBoundingClientRect().height > 0);
-      const mark = { key: node.dataset.historyKey, offset: node.getBoundingClientRect().top - top };
+      const candidates = [...el.querySelectorAll('[data-tool-id], [data-history-key]')].filter(n => n.getBoundingClientRect().bottom > top && n.getBoundingClientRect().top < top + el.clientHeight && n.getBoundingClientRect().height > 0);
+      const node = candidates.find(n => n.dataset.toolId) ?? candidates[0];
+      const mark = { key: node.dataset.toolId ?? node.dataset.historyKey, tool: !!node.dataset.toolId, offset: node.getBoundingClientRect().top - top };
       el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, bubbles: true }));
       return mark;
     });
     await page.waitForFunction(before => { const s = window.__pideskState(), h = s.transcripts[s.activeId].history; return !h.loading && JSON.stringify(h.next) !== before; }, before);
     await page.waitForTimeout(150);
     const shift = await scroller.evaluate((el, anchor) => {
-      const node = [...el.querySelectorAll('[data-history-key]')].find(n => n.dataset.historyKey === anchor.key);
+      const node = [...el.querySelectorAll(anchor.tool ? '[data-tool-id]' : '[data-history-key]')].find(n => (anchor.tool ? n.dataset.toolId : n.dataset.historyKey) === anchor.key);
       return node.getBoundingClientRect().top - el.getBoundingClientRect().top - anchor.offset;
     }, anchor);
     assert.ok(Math.abs(shift) < 3, `prepend moved the reading anchor by ${shift}px`);

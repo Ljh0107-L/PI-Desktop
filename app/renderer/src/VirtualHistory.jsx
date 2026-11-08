@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 // Keep lightweight height placeholders, but mount Markdown, diffs and tool cards only near the
 // viewport. One observer serves the whole history; measured heights survive scrolling away.
@@ -7,6 +7,7 @@ export function VirtualHistory({ items, scroller, renderItem, onMeasure }) {
   const [visible, setVisible] = useState(() => new Set(items.slice(-20).map(item => item.key)));
   const [, setMeasured] = useState(0);
   const measureCallback = useRef(onMeasure); measureCallback.current = onMeasure;
+  useLayoutEffect(() => { measureCallback.current?.(); }, [items, visible]);
   useEffect(() => {
     const io = new IntersectionObserver(entries => {
       setVisible(previous => {

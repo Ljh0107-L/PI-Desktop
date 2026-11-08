@@ -7,7 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { PAGE_BYTES, PAGE_MESSAGES, projectEntry, readHistory } from '../agent/pidesk-history.mjs';
 import { historyKey, mergeHistory, retainLoadedContent, mergeReloadedHistory } from '../app/renderer/src/history.js';
-import { displayBlocks, fromHistory, rewindTo } from '../app/renderer/src/transcript.js';
+import { displayBlocks, fromHistory, retainWorkKeys, rewindTo } from '../app/renderer/src/transcript.js';
 import { SessionManager } from '../app/main/session-manager.mjs';
 import { historyEvent } from '../core/history-view.mjs';
 
@@ -198,7 +198,15 @@ test('tail refresh keeps the loaded reading window and never replaces full conte
   assert.equal(merged.messages.length, 100);
   assert.equal(merged.history.next.id, 'older');
   assert.equal(merged.history.viewingOlder, true);
+  const temporary = { role: 'user', timestamp: 1000, content: [{ type: 'text', text: 'temporary UI fixture' }] };
+  assert.equal(mergeReloadedHistory(page, { ...current, messages: [...rows, temporary] }).messages.length, 100);
   assert.equal(mergeReloadedHistory({ ...page, snapshot: { identity: 'other-file' } }, current).messages.length, 40);
+});
+
+test('a prepended tool page retains the existing work group identity', () => {
+  const make = ids => displayBlocks(fromHistory(ids.map(id => ({ role: 'assistant', timestamp: id, content: [{ type: 'toolCall', name: 'read', id: `call-${id}`, arguments: { path: 'file' } }] }))));
+  const previous = make([3, 4]), next = retainWorkKeys(previous, make([1, 2, 3, 4]));
+  assert.equal(next.find(b => b.kind === 'work').key, previous.find(b => b.kind === 'work').key);
 });
 
 test('assistant image blocks survive history projection as displayable content', () => {
