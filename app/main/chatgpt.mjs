@@ -10,6 +10,14 @@ import { shellQuote } from '../../core/transports.mjs';
 
 const keyId = vaultId => `chatgpt-vault:${vaultId}`;
 const loginError = () => new Error('ChatGPT sign-in failed. Check your connection and account permissions, then try again.');
+function cancellable(promise, signal) {
+  return new Promise((resolve, reject) => {
+    const abort = () => { signal.removeEventListener('abort', abort); reject(loginError()); };
+    signal.addEventListener('abort', abort, { once: true });
+    Promise.resolve(promise).then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
+    if (signal.aborted) abort();
+  });
+}
 export async function runChatGPTAuth(target, request) {
   const input = JSON.stringify(request) + '\n';
   let output;
@@ -90,15 +98,15 @@ export class ChatGPTLogin {
       if (this.#pending !== run) return;
       run.state = run.controller.signal.aborted ? 'cancelled' : 'failed';
       // SDK token failures may include provider response bodies: never pass those to IPC or logs.
-      run.error = error?.safe ? error.message : run.state === 'failed' ? loginError().message : undefined;
+      run.error = run.state === 'failed' ? (error?.safe ? error.message : loginError().message) : undefined;
       run.prompt = null; run.url = null; this.#publish();
     }).finally(() => clearTimeout(timer));
     return this.status();
   }
   async #login(run) {
     const signal = run.controller.signal;
-    const target = await this.target(run.environmentId);
-    try { await this.probe(target); } catch (error) { throw Object.assign(error, { safe: true }); }
+    const target = await cancellable(this.target(run.environmentId), signal);
+    try { await cancellable(this.probe(target), signal); } catch (error) { throw Object.assign(error, { safe: true }); }
     signal.throwIfAborted();
     const settings = this.store.settings;
     settings.chatgpt ??= { accounts: {} }; settings.chatgpt.accounts ??= {};

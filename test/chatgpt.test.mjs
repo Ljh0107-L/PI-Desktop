@@ -2,12 +2,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import http from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { ChatGPTCredentials, CHATGPT_PROVIDER, chatGPTCapability, chatGPTVaultPath, openChatGPT, sealChatGPT } from '../agent/pidesk-chatgpt-vault.mjs';
+import { ChatGPTCredentials, CHATGPT_PROVIDER, chatGPTCapability, chatGPTSocketPath, chatGPTVaultPath, openChatGPT, sealChatGPT } from '../agent/pidesk-chatgpt-vault.mjs';
 import { ChatGPTAuthHost, chatGPTRequest, serveChatGPT } from '../agent/pidesk-chatgpt-auth.mjs';
 import { chatGPTModels, chatGPTProvider } from '../agent/pidesk-chatgpt.mjs';
 import { ChatGPTLogin } from '../app/main/chatgpt.mjs';
@@ -84,6 +84,21 @@ test('private socket failures and cancellation are bounded and never return raw 
   await assert.rejects(chatGPTRequest(join(root, 'missing.sock'), {}));
   const controller = new AbortController(); controller.abort();
   await assert.rejects(chatGPTRequest(socket, {}, { signal: controller.signal }));
+});
+
+test('a scoped owner rejects admin reconfiguration by request clients and closes on logout', async t => {
+  const root = temporary(t), key = randomBytes(32).toString('hex'), vaultId = randomUUID();
+  const host = new ChatGPTAuthHost({ loadModels: async () => ({}) });
+  const config = { op: 'configure', vaultId, key, agentDir: root, piCli: resolve('unused'), encoded: sealChatGPT({ openai: credential() }, key) };
+  await host.handle(config);
+  const server = await serveChatGPT(root, host, vaultId, createHash('sha256').update(key).digest('hex'));
+  t.after(() => new Promise(r => server.close(r)));
+  const socket = chatGPTSocketPath(root, vaultId);
+  await assert.rejects(chatGPTRequest(socket, { ...config, vaultId: randomUUID() }));
+  await assert.rejects(chatGPTRequest(socket, { ...config, key: chatGPTCapability(key) }));
+  const closed = new Promise(r => server.once('close', r));
+  await chatGPTRequest(socket, { op: 'logout', vaultId, key });
+  await closed; assert.equal(server.listening, false);
 });
 
 test('an independent host owner refreshes after desktop disconnect and restores rotated ciphertext', async t => {
@@ -164,6 +179,19 @@ test('browser login is per environment, cancellable, encrypted and separate from
   await login.logout('local'); assert.equal(login.config('local'), null);
   assert.deepEqual(login.catalog()[0].environments, ['ssh:fixture']);
   assert.equal(login.config('ssh:fixture').capability.length, 64);
+});
+
+test('cancelling SSH preparation is immediate and cannot open a late authorization browser', async t => {
+  const { login, opened } = loginFixture(t);
+  const original = login.target;
+  let release;
+  login.target = () => new Promise(resolve => { release = resolve; });
+  await login.start('ssh:fixture');
+  await login.cancel();
+  assert.equal(login.status().login, null); assert.deepEqual(opened, []);
+  release(await original('ssh:fixture'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(login.catalog().length, 0); assert.deepEqual(opened, []);
 });
 
 test('provider response details never reach the login status or overwrite a good grant', async t => {

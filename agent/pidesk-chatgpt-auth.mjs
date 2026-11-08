@@ -129,13 +129,16 @@ function privateRunDir(runDir) {
 export function serveChatGPT(runDir, host = new ChatGPTAuthHost(), vaultId, adminHash) {
   privateRunDir(runDir);
   const path = vaultId ? chatGPTSocketPath(runDir, vaultId) : join(runDir, 'chatgpt.sock');
+  let closing = false;
   const server = net.createServer(socket => {
     socket.on('error', () => {}); socket.setTimeout(65000, () => socket.destroy());
-    readPacket(socket).then(message => {
-      if (vaultId && message?.vaultId !== vaultId) throw unavailable();
+    readPacket(socket).then(async message => {
+      if (closing || (vaultId && message?.vaultId !== vaultId)) throw unavailable();
       if (adminHash && ['configure', 'logout'].includes(message?.op) &&
           (typeof message.key !== 'string' || !equalSecret(createHash('sha256').update(message.key).digest('hex'), adminHash))) throw unavailable();
-      return host.handle(message);
+      const result = await host.handle(message);
+      if (adminHash && message.op === 'logout') { closing = true; server.close(); }
+      return result;
     }).then(result => send(socket, { ...result, pid: process.pid }), () => send(socket, { ok: false }));
   });
   return new Promise((resolve, reject) => {
@@ -168,7 +171,7 @@ async function ensureDaemon(runDir, bootstrap) {
       if (bootstrap.op !== 'configure') throw unavailable();
       try { unlinkSync(path); } catch (error) { if (error.code !== 'ENOENT') throw unavailable(); }
       const keep = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL', 'ELECTRON_RUN_AS_NODE'];
-      const env = Object.fromEntries(keep.filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]]));
+      const env = { ...Object.fromEntries(keep.filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]])), PI_TELEMETRY: '0' };
       const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'daemon', runDir], {
         detached: true, stdio: ['pipe', 'ignore', 'ignore'], cwd: homedir(), env,
       });
