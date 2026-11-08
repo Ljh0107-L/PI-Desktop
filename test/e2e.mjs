@@ -760,6 +760,7 @@ try {
   await page.locator('.tool-group-head .spinner').first().waitFor({ timeout: 15000 });
 } catch (error) {
   check('unexpected error', false, error.message.split('\n').slice(0, 2).join(' | '));
+  console.log(error.stack);
   console.log('notices:', JSON.stringify(await page.evaluate(() => window.__pideskNoticeLog ?? []).catch(() => [])));
   console.log('composer:', JSON.stringify(await composer().inputValue().catch(() => '')));
   await S('zz-failure').catch(() => {});
@@ -888,13 +889,14 @@ try {
   await S('10c-subagent-cleared-files-preserved');
   await page.click('.fp-actions .tool-button[aria-label="Close files"]');
   await page.locator('.session-row', { hasText: 'hello from the desktop' }).click();
-  await waitText('.markdown', '[mock-lab/alpha-1] echo: hello from the desktop', 90000);
-  await waitText('.markdown', '[mock-lab/beta-1] echo: after switching models');
+  await revealHistory('.session-main .markdown', '[mock-lab/alpha-1] echo: hello from the desktop');
+  await revealHistory('.session-main .markdown', '[mock-lab/beta-1] echo: after switching models');
   check('history reloaded from the Pi session file', true);
   await page.waitForTimeout(500);
   await S('10-restored');
 } catch (error) {
   check('restore failed', false, error.message.split('\n')[0]);
+  console.log(error.stack);
   await S('zz-restore-failure').catch(() => {});
 }
 // ---- Settings → Agents: how many new agents Pi may start for one message

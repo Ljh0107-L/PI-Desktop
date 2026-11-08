@@ -63,9 +63,14 @@ jobs:
         # Pi reaches the test host by upload from this machine (no npm registry round trips).
         env: { PIDESK_FORCE_PI_UPLOAD: '1' }
         run: |
+          set +e
           node test/e2e.mjs --ssh-config /tmp/pidesk-e2e/ssh_config
+          R1=$?
           node test/runtime-ui.mjs
+          R2=$?
           node test/history-ui.mjs
+          R3=$?
+          exit $(( R1 || R2 || R3 ))
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: e2e-screenshots, path: /tmp/pidesk-e2e/shots, if-no-files-found: ignore }

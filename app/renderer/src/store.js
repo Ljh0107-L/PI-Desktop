@@ -138,6 +138,7 @@ window.pidesk.subscribe(({ channel, payload }) => {
       break;
     case 'status':
       set(s => ({ sessions: s.sessions.map(x => x.id === payload.id ? { ...x, status: payload.status, phase: Object.hasOwn(payload, 'phase') ? payload.phase : x.phase, streaming: payload.streaming ?? (payload.status === 'connected' ? x.streaming : false), statusMessage: payload.message, compacting: payload.compacting ?? x.compacting } : x) }));
+      if (payload.status === 'connected' && state.activeId === payload.id) refreshStats(payload.id);
       if (payload.status === 'error' || (payload.status === 'disconnected' && payload.message)) notify(payload.message ?? 'Session disconnected', 'error');
       if (payload.status === 'error' || payload.status === 'disconnected') {
         if (transcriptOf(payload.id).queued?.length) setTranscript(payload.id, { ...transcriptOf(payload.id), queued: [] });
