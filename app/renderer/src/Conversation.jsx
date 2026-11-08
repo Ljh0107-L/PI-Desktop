@@ -513,9 +513,10 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
     const el = scroller.current;
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
     const movedUp = el.scrollTop < previousTop.current;
+    const moved = Math.abs(el.scrollTop - previousTop.current) > 1;
     previousTop.current = el.scrollTop;
     if (!atBottom) {
-      if (stick.current || scrollIntent.current) bookmark.current = historyBookmark(el);
+      if (stick.current || scrollIntent.current || moved) bookmark.current = historyBookmark(el);
       stick.current = false;
     } else if (scrollIntent.current) stick.current = true;
     if (el.scrollTop < 160 && movedUp && scrollIntent.current && transcript.history?.next) earlier();
