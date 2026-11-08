@@ -13,6 +13,7 @@ import { listRelaySessions, prepareRemote, readInstallHint, runSsh, stopRelaySes
 import { providerBaseUrl } from './custom-providers.mjs';
 import { SPEEDS, speedOptions } from '../../agent/pidesk-speed.mjs';
 import { readHistory } from '../../agent/pidesk-history.mjs';
+import { historyEvent } from '../../core/history-view.mjs';
 
 // A conversation record keeps a speed only when it isn't standard.
 const speedField = speed => SPEEDS.includes(speed) && speed !== 'standard' ? { speed } : {};
@@ -701,7 +702,8 @@ export class SessionManager extends EventEmitter {
     runtime.lastUsed = Date.now();
     if (event.type === 'agent_start') { runtime.streaming = true; this.emit('status', { id: record.id, status: runtime.status, streaming: true }); }
     if (event.type === 'agent_settled') { runtime.streaming = false; this.#save(record, { lastActiveAt: Date.now() }); this.emit('status', { id: record.id, status: runtime.status, streaming: false }); }
-    this.emit('event', { id: record.id, event });
+    const visible = historyEvent(event);
+    if (visible) this.emit('event', { id: record.id, event: visible });
   }
 
   // Extension dialogs are questions for the person at the desktop (e.g. from the ask_user tool).

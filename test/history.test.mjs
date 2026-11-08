@@ -9,6 +9,7 @@ import { PAGE_BYTES, PAGE_MESSAGES, projectEntry, readHistory } from '../agent/p
 import { historyKey, mergeHistory, retainLoadedContent } from '../app/renderer/src/history.js';
 import { displayBlocks, fromHistory, rewindTo } from '../app/renderer/src/transcript.js';
 import { SessionManager } from '../app/main/session-manager.mjs';
+import { historyEvent } from '../core/history-view.mjs';
 
 const entry = (i, parentId = i ? `e${i - 1}` : null, message = {}) => ({ type: 'message', id: `e${i}`, parentId,
   message: { role: i % 2 ? 'assistant' : 'user', timestamp: i + 1, content: [{ type: 'text', text: `message ${i}` }], ...message } });
@@ -40,6 +41,20 @@ test('refresh preserves already received text and images without keeping hidden 
   assert.ok(!JSON.stringify(retained).includes('PRIVATE'));
   assert.equal(retainLoadedContent([projected], [])[0], projected, 'cold history remains bounded');
   assert.equal(retainLoadedContent([projected], [{ ...original, __entryId: 'different-entry' }])[0], projected);
+});
+
+test('live UI events omit replay signatures and redundant partial snapshots without changing Pi messages', () => {
+  const message = { role: 'assistant', usage: { output: 5 }, content: [{ type: 'thinking', thinking: '', thinkingSignature: 'PRIVATE' }, { type: 'text', text: 'visible' }] };
+  const original = JSON.stringify(message);
+  const delta = historyEvent({ type: 'message_update', message, assistantMessageEvent: { type: 'text_delta', contentIndex: 1, delta: 'visible', partial: message } });
+  assert.deepEqual(delta, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 1, delta: 'visible' } });
+  const end = historyEvent({ type: 'message_end', message });
+  assert.deepEqual(end.message.usage, message.usage);
+  assert.equal(end.message.content[1].text, 'visible');
+  assert.ok(!JSON.stringify(end).includes('PRIVATE'));
+  assert.equal(historyEvent({ type: 'message_end', message: { role: 'system', content: 'prompt' } }), null);
+  assert.deepEqual(historyEvent({ type: 'agent_end', messages: [message] }), { type: 'agent_end' });
+  assert.equal(JSON.stringify(message), original);
 });
 
 test('large signed history reads only a tail page and never transmits signatures or edits the file', async t => {
