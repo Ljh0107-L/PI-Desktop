@@ -60,8 +60,10 @@ export function sshTransport({ host, sshOptions = [], egress, ...target }) {
 }
 
 // Local Pi processes should not inherit unrelated credentials from the desktop app's environment.
+// ELECTRON_RUN_AS_NODE is kept: where node is an Electron helper (Pi Desktop's own runtime
+// fallback), a child needs it to behave as plain node instead of refusing to start.
 function minimalEnv(source) {
-  const keep = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM'];
+  const keep = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL', 'TERM', 'ELECTRON_RUN_AS_NODE'];
   return Object.fromEntries(keep.filter(name => source[name] !== undefined).map(name => [name, source[name]]));
 }
 

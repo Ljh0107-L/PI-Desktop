@@ -32,8 +32,13 @@ async function geminiReply(req, res, [, provider, model, query = ''], { requests
   const textOfParts = parts => (parts ?? []).map(part => part.text ?? '').join('');
   const system = textOfParts((payload.systemInstruction ?? payload.system_instruction)?.parts);
   const tools = (payload.tools ?? []).flatMap(tool => tool.functionDeclarations ?? []).map(f => ({ name: f.name, description: f.description ?? '' }));
+  const thinking = payload.generationConfig?.thinkingConfig;
+  const functionResponseIds = contents.flatMap(c => c.parts ?? []).filter(part => part.functionResponse).map(part => part.functionResponse.id);
   requests.push({ provider, model, api: 'google', apiKey: req.headers['x-goog-api-key'] ?? '', authorization: req.headers.authorization ?? '', url: req.url,
-    messageCount: contents.length, system, tools, subagent: system.includes('You are a Pi Desktop subagent, not the coordinating assistant.'), at: Date.now() });
+    messageCount: contents.length, system, tools, thinking, functionResponseIds, subagent: system.includes('You are a Pi Desktop subagent, not the coordinating assistant.'), at: Date.now() });
+  // An endpoint id (ep-…) stands for Gemini 4 behind Volcengine Ark, which refuses thinkingBudget.
+  if (/^ep-/.test(model) && thinking?.thinkingBudget !== undefined)
+    return res.writeHead(400, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { code: 'InvalidParameter', message: '400: Thinking budget is not supported for this model.' } }));
   res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
   const send = (parts, finishReason) => res.write('data: ' + JSON.stringify({
     candidates: [{ content: { role: 'model', parts }, index: 0, ...(finishReason ? { finishReason } : {}) }],

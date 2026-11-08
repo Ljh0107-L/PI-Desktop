@@ -23,6 +23,9 @@ const { values: opts } = parseArgs({ options: {
 } });
 const piCli = join(root, 'node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js');
 const bridge = join(root, 'agent/pidesk-bridge.js');
+// Where the harness itself runs on an Electron-provided node (Pi Desktop's fallback is an Electron
+// helper), the remote side must use that helper's launcher: it sets ELECTRON_RUN_AS_NODE for it.
+const remoteNode = process.versions.electron ? (process.env.PI_NODE || process.execPath) : process.execPath;
 
 const results = [];
 function check(name, ok, detail = '') {
@@ -37,7 +40,9 @@ const providers = [
   { id: 'mock-alpha', name: 'Mock Alpha', api: 'openai-completions', baseUrl: mock.baseUrl('mock-alpha'), apiKey: keys.alpha, models: [{ id: 'alpha-1' }, { id: 'alpha-2' }] },
   { id: 'mock-beta', name: 'Mock Beta', api: 'openai-completions', baseUrl: mock.baseUrl('mock-beta'), apiKey: keys.beta, models: [{ id: 'beta-1' }] },
   // A custom endpoint speaking Google's protocol, with the base Pi Desktop saves for it.
-  { id: 'mock-gemini', name: 'Mock Gemini', api: 'google-generative-ai', baseUrl: `${mock.geminiRoot('mock-gemini')}/v1beta`, apiKey: keys.gemini, models: [{ id: 'gemini-mock-1' }] },
+  // Its second model stands for Gemini 4 Argon behind a Volcengine Ark endpoint id.
+  { id: 'mock-gemini', name: 'Mock Gemini', api: 'google-generative-ai', baseUrl: `${mock.geminiRoot('mock-gemini')}/v1beta`, apiKey: keys.gemini,
+    models: [{ id: 'gemini-mock-1' }, { id: 'ep-mock-argon', name: 'gemini-4-argon', reasoning: true }] },
 ];
 const work = mkdtempSync(join(tmpdir(), 'pidesk-m0-'));
 const dirs = {
@@ -47,7 +52,7 @@ const dirs = {
 for (const dir of Object.values(dirs)) mkdirSync(dir, { recursive: true });
 
 const localTarget = { cwd: dirs.localProject, node: process.execPath, piCli, agentDir: dirs.localAgent, extensions: [bridge] };
-const remoteTarget = { cwd: dirs.remoteProject, node: opts['remote-node'] ?? process.execPath, piCli: opts['remote-pi'] ?? piCli, agentDir: dirs.remoteAgent, extensions: [bridge] };
+const remoteTarget = { cwd: dirs.remoteProject, node: opts['remote-node'] ?? remoteNode, piCli: opts['remote-pi'] ?? piCli, agentDir: dirs.remoteAgent, extensions: [bridge] };
 const remoteTransport = opts['ssh-host']
   ? sshTransport({ host: opts['ssh-host'], sshOptions: opts['ssh-config'] ? ['-F', opts['ssh-config']] : [], ...remoteTarget })
   : localTransport(remoteTarget);
@@ -161,6 +166,29 @@ try {
     check(`[${session.id}] Gemini gets the system prompt and tools, and the key only in x-goog-api-key`, sent.length >= 3 && sent.every(r => r.provider === 'mock-gemini' && r.api === 'google' && r.apiKey === keys.gemini && !r.authorization && !r.url.includes(keys.gemini)) && sent.some(r => r.system.includes('<working_style>') && r.tools.some(x => x.name === 'bash')), JSON.stringify(sent.map(r => ({ provider: r.provider, url: r.url, tools: r.tools?.length }))));
     await session.setModel('mock-beta', 'beta-1');
   }
+
+  // A Gemini 4 model behind an endpoint id, which refuses thinkingBudget: Pi Desktop hands it to pi-ai as
+  // the model its name gives (gemini-4-argon), so it gets thinkingLevel (off becomes its lowest level, low)
+  // and tool results with their call ids, while requests and replies keep the endpoint's id.
+  const thinkingBefore = (await local.state()).thinkingLevel;
+  await local.setModel('mock-gemini', 'ep-mock-argon');
+  for (const [level, expected] of [['off', 'LOW'], ['high', 'HIGH']]) {
+    await local.request('set_thinking_level', { level });
+    const before = mock.requests.length;
+    const r = await run(local, `thinking ${level} behind an endpoint id`);
+    const sent = mock.requests.slice(before);
+    check(`[local] an endpoint id named gemini-4-argon gets thinkingLevel ${expected} at ${level}`, r.text === `[mock-gemini/ep-mock-argon] echo: thinking ${level} behind an endpoint id` && sent.length === 1 && sent[0].thinking?.thinkingLevel === expected && sent[0].thinking.thinkingBudget === undefined, JSON.stringify({ text: r.text, thinking: sent.map(s => s.thinking) }));
+  }
+  const argonTool = await run(local, '[[bash:echo argon-tool]]');
+  const argonResult = mock.requests.at(-1);
+  const argonMessages = await local.messages();
+  const argonReply = argonMessages.filter(m => m.role === 'assistant').at(-1);
+  // Every Gemini request carries the full history, so the request's function responses include the call
+  // ids of earlier turns; the fresh one is the last, and it must carry this turn's tool call id.
+  const argonCallId = argonMessages.flatMap(m => (m.role === 'assistant' ? (m.content ?? []) : [])).filter(b => b.type === 'toolCall' && b.name === 'bash').at(-1)?.id;
+  check('[local] behind the endpoint id: tool results carry their call id, replies keep the endpoint id', argonTool.text === 'Tool result: argon-tool' && argonResult.functionResponseIds.length >= 1 && argonResult.functionResponseIds.every(Boolean) && argonResult.functionResponseIds.at(-1) === argonCallId && argonReply?.model === 'ep-mock-argon' && (await local.state()).model?.id === 'ep-mock-argon', JSON.stringify({ text: argonTool.text, ids: argonResult.functionResponseIds, callId: argonCallId, model: argonReply?.model }));
+  await local.setModel('mock-beta', 'beta-1');
+  await local.request('set_thinking_level', { level: thinkingBefore });
 
   // Subagents execute through the owning session, with its model/key/cwd and no extra Pi process.
   for (const session of sessions) {

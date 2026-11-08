@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parseArgs } from 'node:util';
 import { PiSession } from '../core/pi-session.mjs';
-import { relaySpawnSpec, sshRelayTransport } from '../core/transports.mjs';
+import { relaySpawnSpec, shellQuote, sshRelayTransport } from '../core/transports.mjs';
 import { startMockLlm } from './mock-llm.mjs';
 import { root } from './harness.mjs';
 
@@ -24,15 +24,18 @@ for (const d of [project, agentDir]) mkdirSync(d);
 // (the app under test in the end-to-end suite runs one from agent/).
 const relayPath = join(work, 'pidesk-relay.mjs');
 copyFileSync(join(root, 'agent/pidesk-relay.mjs'), relayPath);
-const spawnSpec = relaySpawnSpec({ cwd: project, node: process.execPath, piCli: join(root, 'node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'), agentDir, extensions: [join(root, 'agent/pidesk-bridge.js')] });
+// Where the harness runs on an Electron-provided node, the remote side must use the helper's
+// launcher: it sets ELECTRON_RUN_AS_NODE, without which the helper refuses to start.
+const remoteNode = process.versions.electron ? (process.env.PI_NODE || process.execPath) : process.execPath;
+const spawnSpec = relaySpawnSpec({ cwd: project, node: remoteNode, piCli: join(root, 'node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'), agentDir, extensions: [join(root, 'agent/pidesk-bridge.js')] });
 const boot = { providers: [{ id: 'mock-a', api: 'openai-completions', baseUrl: mock.baseUrl('mock-a'), apiKey: key, models: [{ id: 'alpha-1' }] }] };
 const sessionId = 'relay-test-' + Date.now();
 const ssh = (cmd, input) => execFileSync('ssh', ['-F', opts['ssh-config'], '-o', 'BatchMode=yes', 'pidesk-test', cmd], { encoding: 'utf8', input });
-const relayList = () => JSON.parse(ssh(`env PIDESK_RUN_DIR=${runDir} ${process.execPath} ${relayPath} list`)).sessions;
+const relayList = () => JSON.parse(ssh(`env PIDESK_RUN_DIR=${runDir} ${shellQuote(remoteNode)} ${relayPath} list`)).sessions;
 
 function connect(sinceSeq) {
   const s = new PiSession({ id: sessionId, boot, relay: { sinceSeq, spawn: spawnSpec },
-    transport: sshRelayTransport({ host: 'pidesk-test', sshOptions: ['-F', opts['ssh-config']], node: process.execPath, relayPath, runDir }) });
+    transport: sshRelayTransport({ host: 'pidesk-test', sshOptions: ['-F', opts['ssh-config']], node: remoteNode, relayPath, runDir }) });
   s.events = []; s.ui = [];
   s.on('event', e => s.events.push(e));
   s.on('ui', r => s.ui.push(r));
@@ -106,7 +109,7 @@ try {
   check('boot record scrubbed from tool environment', envOut === 'boot=0', envOut);
 
   // 6. stop
-  ssh(`env PIDESK_RUN_DIR=${runDir} ${process.execPath} ${relayPath} stop ${sessionId}`);
+  ssh(`env PIDESK_RUN_DIR=${runDir} ${shellQuote(remoteNode)} ${relayPath} stop ${sessionId}`);
   check('relay stop terminates Pi', await waitFor(() => relayList().find(s => s.id === sessionId)?.alive === false, 10000));
   await d.stop().catch(() => {});
 } catch (error) {

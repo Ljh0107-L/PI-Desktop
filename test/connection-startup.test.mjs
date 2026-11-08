@@ -152,9 +152,11 @@ test('the staged bridge loads through Pi’s bundled modules, not a native impor
   stageExtensions(resolve('agent'), ext);
   assert.equal(statSync(bridge).mtimeMs, staged, 'unchanged files are not rewritten');
   mkdirSync(agentDir);
+  // The harness's node may be an Electron helper (Pi Desktop's runtime fallback), which only
+  // behaves as plain node when ELECTRON_RUN_AS_NODE is set; pass it through when present.
   const child = spawn(process.execPath, [resolve('node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'), '--mode', 'rpc', '-ne', '-e', bridge, '--no-session'], {
     cwd: dir, stdio: ['pipe', 'pipe', 'pipe'],
-    env: { PATH: process.env.PATH, HOME: dir, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0', JITI_DEBUG: '1', PIDESK_BOOT: '{"providers":[]}' },
+    env: { ...(process.env.ELECTRON_RUN_AS_NODE ? { ELECTRON_RUN_AS_NODE: process.env.ELECTRON_RUN_AS_NODE } : {}), PATH: process.env.PATH, HOME: dir, PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0', JITI_DEBUG: '1', PIDESK_BOOT: '{"providers":[]}' },
   });
   t.after(() => child.kill());
   let stdout = '', stderr = '';

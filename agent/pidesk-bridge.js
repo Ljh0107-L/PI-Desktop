@@ -20,6 +20,8 @@
 //    Pi as such (PIDESK_PROJECTLESS), a prompt section tells the model how to use it, as Codex does.
 // 7. A working-style section: the habits Claude Code's prompt asks for that Pi's own rules (which stop
 //    at "be concise") lack, such as answering a question instead of changing code and reporting failures.
+// 8. Gemini models behind custom endpoints whose id doesn't name the model (Volcengine Ark's ep-… ids)
+//    reach pi-ai's Gemini adapter as the model their name gives (pidesk-gemini.mjs).
 import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
@@ -29,6 +31,7 @@ import { Type } from 'typebox';
 import { createBashToolDefinition } from '@earendil-works/pi-coding-agent';
 import { createSubagentTool, isActiveAgent } from './pidesk-subagent.mjs';
 import { createSpeed } from './pidesk-speed.mjs';
+import { GEMINI_API, geminiAlias, geminiModel, geminiStream } from './pidesk-gemini.mjs';
 import { AWAY_ANSWER, createUltra, parseVerdict, reviewBrief } from './pidesk-ultra.mjs';
 
 function literalKey(key) {
@@ -345,6 +348,11 @@ export default function pideskBridge(pi) {
       const config = { ...rest };
       if (apiKey) config.apiKey = literalKey(apiKey);
       if (models) config.models = models.map(modelDefaults);
+      // Gemini models whose id doesn't say which Gemini they are: streamed under the model their name gives.
+      if (config.api === GEMINI_API && config.models?.some(m => geminiAlias(m))) {
+        config.models = config.models.map(m => geminiModel(m));
+        config.streamSimple = geminiStream(config.models);
+      }
       pi.registerProvider(id, config);
     }
   };
