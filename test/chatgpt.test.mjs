@@ -26,6 +26,16 @@ const waitFor = async fn => {
   throw new Error('fixture timed out');
 };
 
+test('auth helpers can be imported when Electron argv contains flags or no script path', async () => {
+  const argv = process.argv;
+  try {
+    for (const value of ['--inspect=0', '/missing/embedded/application', undefined]) {
+      process.argv = [process.execPath, value];
+      await import(`../agent/pidesk-chatgpt-auth.mjs?embedded=${encodeURIComponent(String(value))}`);
+    }
+  } finally { process.argv = argv; }
+});
+
 test('OAuth vaults are private, authenticated ciphertext and never overwrite provider/history files', async t => {
   const root = temporary(t), key = randomBytes(32).toString('hex'), path = chatGPTVaultPath(root, randomUUID());
   const vault = new ChatGPTCredentials(path, key), value = credential();

@@ -211,6 +211,8 @@ async function cli() {
   const result = await chatGPTRequest(path, message);
   process.stdout.write(JSON.stringify(result) + '\n');
 }
-if (process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url)) {
+let main = false;
+try { main = !!process.argv[1] && realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch { /* imported by Electron or an embedded runtime */ }
+if (main) {
   cli().catch(() => { process.stderr.write('ChatGPT authentication setup failed. Check this environment and reconnect in Settings.\n'); process.exitCode = 1; });
 }
