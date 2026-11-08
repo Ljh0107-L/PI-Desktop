@@ -21,6 +21,6 @@ export function historyEvent(event) {
     if (event.message?.role === 'system') return null;
     return { ...event, message: stripMessageSignatures(event.message) };
   }
-  if (event.type === 'agent_end') return { type: event.type };
+  if (event.type === 'agent_end' || event.type === 'turn_end') return { type: event.type };
   return event;
 }

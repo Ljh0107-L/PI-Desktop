@@ -54,6 +54,7 @@ test('live UI events omit replay signatures and redundant partial snapshots with
   assert.ok(!JSON.stringify(end).includes('PRIVATE'));
   assert.equal(historyEvent({ type: 'message_end', message: { role: 'system', content: 'prompt' } }), null);
   assert.deepEqual(historyEvent({ type: 'agent_end', messages: [message] }), { type: 'agent_end' });
+  assert.deepEqual(historyEvent({ type: 'turn_end', message, toolResults: [] }), { type: 'turn_end' });
   assert.equal(JSON.stringify(message), original);
 });
 
