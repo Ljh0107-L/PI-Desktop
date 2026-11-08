@@ -42,9 +42,10 @@ export function restoredToolNames(checkpoint, active, registered) {
 }
 
 function backupSession(file) {
+  const content = readFileSync(file);
   const backup = `${file}.tools-backup-${randomUUID()}`;
   const fd = openSync(backup, 'wx', 0o600);
-  try { writeFileSync(fd, readFileSync(file)); fsyncSync(fd); }
+  try { writeFileSync(fd, content); fsyncSync(fd); }
   finally { closeSync(fd); }
   return backup;
 }
