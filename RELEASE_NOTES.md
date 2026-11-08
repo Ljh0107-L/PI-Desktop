@@ -2,9 +2,9 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## Unreleased
+## 0.2.7 — ChatGPT subscriptions and request TPS
 
-- **ChatGPT subscription sign-in.** A dedicated Settings page follows the Models page's layout and controls. Sign in through Pi's current ChatGPT OAuth flow, separately for this Mac and each SSH environment; existing API keys are preserved. Encrypted, host-local credential owners refresh independently of the desktop, so SSH sessions can continue while the Mac is offline when the host can reach OpenAI directly. Model selection, context limits, reasoning and tools stay on Pi's normal pipeline.
+- **ChatGPT subscription sign-in.** A dedicated Settings page follows the Models page's layout and controls. Sign in through Pi's current ChatGPT OAuth flow, separately for this Mac and each SSH environment; existing API keys are preserved. Encrypted, host-local credential owners refresh independently of the desktop, so SSH sessions can continue while the Mac is offline when the host can reach OpenAI directly. Model selection, context limits, reasoning and tools stay on Pi's normal pipeline. Signing out or switching to an environment without a grant never silently falls back to an API-key provider.
 - **TPS includes first-token waiting.** Output tokens are divided by the complete model-request duration, starting before the provider request and ending on completion. First chunks and reasoning remain in the numerator exactly once. Tool execution and gaps between calls are excluded; short and single-chunk replies show their own rate. The Usage card calls this Request TPS rather than decode-only generation speed.
 
 ## 0.2.6 — Prefetched history and steady typing

@@ -1,6 +1,6 @@
 {
   "name": "pi-desktop",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "Claude Desktop-style app for the Pi agent harness: sessions on this Mac and SSH hosts, any model",
   "scripts": {
     "test:sshd": "sh test/sshd.sh",
