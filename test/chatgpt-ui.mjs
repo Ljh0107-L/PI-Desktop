@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 
 export async function checkChatGPT({ page, screenshot, settingsBefore }) {
-  await page.locator('.settings-sidebar-nav .nav-item', { hasText: /^ChatGPT$/ }).click();
+  await page.locator('.settings-sidebar-nav').getByRole('button', { name: 'ChatGPT', exact: true }).click();
   await page.locator('.section-title', { hasText: 'ChatGPT accounts' }).waitFor();
   const local = page.locator('.row-card').filter({ hasText: /This computer|This Mac|Local/ }).first();
   const remote = page.locator('.row-card').filter({ hasText: 'pidesk-test' });
@@ -15,6 +15,7 @@ export async function checkChatGPT({ page, screenshot, settingsBefore }) {
   await screenshot('03d-chatgpt');
   await local.getByRole('button', { name: 'Sign in with ChatGPT', exact: true }).click();
   await local.locator('input[type=password]').waitFor();
+  await screenshot('03d-chatgpt-signing-in');
   await local.getByRole('button', { name: 'Cancel', exact: true }).click();
   await local.locator('form').waitFor({ state: 'detached' });
   await local.getByRole('button', { name: 'Sign in with ChatGPT', exact: true }).click();
