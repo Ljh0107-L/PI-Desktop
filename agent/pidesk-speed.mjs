@@ -20,7 +20,7 @@ export const SPEED_COOLDOWN_MS = 5 * 60 * 1000;
 // The speeds a model offers, standard first; none for models (and custom endpoints) without any.
 export function speedOptions(model) {
   const { provider, api, id } = model ?? {};
-  if (provider === 'openai' && OPENAI_FAST.test(id ?? '')) {
+  if (['openai', 'pidesk-chatgpt'].includes(provider) && OPENAI_FAST.test(id ?? '')) {
     if (api === 'openai-responses') return OPENAI_ULTRAFAST.has(id) ? [...SPEEDS] : ['standard', 'fast'];
     if (api === 'openai-completions') return ['standard', 'fast'];
   }

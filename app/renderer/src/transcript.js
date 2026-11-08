@@ -150,10 +150,11 @@ export function speedTier(m) {
   if (!s || !TIER[s.requested]) return null;
   const ran = TIER[s.used] ? s.used : s.sent;
   const label = TIER[ran] ?? ran, asked = TIER[s.requested];
-  if (ran === s.requested) return ran === 'standard' ? null : { label, slower: false, title: `This reply ran at ${label} speed, billed at ${label} rates.` };
+  const billing = m.provider === 'pidesk-chatgpt' ? '. Subscription limits and usage rules apply.' : `, billed at ${label} rates.`;
+  if (ran === s.requested) return ran === 'standard' ? null : { label, slower: false, title: `This reply ran at ${label} speed${billing}` };
   const why = s.sent !== s.requested
     ? s.reason === 'resting' ? `${asked} was rate limited or at capacity a moment ago, so requests go at ${TIER[s.sent]} speed for a few minutes.` : `This model doesn't offer ${asked}.`
-    : `The provider ran it at ${label} speed, billed at ${label} rates.`;
+    : `The provider ran it at ${label} speed${billing}`;
   return { label, slower: true, title: `Asked for ${asked}. ${why}` };
 }
 // Short and single-chunk replies have their own request TPS; no decode-window threshold applies.

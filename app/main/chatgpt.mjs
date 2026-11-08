@@ -3,7 +3,7 @@
 import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
-import { chatGPTModels } from '../../agent/pidesk-chatgpt.mjs';
+import { chatGPTModels, chatGPTModelOverrides } from '../../agent/pidesk-chatgpt.mjs';
 import { CHATGPT_PROVIDER, chatGPTCapability, chatGPTSocketPath, sealChatGPT } from '../../agent/pidesk-chatgpt-vault.mjs';
 import { runSsh } from './remote-setup.mjs';
 import { shellQuote } from '../../core/transports.mjs';
@@ -62,9 +62,20 @@ export class ChatGPTLogin {
     };
   }
   #publish() { this.#revision++; this.changed(this.status()); }
+  modelSettings() {
+    return { available: chatGPTModels(this.provider), models: chatGPTModels(this.provider, this.store.settings.chatgpt?.models) };
+  }
+  saveModels(selection) {
+    const models = chatGPTModelOverrides(this.provider.getModels(), selection);
+    this.store.settings.chatgpt ??= { accounts: {} };
+    if (models === undefined) delete this.store.settings.chatgpt.models;
+    else this.store.settings.chatgpt.models = models;
+    this.store.saveSettings(); this.configured();
+    return this.modelSettings();
+  }
   catalog() {
     const environments = Object.entries(this.accounts()).filter(([, a]) => a.connected).map(([id]) => id);
-    return environments.length ? chatGPTModels(this.provider).map(m => ({ ...m, environments })) : [];
+    return environments.length ? chatGPTModels(this.provider, this.store.settings.chatgpt?.models).map(m => ({ ...m, environments })) : [];
   }
   config(environmentId) {
     const account = this.accounts()[environmentId];
@@ -72,7 +83,8 @@ export class ChatGPTLogin {
     const key = this.store.getKey(keyId(account.vaultId));
     if (!key) return null;
     return { id: CHATGPT_PROVIDER, kind: 'subscription', vaultId: account.vaultId,
-      socketPath: chatGPTSocketPath(account.runDir, account.vaultId), capability: chatGPTCapability(key) };
+      socketPath: chatGPTSocketPath(account.runDir, account.vaultId), capability: chatGPTCapability(key),
+      models: this.store.settings.chatgpt?.models };
   }
   ensure(environmentId) {
     const account = this.accounts()[environmentId];

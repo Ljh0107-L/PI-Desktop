@@ -120,6 +120,9 @@ window.pidesk.subscribe(({ channel, payload }) => {
       }
       break;
     }
+    case 'model-settings':
+      if (state.activeId === payload.id) refreshStats(payload.id);
+      break;
     case 'chatgpt':
       setChatGPT(payload);
       break;

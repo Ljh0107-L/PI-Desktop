@@ -87,7 +87,7 @@ function syncCompactionReserves() {
   try { settings = JSON.parse(readFileSync(path, 'utf8')); } catch { /* first run */ }
   if (!settings || typeof settings !== 'object' || Array.isArray(settings)) settings = {};
   const overrides = { ...(settings.compaction?.modelOverrides ?? {}) };
-  for (const provider of store.settings.providers ?? []) {
+  for (const provider of [...(store.settings.providers ?? []), ...(chatgpt ? [{ id: CHATGPT_PROVIDER, models: chatgpt.modelSettings().models }] : [])]) {
     for (const model of provider.models ?? []) {
       const maxTokens = Number(model.maxTokens);
       if (!provider.id || !model.id || !Number.isFinite(maxTokens) || maxTokens <= 0) continue;
@@ -160,6 +160,8 @@ const api = {
   },
   catalog: () => manager.catalog(),
   chatGPTStatus: () => chatgpt.status(),
+  chatGPTModelSettings: () => chatgpt.modelSettings(),
+  saveChatGPTModels: models => chatgpt.saveModels(models),
   signInChatGPT: environmentId => chatgpt.start(environmentId),
   submitChatGPTCallback: value => chatgpt.submit(value),
   reopenChatGPTLogin: () => chatgpt.reopen(),
@@ -338,13 +340,13 @@ app.whenReady().then(async () => {
     ...(process.env.PIDESK_INSECURE_TEST_STORAGE === '1' && process.env.PIDESK_CHATGPT_TEST === '1'
       ? (await import('../../test/chatgpt-desktop-fixture.mjs')).chatGPTDesktopFixture(app.getPath('userData')) : {}),
     changed: status => send('chatgpt', status),
-    configured: () => { manager.providersChanged(); send('settings', publicSettings()); },
+    configured: () => { syncCompactionReserves(); manager.providersChanged(); send('settings', publicSettings()); },
   });
   manager.chatgpt = chatgpt;
   usage = new UsageLedger({ path: join(app.getPath('userData'), 'usage.jsonl'), sessionsDir: join(app.getPath('userData'), 'agent', 'sessions') });
   manager.on('event', ({ event }) => { if (event.type === 'message_end') usage.record(event.message); });
   manager.on('environments-changed', () => send('environments', environments()));
-  for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'rewound', 'notice', 'environment', 'goal', 'agents', 'ultra']) manager.on(channel, payload => send(channel, payload));
+  for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'rewound', 'notice', 'environment', 'goal', 'agents', 'ultra', 'model-settings']) manager.on(channel, payload => send(channel, payload));
   manager.on('ultra', ultraChanged);
   manager.on('status', ultraPiStatus);
   manager.on('sessions', () => send('sessions', manager.list()));

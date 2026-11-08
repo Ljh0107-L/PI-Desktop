@@ -9,7 +9,7 @@ export function chatGPTDesktopFixture(profile) {
   const original = openaiProvider();
   const host = new ChatGPTAuthHost({ loadModels: async () => ({ getAuth: async () => { throw new Error('No inference in the OAuth UI fixture'); } }) });
   return {
-    provider: { ...original, getModels: () => original.getModels().slice(0, 2), auth: { oauth: {
+    provider: { ...original, getModels: () => original.getModels().filter(m => ['gpt-6-astra', 'gpt-6-luna', 'gpt-6.1-sol'].includes(m.id)), auth: { oauth: {
       async login(interaction, options) {
         interaction.notify({ type: 'auth_url', url: 'https://auth.openai.com/fixture/authorize' });
         const input = await interaction.prompt({ type: 'manual_code' });

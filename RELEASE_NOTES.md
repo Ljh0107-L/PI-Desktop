@@ -2,6 +2,12 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.8 — ChatGPT model settings and faster processing
+
+- **The same model editor as Models.** Settings → ChatGPT now has Choose models, search, select/deselect all, editable context/output budgets, display names, input capabilities and thinking levels. Selections apply to local and SSH environments; Manage models opens the right page. Reset parameters restores the selected models' official catalog defaults.
+- **Exact official defaults.** Editable token limits retain the catalog's exact integers instead of rounding through K/M labels. Only explicit overrides are stored. Changed limits refresh the active model even when its ID is unchanged; older idle ChatGPT runtimes are upgraded on model/speed selection or the next prompt without rewriting conversation history.
+- **Fast and Ultrafast for ChatGPT.** Eligible GPT-5.6/GPT-6 models support Fast. GPT-6 Astra and GPT-6.1 Sol also support Ultrafast. The chosen tier reaches the actual request, with existing rate-limit cooldown and reported-tier handling. Subscription requests follow Pi's official protocol restrictions: output budgets remain model metadata; unsupported max_output_tokens, temperature and cache fields are not sent.
+
 ## 0.2.7 — ChatGPT subscriptions and request TPS
 
 - **ChatGPT subscription sign-in.** A dedicated Settings page follows the Models page's layout and controls. Sign in through Pi's current ChatGPT OAuth flow, separately for this Mac and each SSH environment; existing API keys are preserved. Encrypted, host-local credential owners refresh independently of the desktop, so SSH sessions can continue while the Mac is offline when the host can reach OpenAI directly. Model selection, context limits, reasoning and tools stay on Pi's normal pipeline. Signing out or switching to an environment without a grant never silently falls back to an API-key provider.

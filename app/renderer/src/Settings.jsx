@@ -4,6 +4,7 @@ import { Icon } from './Icons.jsx';
 import { MenuItem, Modal, Popover, Spinner } from './ui.jsx';
 import { api, loadCatalog, openSettings, setAddConnectionOpen, setChatGPT, setEnvironments, setSettings, useStore } from './store.js';
 import { formatTokens as fmtTokens } from './transcript.js';
+import { parseTokens, toRow, fromRow, pickedRows } from './model-settings.js';
 
 const CUSTOM_APIS = [
   { id: 'openai-completions', label: 'OpenAI Chat Completions compatible' },
@@ -15,29 +16,9 @@ const slug = text => text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|
 
 // ---------------------------------------------------------------- models
 // "128K" / "1M" / "200000" <-> numbers, the way DSH shows token limits.
-const parseTokens = text => {
-  const m = /^\s*([\d.]+)\s*([kKmM]?)\s*$/.exec(String(text ?? ''));
-  if (!m) return undefined;
-  return Math.round(Number(m[1]) * (m[2].toLowerCase() === 'm' ? 1048576 : m[2].toLowerCase() === 'k' ? 1024 : 1));
-};
 const formatTokens = n => !n ? '' : n % 1048576 === 0 ? `${n / 1048576}M` : n % 1024 === 0 ? `${n / 1024}K` : n >= 1000000 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${Math.round(n / 1000)}K` : String(n);
 const LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
-// Editable form of a model; `base` keeps the provider's original fields (compat, cost, …) for built-ins.
-const toRow = m => ({
-  base: m, id: m.id, name: m.name && m.name !== m.id ? m.name : '',
-  contextWindow: formatTokens(m.contextWindow ?? 131072), maxTokens: formatTokens(m.maxTokens ?? 16384),
-  input: m.input ?? ['text'], reasoning: m.reasoning ?? true,
-  levels: Object.entries(m.thinkingLevelMap ?? {}).map(([level, value]) => ({ level, value: value ?? '' })),
-  open: false,
-});
-const fromRow = r => {
-  const { provider, type, ...base } = r.base ?? {};
-  const map = Object.fromEntries(r.levels.filter(l => l.level).map(l => [l.level, l.value.trim() || null]));
-  return { ...base, id: r.id.trim(), name: r.name.trim() || r.id.trim(), contextWindow: parseTokens(r.contextWindow) ?? 131072, maxTokens: parseTokens(r.maxTokens) ?? 16384,
-    input: r.input.length ? r.input : ['text'], reasoning: r.reasoning, thinkingLevelMap: r.reasoning && Object.keys(map).length ? map : undefined };
-};
-
-function ModelRow({ model, onChange, onRemove }) {
+function ModelRow({ model, onChange, onRemove, lockedId = false, outputTitle }) {
   const set = patch => onChange({ ...model, ...patch });
   const toggleInput = kind => set({ input: model.input.includes(kind) ? model.input.filter(k => k !== kind) : [...model.input, kind] });
   const setLevel = (i, patch) => set({ levels: model.levels.map((l, j) => j === i ? { ...l, ...patch } : l) });
@@ -45,7 +26,7 @@ function ModelRow({ model, onChange, onRemove }) {
   return (
     <div className={`model-entry ${model.open ? 'open' : ''}`}>
       <div className="model-row">
-        <input value={model.id} onChange={e => set({ id: e.target.value })} placeholder="model-id" spellCheck={false} />
+        <input value={model.id} readOnly={lockedId} onChange={e => set({ id: e.target.value })} placeholder="model-id" spellCheck={false} />
         <input value={model.name} onChange={e => set({ name: e.target.value })} placeholder={model.id || 'Display name'} />
         <button type="button" className="icon-button" onClick={() => set({ open: !model.open })} aria-label="Parameters"><Icon name="chevronDown" size={16} className={model.open ? 'flip' : ''} /></button>
         <button type="button" className="icon-button danger" onClick={onRemove} aria-label="Remove model"><Icon name="trash" size={15} /></button>
@@ -53,7 +34,7 @@ function ModelRow({ model, onChange, onRemove }) {
       {model.open && <div className="model-advanced">
         <div className="field-pair">
           <label className="field"><span className="field-label">Context window</span><input value={model.contextWindow} onChange={e => set({ contextWindow: e.target.value })} placeholder="128K" /></label>
-          <label className="field"><span className="field-label">Max output tokens</span><input value={model.maxTokens} onChange={e => set({ maxTokens: e.target.value })} placeholder="16K" /></label>
+          <label className="field" title={outputTitle}><span className="field-label">Max output tokens</span><input value={model.maxTokens} onChange={e => set({ maxTokens: e.target.value })} placeholder="16K" /></label>
         </div>
         <div className="field"><span className="field-label">Input</span>
           <div className="check-group">
@@ -111,6 +92,25 @@ function ModelPicker({ available, selected, onDone, onClose }) {
   );
 }
 
+function ModelCatalog({ models, setModels, choose, fetchModels, fetching = false, lockedId = false, onReset, outputTitle }) {
+  return <div className="model-catalog">
+    <div className="model-catalog-head">
+      <span className="model-catalog-title">Models{models.length ? ` · ${models.length}` : ''}</span>
+      <div className="model-catalog-actions">
+        {onReset && <button type="button" className="link-button" onClick={onReset} title="Restore the selected models’ official catalog parameters">Reset parameters</button>}
+        {models.length > 0 && <button type="button" className="link-button" onClick={() => setModels(list => list.map(m => ({ ...m, open: false })))}>Collapse all</button>}
+        <button type="button" className="link-button" onClick={choose} disabled={fetching}>{fetching ? <Spinner size={12} /> : <Icon name="list" size={14} />} Choose models</button>
+      </div>
+    </div>
+    <div className="model-list">
+      {models.map((m, i) => <ModelRow key={m.base?.id ?? i + ':' + m.id} model={m} lockedId={lockedId} outputTitle={outputTitle}
+        onChange={next => setModels(list => list.map((x, j) => j === i ? next : x))} onRemove={() => setModels(list => list.filter((_, j) => j !== i))} />)}
+      {!models.length && <button type="button" className="add-button slim" onClick={fetchModels ?? choose} disabled={fetching}>{fetching ? <Spinner size={13} /> : <Icon name="list" size={15} />} {lockedId ? 'Choose models' : 'Fetch available models'}</button>}
+      {!lockedId && <button type="button" className="button small add-model" onClick={() => setModels(list => [...list.map(m => ({ ...m, open: false })), { ...toRow({ id: '' }), open: true }])}><Icon name="plus" size={14} /> Add model</button>}
+    </div>
+  </div>;
+}
+
 function ProviderEditor({ initial, onDone }) {
   const builtin = useStore(s => s.settings.builtinProviders);
   const existing = useStore(s => s.settings.providers);
@@ -145,10 +145,7 @@ function ProviderEditor({ initial, onDone }) {
   useEffect(() => { if (editing && initial.kind === 'builtin' && initial.hasKey && !models.length) fetchModels({ autoSelect: true }); }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const applyPicked = picked => {
-    const keep = models.filter(m => picked.has(m.id));
-    const added = (available ?? []).filter(m => picked.has(m.id) && !keep.some(k => k.id === m.id)).map(toRow);
-    const order = new Map((available ?? []).map((m, i) => [m.id, i]));
-    setModels([...keep, ...added].sort((a, b) => (order.get(a.id) ?? 1e9) - (order.get(b.id) ?? 1e9)));
+    setModels(pickedRows(models, available ?? [], picked));
     setPicking(false);
   };
 
@@ -209,20 +206,8 @@ function ProviderEditor({ initial, onDone }) {
         </div>
       </>}
 
-      <div className="model-catalog">
-        <div className="model-catalog-head">
-          <span className="model-catalog-title">Models{models.length ? ` · ${models.length}` : ''}</span>
-          <div className="model-catalog-actions">
-            {models.length > 0 && <button type="button" className="link-button" onClick={() => setModels(list => list.map(m => ({ ...m, open: false })))}>Collapse all</button>}
-            <button type="button" className="link-button" onClick={() => available ? setPicking(true) : fetchModels()} disabled={fetching}>{fetching ? <Spinner size={12} /> : <Icon name="list" size={14} />} Choose models</button>
-          </div>
-        </div>
-        <div className="model-list">
-          {models.map((m, i) => <ModelRow key={m.base?.id ?? i + ':' + m.id} model={m} onChange={next => setModels(list => list.map((x, j) => j === i ? next : x))} onRemove={() => setModels(list => list.filter((_, j) => j !== i))} />)}
-          {!models.length && <button type="button" className="add-button slim" onClick={() => fetchModels({ autoSelect: false })} disabled={fetching}>{fetching ? <Spinner size={13} /> : <Icon name="refresh" size={15} />} Fetch available models</button>}
-          <button type="button" className="button small add-model" onClick={() => setModels(list => [...list.map(m => ({ ...m, open: false })), { ...toRow({ id: '' }), open: true }])}><Icon name="plus" size={14} /> Add model</button>
-        </div>
-      </div>
+      <ModelCatalog models={models} setModels={setModels} choose={() => available ? setPicking(true) : fetchModels()}
+        fetchModels={() => fetchModels({ autoSelect: false })} fetching={fetching} />
       {picking && available && <ModelPicker available={available} selected={models.map(m => m.id)} onDone={applyPicked} onClose={() => setPicking(false)} />}
 
       {error && !error.field && <div className="form-error"><Icon name="alert" size={14} /> {error.message}</div>}
@@ -235,7 +220,7 @@ function ProviderEditor({ initial, onDone }) {
 }
 
 function ModelsPage() {
-  const providers = useStore(s => s.settings.providers.filter(p => p.kind !== 'subscription'));
+  const providers = useStore(s => s.settings.providers);
   const builtin = useStore(s => s.settings.builtinProviders);
   const [editing, setEditing] = useState(null); // provider id | 'new'
   return (
@@ -253,8 +238,8 @@ function ModelsPage() {
                   <span className="row-name">{p.name ?? builtin[p.id] ?? p.id}</span>
                 </div>
                 <div className="row-actions">
-                  <button className="button small" onClick={() => setEditing(editing === p.id ? null : p.id)}>Edit</button>
-                  <button className="button small danger" onClick={async () => { setSettings(await api('deleteProvider', p.id)); loadCatalog(); }}>Remove</button>
+                  <button className="button small" onClick={() => p.kind === 'subscription' ? openSettings(true, 'chatgpt') : setEditing(editing === p.id ? null : p.id)}>Edit</button>
+                  {p.kind !== 'subscription' && <button className="button small danger" onClick={async () => { setSettings(await api('deleteProvider', p.id)); loadCatalog(); }}>Remove</button>}
                 </div>
               </div>
               {editing === p.id && <ProviderEditor initial={p} onDone={() => setEditing(null)} />}
@@ -270,12 +255,40 @@ function ModelsPage() {
 }
 
 // ---------------------------------------------------------------- ChatGPT
+function ChatGPTModelEditor({ onDone }) {
+  const [models, setModels] = useState([]), [available, setAvailable] = useState(null);
+  const [picking, setPicking] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState(null);
+  useEffect(() => {
+    let current = true;
+    api('chatGPTModelSettings').then(data => { if (current) { setModels(data.models.map(toRow)); setAvailable(data.available); } }, () => { if (current) setError('Could not load the ChatGPT model catalog.'); });
+    return () => { current = false; };
+  }, []);
+  const save = async e => {
+    e.preventDefault(); setError(null);
+    if (models.some(m => !parseTokens(m.contextWindow) || !parseTokens(m.maxTokens))) { setError('Token limits must be positive whole numbers.'); return; }
+    setBusy(true);
+    try { await api('saveChatGPTModels', models.map(fromRow)); await loadCatalog(); onDone(); }
+    catch (e) { setError(e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')); }
+    finally { setBusy(false); }
+  };
+  return <form className="editor" onSubmit={save}>
+    <ModelCatalog models={models} setModels={setModels} lockedId fetching={!available} choose={() => setPicking(true)}
+      onReset={available ? () => setModels(list => list.map(m => toRow(available.find(a => a.id === m.id)))) : undefined}
+      outputTitle="Pi uses this output budget with the context window. ChatGPT controls the server-side limit and does not accept max_output_tokens." />
+    {picking && available && <ModelPicker available={available} selected={models.map(m => m.id)} onClose={() => setPicking(false)}
+      onDone={picked => { setModels(pickedRows(models, available, picked)); setPicking(false); }} />}
+    {error && <div className="form-error"><Icon name="alert" size={14} /> {error}</div>}
+    <div className="editor-actions"><button type="button" className="button ghost" onClick={onDone}>Cancel</button>
+      <button type="submit" className="button primary" disabled={busy || !available}>{busy ? <Spinner size={13} /> : 'Save'}</button></div>
+  </form>;
+}
 function ChatGPTPage() {
   const environments = useStore(s => s.environments.filter(e => e.kind === 'local' || e.added));
   const status = useStore(s => s.chatgpt);
   const [error, setError] = useState(null);
   const [callback, setCallback] = useState('');
   const [busy, setBusy] = useState(null);
+  const [editingModels, setEditingModels] = useState(false);
   const login = status?.login;
   const active = login && !['failed', 'cancelled'].includes(login.state);
   useEffect(() => { api('chatGPTStatus').then(setChatGPT).catch(() => setError('Could not load ChatGPT connections.')); }, []);
@@ -286,7 +299,7 @@ function ChatGPTPage() {
     finally { setBusy(null); }
   };
   const submit = async e => { e.preventDefault(); await run(login.environmentId, 'submitChatGPTCallback', callback); setCallback(''); };
-  return <section className="section">
+  return <><section className="section">
     <div className="section-head"><h2 className="section-title">ChatGPT accounts</h2></div>
     <ul className="rows">
       {environments.map(env => {
@@ -317,7 +330,14 @@ function ChatGPTPage() {
       })}
     </ul>
     {error && <div className="form-error"><Icon name="alert" size={14} /> {error}</div>}
-  </section>;
+  </section>
+    <section className="section chatgpt-models">
+      <div className="section-head"><h2 className="section-title">Models</h2></div>
+      <div className="row-card"><div className="row-head"><span className="row-name">ChatGPT</span><div className="row-actions">
+        <button className="button small" onClick={() => setEditingModels(value => !value)}>Edit</button>
+      </div></div>{editingModels && <ChatGPTModelEditor onDone={() => setEditingModels(false)} />}</div>
+    </section>
+  </>;
 }
 
 // ---------------------------------------------------------------- connections

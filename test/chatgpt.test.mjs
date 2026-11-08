@@ -218,7 +218,7 @@ test('subscription models preserve context/effort and use native streaming, not 
     reasoning: true, thinkingLevelMap: { high: 'high' }, input: ['text', 'image'], cost: { input: 20 } }], streamSimple: () => 'native-stream', stream: () => 'native-stream' };
   const config = { vaultId: randomUUID(), capability: 'a'.repeat(64), socketPath: '/tmp/fixture.sock' };
   const provider = chatGPTProvider(config, { provider: base, request: async (_path, message) => { resolved = message; return { ok: true, access: 'fixture-access' }; } });
-  assert.equal(provider.streamSimple, base.streamSimple); assert.equal(provider.stream, base.stream);
+  assert.equal(provider.streamSimple(), 'native-stream'); assert.equal(provider.stream(), 'native-stream');
   const model = provider.getModels()[0]; assert.equal(model.contextWindow, 128000); assert.equal(model.maxTokens, 32000);
   assert.deepEqual(model.thinkingLevelMap, { high: 'high' }); assert.deepEqual(model.input, ['text', 'image']);
   assert.equal(model.cost.input, 0, 'API list prices are not a subscription bill');

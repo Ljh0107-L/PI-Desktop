@@ -150,7 +150,7 @@ export function ModelMenu({ value, environmentId, onChange, close }) {
           </MenuSection>
         ))}
       </div>
-      <div className="menu-foot"><MenuItem icon="settings" label="Manage models…" onClick={() => { close(); openSettings(true, 'providers'); }} /></div>
+      <div className="menu-foot"><MenuItem icon="settings" label="Manage models…" onClick={() => { close(); openSettings(true, value?.provider === 'pidesk-chatgpt' ? 'chatgpt' : 'providers'); }} /></div>
     </div>
   );
 }

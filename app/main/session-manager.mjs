@@ -177,7 +177,13 @@ export class SessionManager extends EventEmitter {
     this.invalidateCatalog();
     this.prepared.clear();
     for (const key of [...this.spares.keys()]) this.#dropSpare(key);
-    for (const runtime of this.runtimes.values()) if (runtime.status === 'connected') this.#syncProviders(runtime).catch(() => {});
+    for (const runtime of this.runtimes.values()) if (runtime.status === 'connected') {
+      this.#syncProviders(runtime).then(() => {
+        const record = this.#recordOf(runtime.session?.id);
+        if (record?.model?.provider === CHATGPT_PROVIDER) return this.#applyModel(record, runtime)
+          .then(() => this.emit('model-settings', { id: record.id }));
+      }).catch(() => {});
+    }
   }
   // Desktop settings a Pi applies itself (Settings → Subagents, the conversation's speed): in its boot
   // record, then by command whenever they changed or the Pi started without them.
@@ -202,11 +208,16 @@ export class SessionManager extends EventEmitter {
     if (!session) return Promise.resolve();
     const run = async () => {
       if (runtime.session !== session) return;
-      let applied = runtime.applied ?? {};
       const want = record.model;
+      if (want?.provider === CHATGPT_PROVIDER) await this.#syncProviders(runtime);
+      let applied = runtime.applied ?? {};
       if (want?.provider === CHATGPT_PROVIDER) {
-        if (!this.chatgpt) throw new Error('Reconnect ChatGPT in Settings.');
+        if (!this.chatgpt?.catalog().some(m => m.id === want.id && m.environments.includes(record.environmentId))) throw new Error('Choose an enabled ChatGPT model for this environment in Settings.');
         await this.chatgpt.ensure(record.environmentId);
+        if (runtime.chatgptSettingsReady === undefined) {
+          const available = await session.request('get_available_models');
+          runtime.chatgptSettingsReady = available.models?.some(m => m.provider === CHATGPT_PROVIDER && m.pideskChatGPTSettings === 1) ?? false;
+        }
       }
       if (want?.provider && want.id && (applied.model?.provider !== want.provider || applied.model?.id !== want.id)) {
         await this.#syncProviders(runtime);
@@ -235,7 +246,10 @@ export class SessionManager extends EventEmitter {
       const payload = Buffer.from(JSON.stringify(this.bootProviders(this.#recordOf(session.id)?.environmentId ?? 'local'))).toString('base64');
       const sync = { session };
       sync.promise = session.prompt(`/pidesk-providers ${payload}`).then(() => {
-        if (runtime.session === session) runtime.providersVersion = version;
+        if (runtime.session === session) {
+          runtime.providersVersion = version;
+          if (this.#recordOf(session.id)?.model?.provider === CHATGPT_PROVIDER) runtime.applied = null;
+        }
       }).finally(() => { if (runtime.providerSync === sync) runtime.providerSync = null; });
       runtime.providerSync = sync;
       await sync.promise;
@@ -774,6 +788,10 @@ export class SessionManager extends EventEmitter {
     const record = this.record(id);
     let session = await this.ensureStarted(id);
     let runtime = this.runtimes.get(id);
+    if (record.model?.provider === CHATGPT_PROVIDER && !runtime?.chatgptSettingsReady && !runtime?.streaming) {
+      await this.setModel(id, record.model.provider, record.model.id);
+      session = await this.ensureStarted(id); runtime = this.runtimes.get(id);
+    }
     let interrupted = false;
     // While an Ultra task runs, a message joins it (Pi steers it in before the next model call); an
     // interruption would read as Stop and pause the task.
@@ -783,7 +801,10 @@ export class SessionManager extends EventEmitter {
     }
     await this.#syncProviders(this.runtimes.get(id));
     await this.#syncConfig(this.runtimes.get(id), record).catch(() => {});
-    await this.#applyModel(record, this.runtimes.get(id)).catch(error => this.emit('notice', { id, level: 'warning', message: error.message }));
+    await this.#applyModel(record, this.runtimes.get(id)).catch(error => {
+      if (record.model?.provider === CHATGPT_PROVIDER) throw error;
+      this.emit('notice', { id, level: 'warning', message: error.message });
+    });
     // The first message names the conversation at once (its first line), and the model then suggests a
     // better title, as Claude does; a title the user set by hand is never replaced.
     let nameIt = null;
@@ -916,7 +937,8 @@ export class SessionManager extends EventEmitter {
       if (runtime?.status === 'connected') {
         await this.#syncProviders(runtime);
         const available = await runtime.session.request('get_available_models');
-        if (!available.models?.some(m => m.provider === provider && m.id === modelId)) {
+        runtime.chatgptSettingsReady = available.models?.some(m => m.provider === provider && m.id === modelId && m.pideskChatGPTSettings === 1) ?? false;
+        if (!runtime.chatgptSettingsReady) {
           if (runtime.streaming) throw new Error('Wait for the current reply to finish, then switch models.');
           this.#save(record, { model: { provider, id: modelId } });
           await this.close(id); await this.stopRelay(env, id); await this.ensureStarted(id); return;
@@ -969,6 +991,9 @@ export class SessionManager extends EventEmitter {
   async setSpeed(id, speed) {
     if (!SPEEDS.includes(speed)) throw new Error(`Unknown speed: ${speed}`);
     const record = this.record(id);
+    if (record.model?.provider === CHATGPT_PROVIDER && this.runtimes.get(id)?.status === 'connected' && !this.runtimes.get(id).chatgptSettingsReady) {
+      await this.setModel(id, record.model.provider, record.model.id);
+    }
     if (speed === 'standard') delete record.speed;
     this.#save(record, speedField(speed));
     const runtime = this.runtimes.get(id);
