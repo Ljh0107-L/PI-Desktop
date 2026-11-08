@@ -2,10 +2,9 @@
 // each environment has its own grant and an independent, encrypted host-side refresh owner.
 import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { join } from 'node:path';
 import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
 import { chatGPTModels } from '../../agent/pidesk-chatgpt.mjs';
-import { CHATGPT_PROVIDER, chatGPTCapability, sealChatGPT } from '../../agent/pidesk-chatgpt-vault.mjs';
+import { CHATGPT_PROVIDER, chatGPTCapability, chatGPTSocketPath, sealChatGPT } from '../../agent/pidesk-chatgpt-vault.mjs';
 import { runSsh } from './remote-setup.mjs';
 import { shellQuote } from '../../core/transports.mjs';
 
@@ -65,7 +64,7 @@ export class ChatGPTLogin {
     const key = this.store.getKey(keyId(account.vaultId));
     if (!key) return null;
     return { id: CHATGPT_PROVIDER, kind: 'subscription', vaultId: account.vaultId,
-      socketPath: join(account.runDir, 'chatgpt.sock'), capability: chatGPTCapability(key) };
+      socketPath: chatGPTSocketPath(account.runDir, account.vaultId), capability: chatGPTCapability(key) };
   }
   ensure(environmentId) {
     const account = this.accounts()[environmentId];

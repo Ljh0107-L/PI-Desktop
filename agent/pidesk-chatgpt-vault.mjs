@@ -1,6 +1,6 @@
 // Encrypted OAuth storage. A host's auth daemon is the sole writer; SDK refreshes run inside
 // the per-vault mutation queue, so concurrent Pi sessions cannot rotate the same token twice.
-import { createCipheriv, createDecipheriv, createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, randomUUID } from 'node:crypto';
 import { lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
@@ -40,6 +40,10 @@ function privatePath(path, directory) {
     throw new Error('ChatGPT vault permissions are not private');
   }
   return info;
+}
+export function chatGPTSocketPath(runDir, vaultId) {
+  if (!validVaultId(vaultId)) throw new Error('Invalid ChatGPT vault identity');
+  return join(runDir, `chatgpt-${createHash('sha256').update(vaultId).digest('hex').slice(0, 16)}.sock`);
 }
 export function chatGPTVaultPath(agentDir, vaultId) {
   if (!validVaultId(vaultId)) throw new Error('Invalid ChatGPT vault identity');

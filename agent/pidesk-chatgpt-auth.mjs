@@ -2,14 +2,14 @@
 // Independent, host-local OAuth owner. It survives desktop disconnects without changing/restarting
 // the session relay. Only ciphertext is persisted; vault keys stay in memory and the Mac's keychain.
 import { spawn } from 'node:child_process';
-import { timingSafeEqual } from 'node:crypto';
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { chmodSync, closeSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import net from 'node:net';
 import { homedir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { ChatGPTCredentials, chatGPTCapability, chatGPTVaultPath, validVaultId } from './pidesk-chatgpt-vault.mjs';
+import { ChatGPTCredentials, chatGPTCapability, chatGPTSocketPath, chatGPTVaultPath, validVaultId } from './pidesk-chatgpt-vault.mjs';
 
 const MAX_PACKET = 1024 * 1024;
 const send = (socket, value) => { if (!socket.destroyed) socket.end(JSON.stringify(value) + '\n'); };
@@ -126,12 +126,17 @@ function privateRunDir(runDir) {
   const info = lstatSync(runDir);
   if (!info.isDirectory() || info.isSymbolicLink() || (process.getuid && info.uid !== process.getuid()) || (info.mode & 0o077)) throw unavailable();
 }
-export function serveChatGPT(runDir, host = new ChatGPTAuthHost()) {
+export function serveChatGPT(runDir, host = new ChatGPTAuthHost(), vaultId, adminHash) {
   privateRunDir(runDir);
-  const path = join(runDir, 'chatgpt.sock');
+  const path = vaultId ? chatGPTSocketPath(runDir, vaultId) : join(runDir, 'chatgpt.sock');
   const server = net.createServer(socket => {
     socket.on('error', () => {}); socket.setTimeout(65000, () => socket.destroy());
-    readPacket(socket).then(message => host.handle(message)).then(result => send(socket, result), () => send(socket, { ok: false }));
+    readPacket(socket).then(message => {
+      if (vaultId && message?.vaultId !== vaultId) throw unavailable();
+      if (adminHash && ['configure', 'logout'].includes(message?.op) &&
+          (typeof message.key !== 'string' || !equalSecret(createHash('sha256').update(message.key).digest('hex'), adminHash))) throw unavailable();
+      return host.handle(message);
+    }).then(result => send(socket, { ...result, pid: process.pid }), () => send(socket, { ok: false }));
   });
   return new Promise((resolve, reject) => {
     server.once('error', reject);
@@ -142,9 +147,9 @@ const connects = path => new Promise(resolve => {
   const socket = net.connect(path); socket.on('error', () => resolve(false));
   socket.on('connect', () => { socket.destroy(); resolve(true); });
 });
-async function ensureDaemon(runDir) {
+async function ensureDaemon(runDir, bootstrap) {
   privateRunDir(runDir);
-  const path = join(runDir, 'chatgpt.sock'), lock = join(runDir, 'chatgpt-startup.lock');
+  const path = chatGPTSocketPath(runDir, bootstrap.vaultId), lock = path + '.startup.lock';
   for (let attempt = 0; attempt < 100; attempt++) {
     if (await connects(path)) return path;
     let fd;
@@ -160,12 +165,14 @@ async function ensureDaemon(runDir) {
     try {
       writeFileSync(fd, String(process.pid)); closeSync(fd); fd = undefined;
       if (await connects(path)) return path;
+      if (bootstrap.op !== 'configure') throw unavailable();
       try { unlinkSync(path); } catch (error) { if (error.code !== 'ENOENT') throw unavailable(); }
       const keep = ['PATH', 'HOME', 'USER', 'LOGNAME', 'SHELL', 'TMPDIR', 'LANG', 'LC_ALL', 'ELECTRON_RUN_AS_NODE'];
       const env = Object.fromEntries(keep.filter(k => process.env[k] !== undefined).map(k => [k, process.env[k]]));
       const child = spawn(process.execPath, [fileURLToPath(import.meta.url), 'daemon', runDir], {
-        detached: true, stdio: 'ignore', cwd: homedir(), env,
+        detached: true, stdio: ['pipe', 'ignore', 'ignore'], cwd: homedir(), env,
       });
+      child.stdin.on('error', () => {}); child.stdin.end(JSON.stringify(bootstrap) + '\n');
       let failed = false; child.on('error', () => { failed = true; }); child.unref();
       for (let i = 0; i < 50 && !failed; i++) {
         await new Promise(r => setTimeout(r, 100)); if (await connects(path)) return path;
@@ -180,14 +187,24 @@ async function ensureDaemon(runDir) {
 }
 async function cli() {
   const [command, runDir] = process.argv.slice(2);
-  if (command === 'daemon') { await serveChatGPT(runDir); process.on('SIGHUP', () => {}); return; }
+  if (command === 'daemon') {
+    // The trusted launcher supplies the one vault over stdin before the socket is exposed. A
+    // model with a request capability cannot register another SDK/package inside this process.
+    const bootstrap = await readPacket(process.stdin);
+    process.stdin.pause();
+    if (bootstrap?.op !== 'configure') throw unavailable();
+    const host = new ChatGPTAuthHost();
+    await host.handle(bootstrap);
+    await serveChatGPT(runDir, host, bootstrap.vaultId, createHash('sha256').update(bootstrap.key).digest('hex'));
+    process.on('SIGHUP', () => {}); return;
+  }
   if (command !== 'rpc') throw unavailable();
   const message = await readPacket(process.stdin);
   process.stdin.pause();
   // Administrative CLI responses never contain access or refresh tokens. Only a Pi's private
   // socket client may resolve request auth; admin callers configure/logout over stdin.
   if (!['configure', 'logout'].includes(message?.op)) throw unavailable();
-  const path = await ensureDaemon(runDir);
+  const path = await ensureDaemon(runDir, message);
   const result = await chatGPTRequest(path, message);
   process.stdout.write(JSON.stringify(result) + '\n');
 }

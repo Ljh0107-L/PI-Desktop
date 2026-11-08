@@ -1,9 +1,12 @@
 // The subscription is separate from OpenAI API-key providers. Only a request-scoped access token
 // reaches Pi; refresh tokens and vault keys stay in the host-local authentication owner.
 import { isAbsolute } from 'node:path';
-import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
+import { builtinProviders } from '@earendil-works/pi-ai/providers/all';
 import { CHATGPT_PROVIDER, validVaultId } from './pidesk-chatgpt-vault.mjs';
 import { chatGPTRequest } from './pidesk-chatgpt-auth.mjs';
+
+let nativeOpenAI;
+const openaiProvider = () => nativeOpenAI ??= builtinProviders().find(provider => provider.id === 'openai');
 
 export function chatGPTModels(provider = openaiProvider()) {
   return provider.getModels().map(model => ({ ...model, provider: CHATGPT_PROVIDER,
