@@ -15,7 +15,7 @@ function toolsFromMessages(messages) {
   return tools;
 }
 
-// `timings`: generation timing saved when replies streamed (Pi's history has token counts but no timing).
+// `timings`: source timing saved when replies streamed, restored without changing model history.
 export function fromHistory(messages, timings = {}) {
   const withTiming = messages.map(m => m.role === 'assistant' && !m.__timing && timings[m.timestamp] ? { ...m, __timing: timings[m.timestamp] } : m);
   return { messages: withTiming, live: null, tools: toolsFromMessages(messages), loaded: true, error: null };
@@ -25,9 +25,8 @@ export function fromHistory(messages, timings = {}) {
 // Pi's usage: input = uncached prompt tokens, cacheRead / cacheWrite = cached prompt tokens, output
 // (which already includes `reasoning` when the provider reports it).
 //
-// Only source-observed generation windows contribute to TPS. Renderer receipt timestamps include
-// SSH buffering/replay; durationMs includes TTFT and is NEVER a generation-speed denominator.
-// First-chunk content is excluded from the numerator because it predates the measured window.
+// TPS covers one complete model request, including TTFT and completion trailers. Tool execution
+// and gaps between calls are excluded. Renderer receipt windows cannot measure request latency.
 // A user-initiated stop sometimes arrives as an ordinary error message ("This
 // operation was aborted") instead of stopReason "aborted". Treat both as an
 // interruption notice, not as a provider failure in a red error box.
@@ -39,104 +38,39 @@ const failureText = text => isStreamInterruption(text) ? `Model connection inter
 
 const nonnegative = n => Number.isFinite(n) && n >= 0 ? n : 0;
 const positive = n => Number.isFinite(n) && n > 0;
-function generation(m) {
+function requestSpeed(m) {
   if (['pending', 'deferred', 'error', 'aborted'].includes(m.stopReason) || isAbortMessage(m)) return null;
-  const t = m.__timing;
-  // Captured in Pi before RPC/SSH delivery, not reconstructed from desktop receipt times. Older
-  // records without first-chunk weights cannot establish a matching token/time sample.
-  if (!['agent', 'relay'].includes(t?.source) || t.complete !== true ||
-      ![t.start, t.first, t.last, t.end].every(n => Number.isFinite(n) && n >= 0) ||
-      !(t.start <= t.first && t.first < t.last && t.last <= t.end)) return null;
+  const t = m.__timing ?? {};
+  const time = n => Number.isFinite(n) && n >= 0;
+  const source = ['agent', 'relay'].includes(t.source) && t.complete === true &&
+    time(t.start) && time(t.end) && t.end >= t.start;
+  let ms, timeEstimated = false;
+  if (source && time(t.requestStart) && t.requestStart <= t.start) {
+    ms = t.end - t.requestStart;
+  } else if (positive(m.durationMs)) {
+    ms = m.durationMs;
+  } else if (source && time(m.timestamp) && m.timestamp <= t.start) {
+    // Older Pi messages timestamp construction before the network call. This is an approximate
+    // request start; message_start alone can follow HTTP headers and miss most of the wait.
+    ms = t.end - m.timestamp;
+    timeEstimated = true;
+  }
+  if (!positive(ms)) return null;
   const blocks = Array.isArray(m.content) ? m.content : [];
   const answer = typeof m.content === 'string' ? m.content : blocks.filter(b => b?.type === 'text').map(b => b.text ?? '').join('\n');
   const thinking = blocks.filter(b => b?.type === 'thinking').map(b => b.thinking ?? '').join('\n');
   const tools = blocks.filter(b => b?.type === 'toolCall').map(b => `${b.name ?? ''} ${JSON.stringify(b.arguments ?? {})}`).join('\n');
-  const visible = [answer, thinking, tools].filter(Boolean).join('\n');
-  const visibleOutput = estimateTokens(visible);
-  const answerText = [answer, tools].filter(Boolean).join('\n');
+  const counted = estimateTokens([answer, tools].filter(Boolean).join('\n')) +
+    (nonnegative(m.usage?.reasoning) || estimateTokens(thinking));
   const reported = m.usage?.output;
-  const reasoning = nonnegative(m.usage?.reasoning);
-  // A one-token placeholder is common in gateways. A character heuristic cannot prove any other
-  // positive provider count wrong, especially for highly compressible text or tool JSON.
-  const inferTokens = !positive(reported) || (reported === 1 && visibleOutput >= 20);
-  let estimated = inferTokens || m.__usageProvenance?.source === 'estimated';
-  let out = inferTokens ? estimateTokens(answerText) + (reasoning || estimateTokens(thinking)) : reported;
-  // Nothing hidden when the model didn't reason at all: no thinking block and a reported count of 0
-  // (an Anthropic request asks for summarized thinking, but a short reply often has none).
-  const noReasoning = m.usage?.reasoning === 0 && !blocks.some(b => b?.type === 'thinking');
-  const coversReasoning = noReasoning || m.__usageProvenance?.thinking !== 'summary' &&
-    !blocks.some(b => b?.type === 'thinking' && b.redacted) &&
-    (!thinking || (Number.isFinite(t.thinkingChars) && t.thinkingChars >= thinking.length * 0.8)) &&
-    (!reasoning || estimateTokens(thinking) >= reasoning * 0.5);
-  const scope = coversReasoning ? 'all' : 'answer';
-  const sample = coversReasoning ? t : t.answer;
-  const content = coversReasoning ? visible : answerText;
-  if (!coversReasoning) {
-    // Hidden/summary reasoning is NOT generated inside the answer window. Subtract it when its
-    // count is known; otherwise estimate visible answer/tool output, never unknown hidden work.
-    if (!inferTokens && Number.isFinite(m.usage?.reasoning) && m.usage.reasoning >= 0) out = reported - reasoning;
-    else { out = estimateTokens(answerText); estimated = true; }
-  }
-  if (!positive(out) || !sample || sample.interrupted === true || !Number.isInteger(sample.deltas) || sample.deltas < 2 ||
-      ![sample.first, sample.last, sample.chars, sample.weight, sample.firstWeight].every(Number.isFinite) ||
-      !(t.first <= sample.first && sample.first < sample.last && sample.last <= t.last) ||
-      !(sample.firstWeight > 0 && sample.firstWeight < sample.weight)) return null;
-  const ms = sample.last - sample.first;
-  // Tiny replies, one-chunk tool JSON and dense upstream bursts cannot establish a useful decode
-  // window. Unknown is preferable to a request average or fabricated high TPS. Keep usage intact.
-  // A short reply from a fast model (40 tokens in 150 ms at Fast) can still be timed when it came in
-  // many chunks at a believable density; a relay's buffered burst is far denser.
-  const shortWindow = ms >= 50 && sample.deltas >= 8 && sample.chars / ms <= 4;
-  if ((ms < 200 && !shortWindow) || sample.chars / ms > 20 || sample.chars < content.length * 0.8 ||
-      estimateTokens(content) < Math.max(20, out * 0.5)) return null;
-  // Deltas are chunks, not single tokens. Allocate reported tokens by observed token weights and
-  // remove the entire first chunk (including same-timestamp deltas), not merely one token.
-  out *= (sample.weight - sample.firstWeight) / sample.weight;
-  return positive(out) ? { ms, out, estimated, scope, hiddenWork: reasoning > 0 } : null;
-}
-// When no clean source window exists (one burst from a buffering relay, a single chunk, older or
-// receipt-only timing, hidden reasoning), estimate generation speed from the reply instead of showing
-// nothing: output tokens (reported, else counted from the visible output) over the observed output
-// window when it is long enough to measure, else over the whole response time. That time includes
-// time to first token, so the estimate errs low. Always marked as an estimate.
-const MIN_WINDOW_MS = 200, MIN_RESPONSE_MS = 50;
-function estimatedGeneration(m) {
-  if (['pending', 'deferred', 'error', 'aborted'].includes(m.stopReason) || isAbortMessage(m)) return null;
-  const blocks = Array.isArray(m.content) ? m.content : [];
-  const visible = typeof m.content === 'string' ? m.content : blocks.map(b => b?.type === 'text' ? b.text ?? ''
-    : b?.type === 'thinking' ? b.thinking ?? '' : b?.type === 'toolCall' ? `${b.name ?? ''} ${JSON.stringify(b.arguments ?? {})}` : '').filter(Boolean).join('\n');
-  const reported = m.usage?.output, counted = estimateTokens(visible);
+  // Retain the existing gateway-placeholder fallback without rewriting provider usage. Reported
+  // output already contains reasoning: never subtract it or add it a second time.
   const inferTokens = !positive(reported) || (reported === 1 && counted >= 20);
   const out = inferTokens ? counted : reported;
-  if (!positive(out)) return null;
-  const t = m.__timing ?? {};
-  const time = n => typeof n === 'number' && Number.isFinite(n) && n >= 0;
-  // Hidden, summarized or redacted reasoning was generated before the visible output: only the whole
-  // response covers it.
-  const reasoning = nonnegative(m.usage?.reasoning);
-  const thinking = blocks.filter(b => b?.type === 'thinking').map(b => b.thinking ?? '').join('\n');
-  const hiddenReasoning = reasoning > 0 && (m.__usageProvenance?.thinking === 'summary' || blocks.some(b => b?.type === 'thinking' && b.redacted) || estimateTokens(thinking) < reasoning * 0.5);
-  // Reasoning not seen as it was generated, but the provider marked when its output began (the
-  // bridge's genStart: OpenAI's first output item, Anthropic's first content block): every output
-  // token came after it. That span also holds reading the prompt and summarizing the reasoning
-  // (measured: about half the answer's rate at standard speed, a seventh at Ultrafast), so this errs
-  // low; still closer than the whole response. A relay's single burst is not a span of generation.
-  if ((hiddenReasoning || m.__usageProvenance?.thinking === 'summary') && time(t.genStart) && time(t.start) && time(t.first) && time(t.last) &&
-      t.start <= t.genStart && t.genStart <= t.first && t.last - t.genStart >= MIN_WINDOW_MS && !(t.chars / (t.last - t.genStart) > 20)) {
-    return { ms: t.last - t.genStart, out, estimated: inferTokens, scope: 'all', fallback: 'start', hiddenWork: false };
-  }
-  if (!hiddenReasoning && time(t.first) && time(t.last) && t.last - t.first >= MIN_WINDOW_MS) {
-    const firstShare = positive(t.weight) && positive(t.firstWeight) && t.firstWeight < t.weight ? t.firstWeight / t.weight
-      : Number.isInteger(t.deltas) && t.deltas > 1 ? 1 / t.deltas : 0;
-    return { ms: t.last - t.first, out: out * (1 - firstShare), estimated: inferTokens, scope: 'all', fallback: 'window', hiddenWork: false };
-  }
-  // Pi's request duration covers the whole call; a relay replaying a buffered reply can make the
-  // stream's own start→end far shorter than the generation took.
-  const ms = Math.max(time(m.durationMs) ? m.durationMs : 0, time(t.start) && time(t.end) ? t.end - t.start : 0);
-  return ms >= MIN_RESPONSE_MS ? { ms, out, estimated: inferTokens, scope: 'all', fallback: 'response', hiddenWork: hiddenReasoning } : null;
+  return positive(out) ? { ms, out, timeEstimated, estimated: inferTokens || m.__usageProvenance?.source === 'estimated' } : null;
 }
 export function usageOf(messages) {
-  const u = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0, reasoningReported: false, cost: 0, genMs: 0, genOut: 0, speedEstimated: false, speedTokensEstimated: false, speedBasis: null, speedScope: null, speedPartial: false, hiddenWork: false, start: null, end: null, calls: 0 };
+  const u = { input: 0, cacheRead: 0, cacheWrite: 0, output: 0, reasoning: 0, reasoningReported: false, cost: 0, genMs: 0, genOut: 0, speedEstimated: false, speedTokensEstimated: false, speedTimeEstimated: false, speedBasis: null, speedScope: null, speedPartial: false, hiddenWork: false, start: null, end: null, calls: 0 };
   const speeds = [];
   let speedCalls = 0;
   for (const m of messages) {
@@ -171,63 +105,42 @@ export function usageOf(messages) {
     u.usageEstimated ||= m.__usageProvenance?.source === 'estimated';
     u.cacheUnknown ||= m.__usageProvenance?.cache === 'unknown';
     if (!['pending', 'deferred', 'error', 'aborted'].includes(m.stopReason) && !isAbortMessage(m)) speedCalls += 1;
-    const g = generation(m) ?? estimatedGeneration(m);
+    const g = requestSpeed(m);
     if (g) speeds.push(g);
     const t = m.__timing;
     if (Number.isFinite(t?.start) && Number.isFinite(t?.end) && t.end >= t.start) {
       u.start = Math.min(u.start ?? t.start, t.start); u.end = Math.max(u.end ?? t.end, t.end);
     }
   }
-  // Sum matching generation samples, never averages of per-call TPS. Measured samples take precedence
-  // over estimates; answer-only samples are not mixed with full streamed reasoning+answer samples.
-  const measured = speeds.filter(g => !g.fallback);
-  const pool = measured.length ? measured : speeds;
-  const scope = pool.at(-1)?.scope;
-  const samples = pool.filter(g => g.scope === scope);
-  if (samples.length) {
-    u.speedBasis = measured.length ? 'generation' : samples.some(g => g.fallback === 'response') ? 'response' : samples.some(g => g.fallback === 'start') ? 'start' : 'window'; u.speedScope = scope;
-    u.speedPartial = samples.length < speedCalls;
-    for (const g of samples) {
+  // Sum complete per-call token counts and request durations, never inter-call/tool gaps or
+  // averages of per-call TPS. Hidden reasoning and answer-only streams now share this scope.
+  if (speeds.length) {
+    u.speedBasis = 'request'; u.speedScope = 'all';
+    u.speedPartial = speeds.length < speedCalls;
+    for (const g of speeds) {
       u.genMs += g.ms; u.genOut += g.out;
-      u.speedTokensEstimated ||= g.estimated; u.hiddenWork ||= g.hiddenWork;
+      u.speedTokensEstimated ||= g.estimated; u.speedTimeEstimated ||= g.timeEstimated;
     }
-    u.speedEstimated = true; // source-observed chunk timing/first-chunk allocation is approximate
+    u.speedEstimated = true; // elapsed time observed by the client, not server decode-only TPS
   }
   const prompt = u.input + u.cacheRead + u.cacheWrite;
   return { ...u, prompt, cacheHit: u.cacheUnknown ? null : prompt ? u.cacheRead / prompt : null, tps: u.genMs ? u.genOut / (u.genMs / 1000) : null, durationMs: u.start != null && u.end != null ? u.end - u.start : null };
 }
 
-// earlier: the speed comes from an earlier reply, because the last one was too short to time.
+// Earlier replies stand in only when the last reply has no usable output or request duration.
 export function speedDisplay(usage, { earlier = false } = {}) {
-  const from = earlier ? ' From an earlier reply of this model: the last one was too short, or arrived in bursts, to time.' : '';
-  if (!Number.isFinite(usage.tps)) return { value: '—', label: 'Speed unavailable', title: 'This reply has no output or timing to estimate its speed from.' };
-  if (['response', 'start', 'window'].includes(usage.speedBasis)) {
-    const basis = usage.speedBasis === 'response'
-      ? 'Estimated: output tokens ÷ the whole response time, because the output arrived in one burst or a single chunk (a buffering relay) or its reasoning was hidden. That time includes time to first token, so the real generation speed is at least this.'
-      : usage.speedBasis === 'start'
-        ? 'Estimated: output tokens, reasoning included, ÷ the time from when the provider began its output to the last token, because the answer was too short to time on its own. That time also holds reading the prompt and summarizing the hidden reasoning, so the real generation speed is higher.'
-        : 'Estimated: output tokens after the first chunk ÷ the first→last output time seen by the desktop.';
-    return {
-      value: `~${usage.tps >= 100 ? Math.round(usage.tps) : usage.tps.toFixed(1)}`,
-      label: 'Generation (estimated)',
-      title: basis + (usage.speedTokensEstimated ? ' Token counts are estimated from the visible output; provider token totals remain unchanged.' : ' Uses provider-reported output counts.') + from,
-    };
-  }
-  const answer = usage.speedScope === 'answer';
-  const title = 'Generation tokens after the first chunk ÷ first→last source-observed generation time. Excludes TTFT, tool execution and completion trailers. First-chunk tokens are allocated by text weights and excluded. Approximate, not server decode-only TPS; upstream buffering can affect it.';
-  const scope = answer ? ' Measured on the answer and tool output: hidden or summarized reasoning is generated at the same speed but cannot be timed (the wait before the answer also holds reading the prompt and summarizing it), so its tokens and time are left out.' : ' Includes fully streamed reasoning once, not in addition to output.';
-  const estimate = usage.speedTokensEstimated ? ' Token counts are estimated by the bridge or from visible text/tool arguments and reported or visible reasoning. Provider token totals remain unchanged.' : ' Uses provider-reported output counts; provider token totals remain unchanged.';
+  if (!Number.isFinite(usage.tps)) return { value: '—', label: 'Speed unavailable', title: 'This reply has no output or usable request timing.' };
   return {
     value: `${usage.speedEstimated ? '~' : ''}${usage.tps >= 100 ? Math.round(usage.tps) : usage.tps.toFixed(1)}`,
-    label: answer ? 'Answer generation' : 'Generation',
-    title: title + scope + estimate + (usage.speedPartial ? ' Only calls with usable timing and the same generation scope are included.' : '') + from,
+    label: usage.speedTokensEstimated || usage.speedTimeEstimated ? 'Request TPS (estimated)' : 'Request TPS',
+    title: 'Output tokens ÷ request start-to-completion time, including time to first token (TTFT) and completion trailers. Excludes tool execution and gaps between calls. Includes the first chunk and reasoning once, as part of output; not server decode-only TPS.'
+      + (usage.speedTokensEstimated ? ' Token counts are estimated from available output.' : ' Uses provider-reported output counts.')
+      + (usage.speedTimeEstimated ? ' Older history uses the source message timestamp as an approximate request start.' : '')
+      + ' Provider token totals remain unchanged.'
+      + (usage.speedPartial ? ' Only calls with usable timing and output are included.' : '')
+      + (earlier ? ' From an earlier reply of this model: the last one has no usable output or request timing.' : ''),
   };
 }
-
-// A reply shorter than this (a "done" after a tool call) is one or two chunks: its speed is noise.
-export const MIN_TIMED_TOKENS = 16;
-// An estimate (no measurable window) stands in for a reply only when the reply is at least this long.
-export const MIN_SPEED_TOKENS = 64;
 
 // The processing speed a reply ran at (the composer's Speed; the bridge records what was asked for,
 // sent and reported in __speed). Null for standard-speed replies that asked for nothing faster.
@@ -243,17 +156,13 @@ export function speedTier(m) {
     : `The provider ran it at ${label} speed, billed at ${label} rates.`;
   return { label, slower: true, title: `Asked for ${asked}. ${why}` };
 }
-// The reply whose speed the Usage card shows, so it changes with every reply: the last one when its
-// generation was measured; else (too short or too coarse to time) the latest measured reply of the
-// same model, then the latest estimate of a reply long enough, then the last reply. A burst of
-// tool-call arguments after a tool result is an estimate; the generation before it was measured.
-export const timedReply = m => (m?.usage?.output ?? 0) >= MIN_TIMED_TOKENS && usageOf([m]).speedBasis === 'generation';
+// Short and single-chunk replies have their own request TPS; no decode-window threshold applies.
+export const timedReply = m => usageOf([m]).tps != null;
 export function speedReply(replies) {
   const last = replies.at(-1);
   if (!last || timedReply(last)) return last;
-  const model = m => `${m.provider}\n${m.responseModel ?? m.model}`;
-  const same = replies.filter(m => model(m) === model(last)).reverse();
-  return same.find(timedReply) ?? same.find(m => (m.usage?.output ?? 0) >= MIN_SPEED_TOKENS && usageOf([m]).tps != null) ?? last;
+  return replies.findLast(m => m.provider === last.provider &&
+    (m.responseModel ?? m.model) === (last.responseModel ?? last.model) && timedReply(m)) ?? last;
 }
 // Usage per finished turn (user message → the replies that followed), oldest first.
 export function turnUsages(messages) {

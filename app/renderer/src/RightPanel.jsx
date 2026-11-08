@@ -1,7 +1,7 @@
 import { useMemo, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { useResizable } from './ui.jsx';
-import { formatTokens, speedDisplay, speedReply, speedTier, timedReply, usageOf } from './transcript.js';
+import { formatTokens, speedDisplay, speedReply, speedTier, usageOf } from './transcript.js';
 import { useStore } from './store.js';
 import { subagentBatches, visibleSubagentBatches } from './subagent-state.js';
 import { SubagentDetail, SubagentList } from './Subagents.jsx';
@@ -29,14 +29,12 @@ function UsageCard({ transcript }) {
   const lastMessage = messages.at(-1);
   const last = usageOf([lastMessage]);
   const total = usageOf(transcript.messages);
-  // Speed: the last reply's, when it could be timed; a few-token reply after a tool call is noise.
+  // Show each completed reply's request TPS, including short and single-chunk replies.
   const speedMessage = speedReply(messages);
   const timed = speedMessage === lastMessage ? last : usageOf([speedMessage]);
-  // Compare like with like: one provider and model, measured with measured (answer-only and full
-  // generation both time the decoding), estimated and reported token numerators never mixed.
-  const recent = messages.slice(-14).filter(m => m.provider === speedMessage.provider && (m.responseModel ?? m.model) === (speedMessage.responseModel ?? speedMessage.model)
-    && (timed.speedBasis === 'generation' ? timedReply(m) : (m.usage?.output ?? 0) >= 16))
-    .map(m => usageOf([m])).filter(u => u.tps != null && u.speedBasis === timed.speedBasis && u.speedTokensEstimated === timed.speedTokensEstimated).map(u => u.tps);
+  // Compare one provider/model and matching token/timing provenance, all over the full request.
+  const recent = messages.slice(-14).filter(m => m.provider === speedMessage.provider && (m.responseModel ?? m.model) === (speedMessage.responseModel ?? speedMessage.model))
+    .map(m => usageOf([m])).filter(u => u.tps != null && u.speedBasis === timed.speedBasis && u.speedTokensEstimated === timed.speedTokensEstimated && u.speedTimeEstimated === timed.speedTimeEstimated).map(u => u.tps);
   const speed = speedDisplay(timed, { earlier: speedMessage !== lastMessage });
   const tier = speedTier(speedMessage);
   const peak = Math.max(...recent, 1);

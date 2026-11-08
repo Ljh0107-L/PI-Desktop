@@ -244,10 +244,10 @@ try {
   await page.locator('.usage-table').waitFor({ timeout: 15000 });
   const usageText = await page.locator('.usage').innerText();
   check('right panel Usage card shows tok/s and input / cached / output', /tok\/s/.test(usageText) && /Input/.test(usageText) && /Cached/.test(usageText) && /Output/.test(usageText), usageText.replace(/\s+/g, ' '));
-  // This mock reply is too short to measure a generation window: its speed is a marked estimate, not blank.
+  // Even a single-chunk reply has a full request duration, including the first-token wait.
   const shortSpeed = await page.locator('.usage-speed-value b').innerText(), shortKind = await page.locator('.usage-speed-kind').innerText();
-  check('a short reply still shows a generation speed, marked as an estimate', /^~\d/.test(shortSpeed) && shortKind === 'Generation (estimated)', `${shortSpeed} · ${shortKind}`);
-  check('TPS never offers a full-request average', !/Request avg|Stream avg/.test(usageText));
+  check('a short reply shows its own request TPS', /^~\d/.test(shortSpeed) && shortKind === 'Request TPS', `${shortSpeed} · ${shortKind}`);
+  check('TPS includes the first-token wait', /including time to first token/.test(await page.locator('.usage-speed-metric').getAttribute('title')));
   check('nothing under the composer but model controls', !(await page.locator('.session-meter').count()));
   // a model that reasons privately: a "Thought for" row with its reasoning tokens, and an estimated speed
   await waitNew('.markdown', 'echo:', () => send('[[hidden-think]] ponder this'));
@@ -256,12 +256,12 @@ try {
   const tpsAfter = await page.locator('.usage-speed-value b').innerText();
   const hiddenSpeedKind = await page.locator('.usage-speed-kind').innerText();
   check('hidden reasoning shown as "Thought for…", with its speed estimated over the whole response', /^Thought for \d+s[\s\S]*400 tokens$/.test(hiddenRow.trim())
-    && /^~\d/.test(tpsAfter) && hiddenSpeedKind === 'Generation (estimated)', `${hiddenRow.replace(/\s+/g, ' ')} · ${tpsAfter} · ${hiddenSpeedKind}`);
+    && /^~\d/.test(tpsAfter) && hiddenSpeedKind === 'Request TPS', `${hiddenRow.replace(/\s+/g, ' ')} · ${tpsAfter} · ${hiddenSpeedKind}`);
   await S('04b-usage-card');
   await page.locator('.send-button.stop').waitFor({ state: 'detached' });
   const readingSession = (await page.evaluate(() => window.pidesk.invoke('listSessions'))).find(s => s.title.includes('hello from the desktop'));
   await checkReading({ app, page, id: readingSession.id });
-  check('streaming preserves reading state; generation TPS excludes TTFT, first chunks and hidden reasoning', true);
+  check('streaming preserves reading state; request TPS includes TTFT, first chunks and hidden reasoning', true);
   // Manual compaction from the conversation menu leaves a marker with the summary.
   for (const word of ['alpha', 'beta', 'gamma']) await waitNew('.markdown', `echo: ${word} `, () => send(`${word} `.repeat(60)));
   await page.locator('.send-button.stop').waitFor({ state: 'detached', timeout: 30000 });

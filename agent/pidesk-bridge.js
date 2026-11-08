@@ -201,8 +201,8 @@ export function projectlessNote(cwd) {
 // Timing is captured inside Pi before RPC/SSH buffering, then persisted on the final message.
 // Only bounded counters and usage provenance are retained; never raw provider events or credentials.
 export function registerMetrics(pi, clock = () => performance.timeOrigin + performance.now()) {
-  let active = null, pendingThinking = null;
-  const reset = () => { active = null; pendingThinking = null; };
+  let active = null, pendingThinking = null, pendingRequest = null;
+  const reset = () => { active = null; pendingThinking = null; pendingRequest = null; };
   const window = () => ({ first: null, last: null, chars: 0, deltas: 0, weight: 0, firstWeight: 0 });
   const matches = message => active && message?.role === 'assistant' && message.timestamp === active.timestamp &&
     message.provider === active.provider && message.model === active.model && message.api === active.api;
@@ -221,19 +221,27 @@ export function registerMetrics(pi, clock = () => performance.timeOrigin + perfo
     // API and id agree with the serialized request, then consume this enum once at message_start.
     // Normal registry background calls do not inherit the agent's instrumentation hooks. Never
     // keep the payload, messages, headers or a model object (which could contain credentials).
-    pendingThinking = null;
+    pendingThinking = null; pendingRequest = null;
     const model = ctx?.model, payload = event.payload, thinking = payload?.thinking;
-    if (active || model?.api !== 'anthropic-messages' || payload?.model !== model.id ||
+    if (active || !model?.provider || !model.id || (payload?.model != null && payload.model !== model.id)) return;
+    // message_start can follow HTTP response headers. Capture the pre-request boundary separately
+    // so TTFT includes connection/prefill waiting, including providers that emit no text chunks.
+    pendingRequest = { provider: model.provider, model: model.id, api: model.api, start: clock() };
+    if (model.api !== 'anthropic-messages' || payload?.model !== model.id ||
         !['enabled', 'adaptive'].includes(thinking?.type) ||
         !['summarized', 'omitted'].includes(thinking.display)) return;
     pendingThinking = { provider: model.provider, model: model.id, api: model.api, display: thinking.display };
   });
   pi.on('message_start', ({ message }) => {
     if (message?.role !== 'assistant') return;
-    const request = pendingThinking; pendingThinking = null;
+    const request = pendingThinking, timing = pendingRequest;
+    pendingThinking = null; pendingRequest = null;
     active = { timestamp: message.timestamp, provider: message.provider, model: message.model, api: message.api,
       start: clock(), ...window(), answer: window(), answerThinkingBoundary: false,
       thinkingChars: 0, thinkStart: null, thinkEnd: null, provenance: null };
+    if (timing && timing.provider === active.provider && timing.model === active.model && timing.api === active.api) {
+      active.requestStart = timing.start;
+    }
     if (request && request.provider === active.provider && request.model === active.model && request.api === active.api) {
       active.provenance = { provider: active.provider, model: active.model, thinking: 'summary',
         thinkingSource: 'request', thinkingDisplay: request.display };
@@ -272,10 +280,8 @@ export function registerMetrics(pi, clock = () => performance.timeOrigin + perfo
     // Ordinary registry background calls have no agent hooks; the SDK exposes no request id.
     if (!active || event.provider !== active.provider || event.model !== active.model || event.api !== active.api) return;
     const data = event.data;
-    // When the provider began its output, by its own marker: the first output item of an OpenAI
-    // response (a reasoning item, before any hidden reasoning) or the first Anthropic content block.
-    // Every output token comes after it, but so do reading the prompt and summarizing the reasoning,
-    // so the renderer estimates from it only when the answer is too short to time on its own.
+    // Retain the provider's first-output marker for history compatibility. It is not the request
+    // start and is not used as the TPS denominator.
     if (active.genStart == null && ['response.output_item.added', 'content_block_start'].includes(data?.type)) active.genStart = clock();
     const marker = data?.usage?.cursor2api ?? data?.message?.usage?.cursor2api ?? data?.response?.usage?.cursor2api;
     const cursor = marker && ['upstream', 'estimated'].includes(marker.source);
@@ -299,6 +305,7 @@ export function registerMetrics(pi, clock = () => performance.timeOrigin + perfo
     return { message: { ...message,
       ...(t.provenance ? { __usageProvenance: t.provenance } : {}),
       __timing: { source: 'agent', complete: true, start: t.start, first: t.first, last: t.last, end,
+        ...(t.requestStart != null ? { requestStart: t.requestStart } : {}),
         ...(t.genStart != null ? { genStart: t.genStart } : {}),
         chars: t.chars, deltas: t.deltas, weight: t.weight, firstWeight: t.firstWeight,
         answer: { ...t.answer }, thinkingChars: t.thinkingChars,

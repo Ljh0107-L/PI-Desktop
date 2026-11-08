@@ -55,7 +55,7 @@ export async function checkReading({ app, page, id }) {
     step('API call ends');
     await send([{ type: 'message_end', message: assistant }]);
     assert.match(await page.locator('.usage-speed-value b').innerText(), /^~\d/, 'receipt-only completion still shows a speed');
-    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Generation (estimated)', 'receipt-only timing is an estimate, not a measurement');
+    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Request TPS', 'stored request duration takes precedence over receipt timing');
     assert.equal(await row.evaluate(el => el === window.__readingRow), true, 'final reasoning must not remount the tool row');
     assert.equal(await row.locator('.tool-call-head').getAttribute('aria-expanded'), 'true');
     assert.equal(await row.locator('.tool-output').evaluate(el => el.scrollTop), 72);
@@ -80,12 +80,12 @@ export async function checkReading({ app, page, id }) {
     assert.equal(await row.locator('.tool-call-head').getAttribute('aria-expanded'), 'true');
     assert.equal(await row.locator('.tool-output').evaluate(el => el.scrollTop), 72);
     assert.ok(Math.abs(await page.locator('.transcript').evaluate(el => el.scrollTop) - before) < 2, 'streaming must not drag the transcript to the bottom');
-    const sourceTiming = { source: 'agent', complete: true, start: stamp, first: stamp + 500, last: stamp + 1500, end: stamp + 2000,
+    const sourceTiming = { source: 'agent', complete: true, requestStart: stamp, start: stamp + 400, first: stamp + 500, last: stamp + 1500, end: stamp + 2000,
       chars: answer.length + 'Checking another detail.'.length, thinkingChars: 'Checking another detail.'.length, deltas: 3, weight: 100, firstWeight: 10 };
     await send([{ type: 'message_end', message: { ...next, __timing: sourceTiming, content: [{ type: 'thinking', thinking: 'Checking another detail.' }, { type: 'text', text: answer }] } }]);
     assert.equal(await pill.evaluate(el => el === window.__changesPill), true, 'changes pill must not disappear/reappear at API call boundaries');
-    assert.equal(await page.locator('.usage-speed-value b').innerText(), '~180', 'generation TPS excludes TTFT and the first chunk’s 10% of output');
-    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Generation');
+    assert.equal(await page.locator('.usage-speed-value b').innerText(), '~100', 'request TPS includes TTFT, trailers and the first chunk');
+    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Request TPS');
     step('jump to latest');
     await page.getByRole('button', { name: 'Jump to latest' }).click();
     assert.ok(await page.locator('.transcript').evaluate(el => el.scrollHeight - el.scrollTop - el.clientHeight < 2));
@@ -100,28 +100,28 @@ export async function checkReading({ app, page, id }) {
     await send([{ type: 'message_update', assistantMessageEvent: { type: 'toolcall_end', contentIndex: 1, toolCall: { ...call, id: 'second-reading-call' } } }]);
     assert.equal(await page.locator('.work-body .step-markdown', { hasText: 'A thought to inspect' }).count(), 1);
     await send([{ type: 'message_end', message: { ...thinking, content: [{ type: 'text', text: 'Untimed history' }], usage: { output: 10 } } }]);
-    // A 10-token reply can't be timed: the card keeps the model's last measured generation, and says so.
-    assert.equal(await page.locator('.usage-speed-value b').innerText(), '~180', 'a too-short reply shows the earlier measured speed');
-    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Generation');
+    // Receipt timing without a source start or stored duration cannot establish request TPS.
+    assert.equal(await page.locator('.usage-speed-value b').innerText(), '~100', 'missing request timing shows the earlier usable speed');
+    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Request TPS');
     assert.match(await page.locator('.usage-speed-metric').getAttribute('title'), /From an earlier reply of this model/);
 
-    step('hidden reasoning uses answer-only generation');
+    step('hidden reasoning remains in full-request TPS');
     const answerWindow = { first: stamp + 4000, last: stamp + 5000, chars: 400, deltas: 3, weight: 100, firstWeight: 10 };
     const hiddenAnswer = { role: 'assistant', timestamp: stamp + 4, content: [{ type: 'text', text: 'Answer. '.repeat(50) }],
       usage: { output: 500, reasoning: 400 }, durationMs: 6000,
       __timing: { source: 'agent', complete: true, start: stamp, end: stamp + 6000, thinkingChars: 0, ...answerWindow, answer: answerWindow } };
     await send([{ type: 'message_end', message: hiddenAnswer }]);
-    assert.equal(await page.locator('.usage-speed-value b').innerText(), '~90.0', 'answer TPS uses (500 − 400) × 90%, not all 500 billed output tokens');
-    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Answer generation');
+    assert.equal(await page.locator('.usage-speed-value b').innerText(), '~83.3', 'all 500 output tokens, including reasoning, over the six-second request');
+    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Request TPS');
 
-    step('a reply with incomplete timing yields to the measured one before it');
+    step('missing chunk weights do not prevent timing a short reply');
     await send([{ type: 'message_end', message: { ...hiddenAnswer, timestamp: stamp + 5,
+      usage: { output: 10 }, durationMs: 2000,
       __timing: { ...hiddenAnswer.__timing, answer: { ...answerWindow, firstWeight: undefined } } } }]);
-    // Its own speed would only be estimated (500 tokens ÷ the 6 s response): the card keeps the measured one.
-    assert.equal(await page.locator('.usage-speed-value b').innerText(), '~90.0', 'the measured answer generation of the reply before');
-    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Answer generation');
-    assert.match(await page.locator('.usage-speed-metric').getAttribute('title'), /From an earlier reply of this model/);
-    assert.equal(await page.locator('.usage').getByText('Request avg', { exact: true }).count(), 0);
+    assert.equal(await page.locator('.usage-speed-value b').innerText(), '~5.0', 'the latest short reply has its own request TPS');
+    assert.equal(await page.locator('.usage-speed-kind').innerText(), 'Request TPS');
+    assert.doesNotMatch(await page.locator('.usage-speed-metric').getAttribute('title'), /From an earlier reply/);
+    assert.match(await page.locator('.usage-speed-metric').getAttribute('title'), /including time to first token/);
 
     step('LaTeX math renders with its fonts');
     await send([{ type: 'message_end', message: { role: 'assistant', timestamp: stamp + 6, usage: { output: 20 }, durationMs: 1000,

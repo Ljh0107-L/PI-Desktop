@@ -4,41 +4,39 @@ import { applyEvent, collapseWork, displayBlocks, emptyTranscript, fromHistory, 
 
 const message = { role: 'assistant', timestamp: 1000, content: [], usage: { input: 10000, cacheRead: 30000, output: 600, reasoning: 400 }, durationMs: 6000 };
 const deliveredInBurst = { start: 100000, first: 100001, last: 100061, end: 100062, est: 600, chars: 2400 };
-// A relay replaying a buffered reply in 60 ms: estimated over Pi's whole request duration, never the burst.
+// A relay replaying a buffered reply in 60 ms: use the whole request duration, never the burst.
 assert.equal(usageOf([{ ...message, __timing: deliveredInBurst }]).tps, 100);
-assert.equal(usageOf([{ ...message, __timing: deliveredInBurst }]).speedBasis, 'response');
+assert.equal(usageOf([{ ...message, __timing: deliveredInBurst }]).speedBasis, 'request');
 assert.equal(usageOf(fromHistory([message], { 1000: deliveredInBurst }).messages).tps, 100);
 for (const [ms, tps] of [[500, 1200], [6000, 100]]) {
   const u = usageOf([{ ...message, durationMs: ms }]);
-  assert.equal(u.tps, tps); assert.equal(u.speedBasis, 'response');
-  assert.equal(speedDisplay(u).label, 'Generation (estimated)');
+  assert.equal(u.tps, tps); assert.equal(u.speedBasis, 'request');
+  assert.equal(speedDisplay(u).label, 'Request TPS');
 }
 for (const ms of [undefined, null, 0, -10, NaN, Infinity, '6000']) {
   const u = usageOf([{ ...message, durationMs: ms }]);
-  assert.equal(u.tps, null, 'no timing at all: nothing to estimate from');
+  assert.equal(u.tps, null, 'no request timing: nothing to calculate from');
   assert.equal(speedDisplay(u).label, 'Speed unavailable');
 }
 for (const output of [undefined, 0, -1, Infinity, NaN]) {
   assert.equal(usageOf([{ ...message, usage: { output } }]).tps, null);
 }
-assert.equal(usageOf([message, { ...message, usage: { output: 400 }, durationMs: 2000 }]).tps, 125, 'estimates sum tokens and time, never average speeds');
+assert.equal(usageOf([message, { ...message, usage: { output: 400 }, durationMs: 2000 }]).tps, 125, 'sum tokens and request durations, never average speeds');
 const generated = { ...message, usage: { output: 200 }, content: [{ type: 'text', text: 'x'.repeat(400) }] };
-const sourceTiming = { source: 'agent', complete: true, start: 0, first: 1000, last: 2000, end: 2100, chars: 400, deltas: 3, weight: 100, firstWeight: 10, thinkingChars: 0 };
+const sourceTiming = { source: 'agent', complete: true, requestStart: 0, start: 900, first: 1000, last: 2000, end: 2500, chars: 400, deltas: 3, weight: 100, firstWeight: 10, thinkingChars: 0 };
 const generatedUsage = usageOf([{ ...generated, __timing: sourceTiming }]);
-assert.equal(generatedUsage.tps, 180, 'exclude TTFT and the first chunk from the generation sample');
-assert.equal(generatedUsage.output, 200, 'generation sampling never changes provider usage');
-assert.equal(generatedUsage.genMs, 1000);
-assert.equal(generatedUsage.genOut, 180);
-assert.equal(generatedUsage.speedBasis, 'generation');
-assert.equal(generatedUsage.speedScope, 'all');
-assert.equal(speedDisplay(generatedUsage).label, 'Generation');
-assert.equal(usageOf(fromHistory([generated], { 1000: sourceTiming }).messages).tps, 180, 'persisted source timing retains the generation sample');
-// A buffered relay replay is not a generation window: estimated over the API duration instead.
+assert.equal(generatedUsage.tps, 80, 'include pre-header wait, TTFT, first chunk and trailers');
+assert.equal(generatedUsage.output, 200, 'TPS never changes provider usage');
+assert.equal(generatedUsage.genMs, 2500);
+assert.equal(generatedUsage.genOut, 200);
+assert.equal(generatedUsage.speedBasis, 'request');
+assert.equal(speedDisplay(generatedUsage).label, 'Request TPS');
+assert.equal(usageOf(fromHistory([generated], { 1000: sourceTiming }).messages).tps, 80);
 let t = applyEvent(emptyTranscript(), { type: 'message_start', message });
 t = applyEvent(t, { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'buffered output' } });
 t = applyEvent(t, { type: 'message_end', message });
 assert.equal(usageOf(t.messages).tps, 100);
-assert.equal(usageOf(t.messages).speedBasis, 'response');
+assert.equal(usageOf(t.messages).speedBasis, 'request');
 
 const tools = { kind: 'tools', key: 'g1', calls: [{ type: 'toolCall', id: 'a', name: 'bash', arguments: {} }] };
 const thought = { kind: 'thinking', key: 'h1', hidden: true };
@@ -58,50 +56,22 @@ assert.equal(streamingFooter.key, footer.key);
 assert.equal(displayBlocks({ ...editing, messages: [...editing.messages, { ...user, timestamp: 3000 }] }).find(b => b.kind === 'usage').key, footer.key, 'new user prompt must not remount the old footer');
 assert.equal(usageOf([{ ...message, usage: { output: 12, reasoning: 0 } }]).reasoningReported, true, 'reported zero differs from missing reasoning');
 assert.equal(usageOf([{ ...message, usage: { output: 12 } }]).reasoningReported, false);
-console.log('PASS  transcript regressions: generation TPS with marked estimates, replay, missing timing, stable groups/footers, reasoning');
+console.log('PASS  transcript regressions: request TPS includes TTFT, replay, missing timing, stable groups/footers, reasoning');
 
-// Character heuristics cannot establish that a positive provider count is wrong. Keep reported
-// counts authoritative; without source timing the speed is a marked estimate from the reply.
+// Character heuristics cannot replace a positive provider count, even for compressible text.
 const longGreeting = { ...message, timestamp: 5000, durationMs: 5886, usage: { output: 16 }, content: [{ type: 'text', text: 'x'.repeat(662) }] };
 const reportedSpeed = usageOf([longGreeting]);
-assert.equal(reportedSpeed.speedEstimated, true);
-assert.equal(reportedSpeed.output, 16);
-assert.equal(reportedSpeed.genOut, 16);
-assert.equal(reportedSpeed.speedBasis, 'response');
+assert.equal(reportedSpeed.speedTokensEstimated, false);
+assert.equal(reportedSpeed.output, 16); assert.equal(reportedSpeed.genOut, 16);
 assert.ok(Math.abs(reportedSpeed.tps - 16 / 5.886) < 1e-9);
-// Receipt timestamps are not source timing, but their output window still yields a marked estimate.
 const receiptTiming = { start: 0, first: 1000, last: 3190, end: 3300, chars: 662, est: 185 };
-const receiptWindow = usageOf([{ ...longGreeting, __timing: receiptTiming }]);
-assert.ok(Math.abs(receiptWindow.tps - 16 / 2.19) < 1e-9);
-assert.equal(receiptWindow.speedBasis, 'window');
-const fast = { ...message, timestamp: 6000, durationMs: 1799, usage: { output: 1009 }, content: [{ type: 'text', text: 'x'.repeat(4000) }] };
-const qwenTiming = { source: 'relay', complete: true, deltas: 3, start: 0, first: 1000, last: 1566, end: 1799, chars: 4000, thinkingChars: 0, weight: 1000, firstWeight: 100 };
-const fastSpeed = usageOf([{ ...fast, __timing: qwenTiming }]);
-assert.equal(fastSpeed.speedEstimated, true, 'first→last chunk timing is approximate even with reported usage');
-assert.equal(fastSpeed.speedTokensEstimated, false);
-assert.equal(fastSpeed.speedBasis, 'generation');
-assert.equal(Math.round(fastSpeed.tps), 1604, 'source-observed throughput subtracts the first chunk, without clamping high TPS');
-const burstSpeed = usageOf([{ ...fast, __timing: { ...qwenTiming, last: 1060, end: 1100 } }]);
-assert.ok(Math.abs(burstSpeed.tps - 1009 / 1.799) < 1e-9, 'a dense burst is estimated over the whole response, not its 60 ms window');
-assert.equal(burstSpeed.speedBasis, 'response');
-assert.equal(speedDisplay(burstSpeed).label, 'Generation (estimated)');
-for (const patch of [{ weight: undefined }, { firstWeight: undefined }]) {
-  const older = usageOf([{ ...generated, __timing: { ...sourceTiming, ...patch } }]);
-  assert.ok(Math.abs(older.tps - 200 * 2 / 3) < 1e-9, 'older source timing: the first of three chunks is excluded');
-  assert.equal(older.speedBasis, 'window');
-}
-const hidden = { ...message, timestamp: 7000, durationMs: 6000, usage: { output: 500, reasoning: 400 }, content: [{ type: 'text', text: 'x'.repeat(400) }] };
-assert.ok(Math.abs(usageOf([{ ...hidden, __timing: sourceTiming }]).tps - 500 / 6) < 1e-9, 'hidden reasoning without an answer window: the whole response covers it');
-const answerTiming = { first: 1000, last: 2000, chars: 400, deltas: 3, weight: 100, firstWeight: 10 };
-const answerUsage = usageOf([{ ...hidden, __timing: { ...sourceTiming, answer: answerTiming } }]);
-assert.equal(answerUsage.tps, 90, 'subtract hidden reasoning before applying the first-answer-chunk correction');
-assert.equal(answerUsage.genOut, 90);
-assert.equal(answerUsage.output, 500);
-assert.equal(answerUsage.reasoning, 400);
-assert.equal(answerUsage.speedScope, 'answer');
-assert.equal(speedDisplay(answerUsage).label, 'Answer generation');
-assert.ok(Math.abs(usageOf([{ ...hidden, __timing: { ...sourceTiming, answer: { ...answerTiming, firstWeight: undefined } } }]).tps - 500 / 6) < 1e-9);
-console.log('PASS  transcript speed provenance: authoritative counts, generation samples, first-chunk correction, hidden-answer scope, marked estimates');
+assert.equal(usageOf([{ ...longGreeting, __timing: receiptTiming }]).tps, reportedSpeed.tps, 'receipt windows do not override request duration');
+const hidden = { ...message, timestamp: 7000, usage: { output: 500, reasoning: 400 }, content: [{ type: 'text', text: 'x'.repeat(400) }] };
+const hiddenUsage = usageOf([{ ...hidden, __timing: { ...sourceTiming, answer: { first: 1000, last: 2000, chars: 400, deltas: 3, weight: 100, firstWeight: 10 } } }]);
+assert.equal(hiddenUsage.tps, 200); assert.equal(hiddenUsage.genOut, 500);
+assert.equal(hiddenUsage.output, 500); assert.equal(hiddenUsage.reasoning, 400);
+assert.equal(hiddenUsage.speedScope, 'all'); assert.equal(speedDisplay(hiddenUsage).label, 'Request TPS');
+console.log('PASS  request speed provenance: authoritative counts, hidden reasoning included once, no receipt-window substitute');
 
 // A user stop can arrive as an ordinary error message; it must not look like a provider failure.
 for (const text of ['This operation was aborted', 'Request was aborted', 'AbortError: The operation was aborted', 'Error: request was aborted']) {
@@ -116,12 +86,9 @@ const failed = { ...message, timestamp: 9000, stopReason: 'error', errorMessage:
 assert.equal(displayBlocks({ ...emptyTranscript(), loaded: true, messages: [{ role: 'user', content: 'do work', timestamp: 8500 }, failed] }).some(b => b.kind === 'error'), true, 'real failures stay errors');
 console.log('PASS  aborted turns render as interruption notices, not errors');
 
-// Tool arguments count for the generation window, but a large write body must not
-// be mistaken for a low reported token count and inflate the estimated speed.
-const writeCall = { ...message, timestamp: 10000, usage: { output: 100 }, content: [{ type: 'toolCall', name: 'write', arguments: { path: 'a.txt', content: 'x'.repeat(10000) } }], __timing: { source: 'agent', complete: true, start: 0, first: 1000, last: 2000, end: 2100, chars: 10000, deltas: 3, weight: 2500, firstWeight: 250 } };
+// Tool arguments count as model output, but tool execution time does not count as request time.
+const writeCall = { ...message, timestamp: 10000, usage: { output: 100 }, content: [{ type: 'toolCall', name: 'write', arguments: { path: 'a.txt', content: 'x'.repeat(10000) } }], __timing: sourceTiming };
 const writeUsage = usageOf([writeCall]);
-assert.equal(writeUsage.speedTokensEstimated, false, 'large tool arguments do not replace a plausible reported output');
-assert.equal(writeUsage.output, 100);
-assert.equal(writeUsage.genOut, 90);
-assert.equal(writeUsage.tps, 90);
-console.log('PASS  tool-call TPS: arguments cover the window without inflating reported output');
+assert.equal(writeUsage.speedTokensEstimated, false);
+assert.equal(writeUsage.output, 100); assert.equal(writeUsage.genOut, 100); assert.equal(writeUsage.tps, 40);
+console.log('PASS  tool-call TPS: complete request output without inflating reported counts');

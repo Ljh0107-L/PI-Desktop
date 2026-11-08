@@ -30,7 +30,7 @@ const frozen = value => {
   return value;
 };
 
-test('agent timing excludes the first chunk and persists bounded root and answer counters', () => {
+test('agent timing retains bounded chunk counters while request TPS includes all output', () => {
   const f = fixture(), message = frozen(msg());
   f.emit('turn_start'); f.emit('message_start', { message });
   for (const event of [{ type: 'text_delta', delta: '' }, { type: 'text_start', delta: 'not output' },
@@ -45,15 +45,15 @@ test('agent timing excludes the first chunk and persists bounded root and answer
     answer: { first: 1000, last: 2000, chars: 400, deltas: 2, weight: 100, firstWeight: 50 },
     thinkingChars: 0, think: null });
   const usage = usageOf([result]);
-  assert.equal(usage.tps, 50); assert.equal(usage.genOut, 50); assert.equal(usage.output, 100);
-  assert.equal(usage.genMs, 1000); assert.equal(usage.speedBasis, 'generation');
+  assert.equal(usage.tps, 100 / 3); assert.equal(usage.genOut, 100); assert.equal(usage.output, 100);
+  assert.equal(usage.genMs, 3000); assert.equal(usage.speedBasis, 'request');
   assert.equal(usage.speedScope, 'all'); assert.equal(usage.speedEstimated, true);
-  assert.equal(speedDisplay(usage).label, 'Generation');
+  assert.equal(speedDisplay(usage).label, 'Request TPS');
   assert.equal(message.__timing, undefined, 'do not mutate input messages');
   assert.equal(f.emit('message_end', { message }), undefined, 'no duplicate or previous-call timing');
 });
 
-test('generation TPS is invariant under huge TTFT and delayed usage/end trailers', () => {
+test('request TPS includes huge TTFT and delayed usage/end trailers', () => {
   for (const ttft of [1000, 600000]) {
     for (const trailer of [100, 600000]) {
       const f = fixture(), message = { ...msg(), durationMs: ttft + 1000 + trailer };
@@ -64,13 +64,13 @@ test('generation TPS is invariant under huge TTFT and delayed usage/end trailers
       raw(f, message, { type: 'response.completed', response: { usage: { output_tokens: 100 } } });
       const result = finish(f, message, ttft + 1000 + trailer), usage = usageOf([result]);
       assert.equal(result.__timing.first, ttft); assert.equal(result.__timing.last, ttft + 1000);
-      assert.equal(usage.tps, 50); assert.equal(usage.genOut, 50); assert.equal(usage.genMs, 1000);
+      assert.equal(usage.tps, 100 / (message.durationMs / 1000)); assert.equal(usage.genOut, 100); assert.equal(usage.genMs, message.durationMs);
       assert.equal(usage.output, 100);
     }
   }
 });
 
-test('all coalesced first-timestamp deltas are removed from the TPS numerator', () => {
+test('coalesced first-timestamp deltas stay in the request TPS numerator', () => {
   const f = fixture(), message = msg();
   f.emit('message_start', { message });
   delta(f, message, 1000, 'x'.repeat(100));
@@ -79,7 +79,7 @@ test('all coalesced first-timestamp deltas are removed from the TPS numerator', 
   const result = finish(f, message, 2100);
   assert.equal(result.__timing.deltas, 3); assert.equal(result.__timing.firstWeight, 50);
   assert.equal(result.__timing.answer.firstWeight, 50);
-  assert.equal(usageOf([result]).tps, 50); assert.equal(usageOf([result]).genOut, 50);
+  assert.equal(usageOf([result]).tps, 100 / 3); assert.equal(usageOf([result]).genOut, 100);
 });
 
 test('weighting matches renderer CJK estimates without keeping generated content', () => {
@@ -93,8 +93,8 @@ test('weighting matches renderer CJK estimates without keeping generated content
   assert.equal(result.__timing.weight, estimateTokens(first + last));
   assert.equal(result.__timing.firstWeight, estimateTokens(first));
   assert.equal(result.__timing.answer.weight, result.__timing.weight);
-  assert.ok(Math.abs(usageOf([result]).genOut - estimateTokens(last)) < 1e-9);
-  assert.ok(Math.abs(usageOf([result]).tps - estimateTokens(last)) < 1e-9);
+  assert.ok(Math.abs(usageOf([result]).genOut - estimateTokens(first + last)) < 1e-9);
+  assert.ok(Math.abs(usageOf([result]).tps - estimateTokens(first + last) / 3) < 1e-9);
   assert.ok(!JSON.stringify(result.__timing).includes(first));
 });
 
@@ -112,9 +112,9 @@ test('raw Cursor provenance survives normalization without input mutation or raw
     assert.equal(JSON.stringify(data), before); assert.equal(message.__usageProvenance, undefined);
     assert.ok(!JSON.stringify(result).includes('do not persist'));
     const totals = usageOf([result]);
-    assert.equal(totals.output, 100); assert.equal(totals.speedBasis, 'response', 'summarized reasoning: only a whole-response estimate');
+    assert.equal(totals.output, 100); assert.equal(totals.speedBasis, 'request', 'summaries do not change the full-request scope');
     assert.equal(totals.usageEstimated, true); assert.equal(totals.cacheHit, null); assert.equal(totals.cacheUnknown, true);
-    assert.equal(speedDisplay(totals).label, 'Generation (estimated)');
+    assert.equal(speedDisplay(totals).label, 'Request TPS (estimated)');
     f.emit('turn_start'); f.emit('message_start', { message });
     assert.equal(f.emit('message_end', { message }).message.__usageProvenance, undefined);
   }
@@ -138,7 +138,7 @@ test('OpenAI Responses summary events identify summary reasoning without a Curso
   }
 });
 
-test('native Anthropic summarized or omitted thinking uses answer TPS even for long answers and missing counts', () => {
+test('native Anthropic summarized or omitted thinking keeps reported full-request output', () => {
   for (const display of ['summarized', 'omitted']) {
     for (const reasoning of [80, undefined]) {
       const f = fixture(), message = frozen({ ...nativeAnthropic(), durationMs: 600000,
@@ -157,10 +157,10 @@ test('native Anthropic summarized or omitted thinking uses answer TPS even for l
       assert.deepEqual(result.__usageProvenance, { provider: message.provider, model: message.model,
         thinking: 'summary', thinkingSource: 'request', thinkingDisplay: display });
       assert.equal(result.__timing.answer.interrupted, undefined);
-      assert.equal(usage.speedScope, 'answer'); assert.equal(usage.genMs, 1000);
-      assert.equal(usage.genOut, 500); assert.equal(usage.tps, 500);
+      assert.equal(usage.speedScope, 'all'); assert.equal(usage.genMs, 600000);
+      assert.equal(usage.genOut, message.usage.output); assert.equal(usage.tps, message.usage.output / 600);
       assert.equal(usage.output, message.usage.output); assert.equal(usage.reasoning, reasoning ?? 0);
-      assert.equal(usage.speedTokensEstimated, reasoning === undefined);
+      assert.equal(usage.speedTokensEstimated, false);
       assert.equal(message.__usageProvenance, undefined);
     }
   }
@@ -248,7 +248,7 @@ test('raw Anthropic thinking conservatively marks unavailable request provenance
     thinking: 'summary', thinkingSource: 'request', thinkingDisplay: 'summarized', source: 'estimated', cache: 'unknown' });
 });
 
-test('native Anthropic raw thinking without request metadata still excludes unreported reasoning work', () => {
+test('native Anthropic raw thinking without request metadata retains all reported output', () => {
   const f = fixture(), message = { ...nativeAnthropic(), durationMs: 600000, content: [
     { type: 'thinking', thinking: 'x'.repeat(320) }, { type: 'text', text: 'x'.repeat(4000) },
   ], usage: { output: 1800 } };
@@ -259,8 +259,8 @@ test('native Anthropic raw thinking without request metadata still excludes unre
   const result = finish(f, message, 600000), usage = usageOf([result]);
   assert.deepEqual(result.__usageProvenance, { provider: message.provider, model: message.model,
     thinking: 'summary', thinkingSource: 'anthropic-block' });
-  assert.equal(usage.speedScope, 'answer'); assert.equal(usage.speedTokensEstimated, true);
-  assert.equal(usage.tps, 500); assert.equal(usage.genMs, 1000); assert.equal(usage.output, 1800);
+  assert.equal(usage.speedScope, 'all'); assert.equal(usage.speedTokensEstimated, false);
+  assert.equal(usage.tps, 3); assert.equal(usage.genMs, 600000); assert.equal(usage.output, 1800);
 });
 
 test('raw Anthropic fallback requires a matching API and a thinking block', () => {
@@ -285,7 +285,7 @@ test('summary detection preserves Cursor source/cache markers in either event or
   }
 });
 
-test('summary, hidden and redacted reasoning use the answer-only generation window', () => {
+test('summary, hidden and redacted reasoning share the complete request duration', () => {
   for (const kind of ['summary', 'hidden', 'redacted']) {
     const f = fixture(), message = { ...msg(), durationMs: 11100,
       content: [
@@ -307,10 +307,10 @@ test('summary, hidden and redacted reasoning use the answer-only generation wind
       assert.equal(result.__timing.weight, 100); assert.equal(result.__timing.firstWeight, 40);
       assert.equal(result.__timing.thinkingChars, 320); assert.equal(result.__timing.think, 9000);
     }
-    assert.equal(usage.tps, 10); assert.equal(usage.genOut, 10); assert.equal(usage.genMs, 1000);
+    assert.equal(usage.tps, 100 / 11.1); assert.equal(usage.genOut, 100); assert.equal(usage.genMs, 11100);
     assert.equal(usage.output, 100); assert.equal(usage.reasoning, 80);
-    assert.equal(usage.speedBasis, 'generation'); assert.equal(usage.speedScope, 'answer');
-    assert.equal(speedDisplay(usage).label, 'Answer generation');
+    assert.equal(usage.speedBasis, 'request'); assert.equal(usage.speedScope, 'all');
+    assert.equal(speedDisplay(usage).label, 'Request TPS');
   }
 });
 
@@ -324,12 +324,12 @@ test('fully streamed reasoning uses the root window and includes reasoning only 
   delta(f, message, 10000, 'x'.repeat(40)); delta(f, message, 11000, 'x'.repeat(40));
   const result = finish(f, message, 11100), usage = usageOf([result]);
   assert.equal(result.__usageProvenance, undefined);
-  assert.equal(usage.speedScope, 'all'); assert.equal(usage.genMs, 10000);
-  assert.equal(usage.genOut, 60); assert.equal(usage.tps, 6);
+  assert.equal(usage.speedScope, 'all'); assert.equal(usage.genMs, 11100);
+  assert.equal(usage.genOut, 100); assert.equal(usage.tps, 100 / 11.1);
   assert.equal(usage.output, 100); assert.equal(usage.reasoning, 80);
 });
 
-test('summary reasoning with unknown reasoning usage estimates answer tokens, not hidden work', () => {
+test('summary reasoning with unknown reasoning usage keeps the reported output total', () => {
   const f = fixture(), message = { ...msg(), content: [
     { type: 'thinking', thinking: 'x'.repeat(320) }, { type: 'text', text: 'x'.repeat(80) },
   ], usage: { output: 100 } };
@@ -338,11 +338,11 @@ test('summary reasoning with unknown reasoning usage estimates answer tokens, no
   delta(f, message, 1000, 'x'.repeat(320), 'thinking_delta');
   delta(f, message, 2000, 'x'.repeat(40)); delta(f, message, 3000, 'x'.repeat(40));
   const usage = usageOf([finish(f, message, 3100)]);
-  assert.equal(usage.tps, 10); assert.equal(usage.genOut, 10); assert.equal(usage.output, 100);
-  assert.equal(usage.speedScope, 'answer'); assert.equal(usage.speedTokensEstimated, true);
+  assert.equal(usage.tps, 100 / 3); assert.equal(usage.genOut, 100); assert.equal(usage.output, 100);
+  assert.equal(usage.speedScope, 'all'); assert.equal(usage.speedTokensEstimated, false);
 });
 
-test('answer output resumed after summarized or redacted thinking has no measured TPS', () => {
+test('answer output resumed after summarized or redacted thinking retains full request TPS', () => {
   for (const kind of ['summary', 'native-summary', 'redacted']) {
     for (const resumedType of ['text_delta', 'toolcall_delta']) {
       const f = fixture(), message = { ...(kind === 'native-summary' ? nativeAnthropic() : msg()), durationMs: 600000, content: [
@@ -366,12 +366,11 @@ test('answer output resumed after summarized or redacted thinking has no measure
       assert.equal(result.__timing.answer.interrupted, true);
       assert.equal(result.__timing.answer.last - result.__timing.answer.first, 200000);
       assert.equal(result.__timing.interrupted, undefined, 'the root stream is not an answer-only sample');
-      // An interrupted answer window is never measured. The speed is an estimate: from Anthropic's
-      // content block, which marked when output began, else over the whole response.
-      const basis = kind === 'native-summary' ? 'start' : 'response';
-      assert.equal(usage.speedBasis, basis); assert.equal(usage.genMs, kind === 'native-summary' ? 200000 : 600000);
+      // Interleaved reasoning does not change the full-request denominator.
+      const basis = 'request';
+      assert.equal(usage.speedBasis, basis); assert.equal(usage.genMs, 600000);
       assert.equal(usage.output, 180); assert.equal(usage.reasoning, 80);
-      assert.equal(speedDisplay(usage).label, 'Generation (estimated)');
+      assert.equal(speedDisplay(usage).label, 'Request TPS');
       const persisted = JSON.parse(JSON.stringify(result));
       assert.equal(persisted.__timing.answer.interrupted, true);
       assert.equal(usageOf(fromHistory([persisted]).messages).speedBasis, basis);
@@ -401,8 +400,8 @@ test('thinking before the answer or after its last delta does not interrupt the 
       f.emit('message_update', { message, assistantMessageEvent: { type: 'text_end', content: 'not a delta' } });
       const result = finish(f, message, 600000), usage = usageOf([result]);
       assert.equal(result.__timing.answer.interrupted, undefined, 'omit false to preserve stored window shape');
-      assert.equal(usage.speedScope, 'answer'); assert.equal(usage.genMs, 1000);
-      assert.equal(usage.genOut, 50); assert.equal(usage.tps, 50);
+      assert.equal(usage.speedScope, 'all'); assert.equal(usage.genMs, 600000);
+      assert.equal(usage.genOut, 180); assert.equal(usage.tps, 0.3);
     }
   }
 });
@@ -419,7 +418,7 @@ test('interleaved fully streamed reasoning can still use the uninterrupted root 
   const result = finish(f, message, 600000), usage = usageOf([result]);
   assert.equal(result.__timing.answer.interrupted, true); assert.equal(result.__timing.interrupted, undefined);
   assert.equal(result.__usageProvenance, undefined); assert.equal(usage.speedScope, 'all');
-  assert.equal(usage.genMs, 200000); assert.equal(usage.genOut, 130); assert.equal(usage.tps, 0.65);
+  assert.equal(usage.genMs, 600000); assert.equal(usage.genOut, 180); assert.equal(usage.tps, 0.3);
 });
 
 test('text and tool argument deltas share an answer window; thinking stays in the root only', () => {
@@ -449,7 +448,7 @@ test('source timing and provenance survive JSON history and delayed relay replay
     assert.deepEqual(messages[0].__timing, result.__timing);
     assert.deepEqual(messages[0].__usageProvenance, result.__usageProvenance);
     assert.deepEqual(usageOf(messages), usageOf([result]));
-    assert.equal(usageOf(messages).tps, 50);
+    assert.equal(usageOf(messages).tps, 100 / 3);
   }
 });
 
@@ -496,8 +495,48 @@ test('turn/session resets and replacing an unfinished call discard all counters 
     assert.equal(result.__usageProvenance, undefined); assert.equal(result.__timing.chars, 0);
     assert.equal(result.__timing.weight, 0); assert.equal(result.__timing.firstWeight, 0);
     assert.deepEqual(result.__timing.answer, { first: null, last: null, chars: 0, deltas: 0, weight: 0, firstWeight: 0 });
-    assert.equal(usageOf([result]).speedBasis, 'response', 'no measured window survives the reset');
+    assert.equal(usageOf([result]).speedBasis, 'request', 'only the per-call duration survives the reset');
   }
+});
+
+test('pre-request timing includes delayed HTTP headers and isolates tool gaps and later calls', () => {
+  const f = fixture(), first = { ...msg(), api: 'openai-responses', durationMs: undefined };
+  f.emit('turn_start'); request(f, first);
+  f.time(5000); f.emit('message_start', { message: first });
+  delta(f, first, 5100, 'x'.repeat(400));
+  const done = finish(f, first, 6000);
+  assert.equal(done.__timing.requestStart, 0); assert.equal(done.__timing.start, 5000);
+  assert.equal(usageOf([done]).genMs, 6000); assert.equal(usageOf([done]).tps, 100 / 6);
+  assert.equal(usageOf(fromHistory([JSON.parse(JSON.stringify(done))]).messages).tps, 100 / 6);
+  f.time(600000); f.emit('turn_start'); // a long tool execution is outside both requests
+  const second = { ...first, timestamp: 600000 };
+  request(f, second); f.time(601000); f.emit('message_start', { message: second });
+  const next = finish(f, second, 602000); // no deltas, e.g. a single finalized tool-call result
+  assert.equal(next.__timing.requestStart, 600000);
+  assert.equal(usageOf([done, next]).genMs, 8000); assert.equal(usageOf([done, next]).tps, 25);
+});
+
+test('request timing is consumed once and discarded at identity and lifecycle boundaries', () => {
+  for (const boundary of ['turn_start', 'session_start', 'session_shutdown']) {
+    const f = fixture(), message = nativeAnthropic();
+    request(f, message); f.emit(boundary); f.emit('message_start', { message });
+    assert.equal(finish(f, message, 3000).__timing.requestStart, undefined);
+  }
+  for (const patch of [{ provider: 'other' }, { model: 'other' }, { api: 'openai-responses' }]) {
+    const f = fixture(), message = nativeAnthropic(), other = { ...message, ...patch };
+    request(f, message); f.emit('message_start', { message: other });
+    assert.equal(finish(f, other, 3000).__timing.requestStart, undefined);
+    f.emit('message_start', { message });
+    assert.equal(finish(f, message, 4000).__timing.requestStart, undefined);
+  }
+  const f = fixture(), message = nativeAnthropic();
+  request(f, message); f.time(1000); request(f, message);
+  f.emit('message_start', { message });
+  assert.equal(finish(f, message, 3000).__timing.requestStart, 1000, 'latest attempted request owns the clock');
+  f.emit('message_start', { message }); request(f, message); // nested call cannot seed the next reply
+  finish(f, message, 4000);
+  f.emit('message_start', { message });
+  assert.equal(finish(f, message, 5000).__timing.requestStart, undefined);
 });
 
 test('the bridge records when the provider began its output: the first output item or content block', () => {
@@ -513,9 +552,9 @@ test('the bridge records when the provider began its output: the first output it
     delta(f, message, 3000, 'x'.repeat(200)); delta(f, message, 5400, 'x'.repeat(200));
     const result = finish(f, message, 5500);
     assert.equal(result.__timing.genStart, 400, api);
-    // The answer streamed long enough to time: its own rate, not the span from the marker.
+    // The output marker is retained, but TPS uses the complete call rather than answer timing.
     const usage = usageOf([result]);
-    assert.equal(usage.speedBasis, 'generation', api); assert.equal(usage.speedScope, 'answer', api);
+    assert.equal(usage.speedBasis, 'request', api); assert.equal(usage.speedScope, 'all', api);
   }
   // Chat Completions streams reasoning visibly: no marker, the visible window as before.
   const f = fixture(), message = msg();
