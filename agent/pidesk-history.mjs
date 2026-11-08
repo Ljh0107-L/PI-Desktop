@@ -112,7 +112,7 @@ export async function readHistory(file, options = {}) {
     if (cursor && (!Number.isSafeInteger(cursor.offset) || cursor.offset < 0 || cursor.offset > snapshot.end || typeof cursor.id !== 'string')) throw new Error('Invalid history cursor.');
     let target = cursor?.id ?? null, remaining = cursor?.offset ?? snapshot.end;
     const messages = [], omitted = new Map(cursor?.omitted ?? []);
-    let total = 0, next = null, warning = null, first = true;
+    let total = 2, next = null, warning = null, first = true;
     const stats = { scannedBytes: 0 };
     for await (const row of reverseLines(handle, remaining, stats)) {
       let entry;
@@ -127,7 +127,7 @@ export async function readHistory(file, options = {}) {
       if (entry.type === 'context_edit' && !omitted.has(entry.targetId)) omitted.set(entry.targetId, entry.replacement === null);
       const ref = { snapshot, offset: row.offset, length: row.length, id: entry.id };
       const message = projectEntry(entry, ref, { omitted: omitted.get(entry.id) });
-      const cost = message ? bytes(message) : 0;
+      const cost = message ? bytes(message) + (messages.length ? 1 : 0) : 0;
       if (message && messages.length && (messages.length >= PAGE_MESSAGES || total + cost > PAGE_BYTES)) {
         next = { snapshot, offset: row.offset + row.length, id: entry.id, omitted: [...omitted] };
         break;

@@ -50,7 +50,14 @@ jobs:
         with:
           path: ~/Library/Caches/electron
           key: electron-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
-      - run: npm ci --ignore-scripts --no-audit --no-fund && node node_modules/electron/install.js
+          restore-keys: electron-${{ runner.os }}-${{ runner.arch }}-
+      - run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          for attempt in 1 2 3; do
+            node node_modules/electron/install.js && break
+            [ "$attempt" -lt 3 ] || exit 1
+            sleep 5
+          done
       # A throwaway unprivileged sshd on 127.0.0.1 (host alias "pidesk-test") stands in for a remote machine.
       - name: Build renderer, start test SSH server
         run: |

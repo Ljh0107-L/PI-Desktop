@@ -17,6 +17,17 @@ test('release verification uses a declared reusable-workflow input, not an unsup
   assert.equal(ci.jobs.bridge.if, undefined);
 });
 
+test('Electron downloads reuse versioned caches across app version bumps and retry only finitely', () => {
+  for (const job of [ci.jobs.ui, release.jobs.mac]) {
+    const cache = job.steps.find(step => step.uses?.startsWith('actions/cache@'));
+    assert.match(cache.with['restore-keys'], /^electron-/);
+    const install = job.steps.find(step => step.run?.includes('node_modules/electron/install.js')).run;
+    assert.match(install, /for attempt in 1 2 3/);
+    assert.match(install, /\[ "\$attempt" -lt 3 \] \|\| exit 1/);
+    assert.doesNotMatch(install, /ELECTRON_MIRROR|skip.?checksum/i);
+  }
+});
+
 test('only publication is gated; downloaded assets and the release tag match the publish command', () => {
   assert.equal(release.jobs.mac.needs, undefined);
   assert.deepEqual(release.jobs.publish.needs, ['verify', 'mac']);
