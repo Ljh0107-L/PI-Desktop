@@ -2,8 +2,16 @@
 import assert from 'node:assert/strict';
 
 export async function checkChatGPT({ page, screenshot, settingsBefore }) {
-  await page.locator('.settings-sidebar-nav').getByRole('button', { name: 'ChatGPT', exact: true }).click();
-  await page.locator('.section-title', { hasText: 'ChatGPT accounts' }).waitFor();
+  const originalModel = await page.evaluate(() => window.__pideskState().draft.model);
+  const openChatGPT = async () => {
+    await page.locator('.settings-sidebar-nav').getByRole('button', { name: 'ChatGPT', exact: true }).click();
+    await page.locator('.section-title', { hasText: 'ChatGPT accounts' }).waitFor();
+  };
+  const chooseModel = async model => {
+    await page.locator('.model-trigger').click();
+    await page.locator('.model-menu').getByTitle(`${model.provider}/${model.id}`, { exact: true }).click();
+  };
+  await openChatGPT();
   const local = page.locator('.row-card').filter({ hasText: /This computer|This Mac|Local/ }).first();
   const remote = page.locator('.row-card').filter({ hasText: 'pidesk-test' });
   assert.equal(await remote.count(), 1);
@@ -39,10 +47,22 @@ export async function checkChatGPT({ page, screenshot, settingsBefore }) {
   const subscription = models.filter(m => m.provider === 'pidesk-chatgpt');
   assert.equal(subscription.length, 2);
   assert.ok(subscription.every(m => m.contextWindow > 0 && m.maxTokens > 0 && m.environments.includes('local') && m.environments.includes('ssh:pidesk-test')));
+  await page.locator('.nav-item.back').click();
+  await chooseModel(subscription[0]);
+  await page.locator('.settings-button').click(); await openChatGPT();
   await local.getByRole('button', { name: 'Sign out', exact: true }).click();
   await local.getByRole('button', { name: 'Sign in with ChatGPT', exact: true }).waitFor();
   const remaining = await page.evaluate(() => window.pidesk.invoke('catalog'));
   assert.ok(remaining.filter(m => m.provider === 'pidesk-chatgpt').every(m => !m.environments.includes('local') && m.environments.includes('ssh:pidesk-test')));
+  await page.locator('.nav-item.back').click();
+  assert.equal(await page.evaluate(() => window.__pideskState().draft.model.provider), 'pidesk-chatgpt', 'logout must not switch to a paid API provider');
+  await page.locator('.composer textarea').fill('This must not be sent after logout');
+  await page.locator('.composer textarea').press('Enter');
+  await page.waitForFunction(() => (window.__pideskNoticeLog ?? []).some(n => n.includes('Sign in to ChatGPT for this environment')));
+  assert.equal((await page.evaluate(() => window.pidesk.invoke('listSessions'))).length, 0, 'no fallback request or conversation was created');
+  await page.locator('.composer textarea').fill('');
+  await chooseModel(originalModel);
+  await page.locator('.settings-button').click(); await openChatGPT();
   await remote.getByRole('button', { name: 'Sign out', exact: true }).click();
   await remote.getByRole('button', { name: 'Sign in with ChatGPT', exact: true }).waitFor();
   boot = await page.evaluate(() => window.pidesk.invoke('bootstrap'));

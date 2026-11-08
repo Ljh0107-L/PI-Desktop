@@ -231,5 +231,7 @@ test('subscription models preserve context/effort and use native streaming, not 
   const catalog = [{ provider: 'api', id: 'regular' }, { ...chatGPTModels(base)[0], environments: ['ssh:fixture'] }];
   assert.equal(modelsForEnvironment(catalog, 'local').length, 1);
   assert.equal(modelsForEnvironment(catalog, 'ssh:fixture').length, 2);
-  assert.deepEqual(modelForEnvironment(catalog, 'local', { provider: CHATGPT_PROVIDER, id: 'fixture' }), { provider: 'api', id: 'regular' });
+  const selected = { provider: CHATGPT_PROVIDER, id: 'fixture' };
+  assert.deepEqual(modelForEnvironment(catalog, 'local', selected), selected, 'require login, never silently charge an API key');
+  assert.deepEqual(modelForEnvironment([], 'local', selected), selected, 'logout retains the user’s provider choice');
 });

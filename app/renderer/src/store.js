@@ -1,7 +1,7 @@
 // Client-side state for the renderer: one immutable snapshot, updated from IPC events.
 import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerDraft as takeDraft, restoreComposerDraft as restoreDraft, recoverComposerDraft as recoverDraft } from './composer-draft.js';
 import { relativeSessionPath } from './file-paths.js';
-import { modelForEnvironment } from './model-catalog.js';
+import { modelForEnvironment, modelsForEnvironment } from './model-catalog.js';
 import { useRef, useSyncExternalStore } from 'react';
 import { applyEvent, emptyTranscript, fromHistory, rewindTo } from './transcript.js';
 import { historyKey, mergeHistory, mergeReloadedHistory } from './history.js';
@@ -441,7 +441,9 @@ function scheduleStats(id) {
 
 export async function startSession(text, attachments = []) {
   const { draft } = state;
-  if (!draft.model) throw new Error('Add a model provider in Settings first.');
+  if (!draft.model) throw new Error('Choose a model or sign in to ChatGPT in Settings first.');
+  if (draft.model.provider === 'pidesk-chatgpt' && !modelsForEnvironment(state.catalog, draft.environmentId)
+    .some(m => m.provider === draft.model.provider && m.id === draft.model.id)) throw new Error('Sign in to ChatGPT for this environment in Settings → ChatGPT.');
   const pendingId = 'pending';
   set({ view: 'session', activeId: pendingId, transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: [{ role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] } } });
   try {

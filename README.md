@@ -26,7 +26,7 @@ npm run dist                   # builds the .dmg / .zip into release/
 
 Add a provider under **Settings (bottom left) → Models** (built-in providers such as DeepSeek, Anthropic, OpenAI, OpenRouter, or any endpoint compatible with OpenAI's, Anthropic's or Google's Gemini API), or sign in under **Settings → ChatGPT**. Choose an environment and folder under the message box, then start typing.
 
-ChatGPT uses Pi's current **Sign in with ChatGPT** flow, not its legacy Codex endpoint. Authorize this Mac and each SSH environment separately. The model catalog, context limits, tools, reasoning controls and request TPS use the normal Pi pipeline; catalog entries do not guarantee your account can access every model. Context shows conversation occupancy, not subscription quota, and API list prices are not treated as your subscription bill. SSH subscriptions require direct access to `auth.openai.com` and `api.openai.com` to run while this Mac is offline.
+ChatGPT uses Pi's current **Sign in with ChatGPT** flow, not its legacy Codex endpoint. Authorize this Mac and each SSH environment separately. The model catalog, context limits, tools, reasoning controls and request TPS use the normal Pi pipeline; catalog entries do not guarantee your account can access every model. Context shows conversation occupancy, not subscription quota, and API list prices are not treated as your subscription bill. Signing out or choosing an environment without a ChatGPT grant never silently switches the next prompt to an API-key provider. SSH subscriptions require direct access to `auth.openai.com` and `api.openai.com` to run while this Mac is offline.
 
 ## How it works
 
