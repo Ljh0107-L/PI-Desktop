@@ -2,6 +2,12 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.3 — Session tool recovery and custom Gemini models (unreleased)
+
+- **Keep coding tools when a session's history is damaged.** A broken parent chain could make a reopened conversation lose `read`, `bash`, `edit` and `write`, even though its latest compaction held the complete tool list. The desktop bridge now restores that checkpoint and applies later tool changes, on this Mac and SSH hosts. It warns about missing history instead of silently degrading; without a complete checkpoint, model requests stop. Intentionally removed tools and explicit CLI tool selections are not automatically re-enabled.
+- **Recover an already affected conversation.** `/pidesk-recover-tools` lists missing coding tools from the checkpoint and asks before restoring them. It makes a private backup beside the session file and records the recovery without rewriting old entries, including when Pi restarts before the next model request. It does not reconstruct missing history. Fresh subagents whose required tools are all unavailable now fail before a model request or worktree setup, rather than reporting that they cannot work after consuming a model call.
+- **Gemini behind custom endpoint IDs.** Models whose IDs do not reveal the model, such as Ark's `ep-…` endpoints, use the Gemini model identified by their display name for thinking levels and tool calls while keeping the endpoint ID in requests and replies. For example, name an Argon endpoint `gemini-4-argon` to avoid "Thinking budget is not supported for this model".
+
 ## 0.2.2 — Google's protocol for custom endpoints
 
 - **Custom endpoints can speak Google's Gemini API.** Settings → Models → Custom endpoint has a new protocol, **Google Gemini API compatible**, for relays and gateways that serve Gemini's own API instead of an OpenAI-compatible one. Pi talks to them natively, on this Mac and on SSH hosts, the same way as to the built-in Google Gemini provider: replies stream, and tools run through Gemini's function calls.

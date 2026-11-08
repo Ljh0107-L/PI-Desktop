@@ -31,6 +31,7 @@ import { Type } from 'typebox';
 import { createBashToolDefinition } from '@earendil-works/pi-coding-agent';
 import { createSubagentTool, isActiveAgent } from './pidesk-subagent.mjs';
 import { createSpeed } from './pidesk-speed.mjs';
+import { registerSessionTools } from './pidesk-session-tools.mjs';
 import { GEMINI_API, geminiAlias, geminiModel, geminiStream } from './pidesk-gemini.mjs';
 import { AWAY_ANSWER, createUltra, parseVerdict, reviewBrief } from './pidesk-ultra.mjs';
 
@@ -328,6 +329,7 @@ export function registerSpeed(pi, speed) {
 
 export default function pideskBridge(pi) {
   registerMetrics(pi);
+  registerSessionTools(pi, { agentsRunning: () => subagents.agents().some(isActiveAgent) });
   let runtime = null;
   pi.on('session_start', () => {
     runtime = setupRuntimeEnvironment();

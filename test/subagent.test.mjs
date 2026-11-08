@@ -43,6 +43,21 @@ function context(produce = async () => reply()) {
 const tasks = n => Array.from({ length: n }, (_, i) => ({ name: `task-${i}`, task: `Inspect assigned part ${i}; no edits or tests.` }));
 const run = (controller, c, taskList = tasks(1), signal, update, extra = {}) => controller.tool.execute('parent-tool', { tasks: taskList, context: 'Only work in the assigned scope.', background: false, ...extra }, signal, update, c.ctx);
 
+test('fresh agents without callable tools fail before any model request or worktree setup', async () => {
+  const c = context();
+  const controller = createSubagentTool();
+  const available = c.ctx.tools;
+  c.ctx.tools = [];
+  for (const type of ['general', 'explore']) {
+    await assert.rejects(run(controller, c, [{ name: 'Read the repository', task: 'Read only.', type, isolation: 'worktree' }]), /parent session supplies none of its required tools/);
+  }
+  assert.equal(c.requests.length, 0);
+  assert.deepEqual(controller.agents(), []);
+  c.ctx.tools = available;
+  assert.equal((await run(controller, c, tasks(2))).isError, false, 'failed construction did not consume the request limit');
+  controller.shutdown();
+});
+
 test('fresh agents get their brief, project instructions, model and effort, not the parent conversation', async () => {
   const c = context();
   const controller = createSubagentTool();

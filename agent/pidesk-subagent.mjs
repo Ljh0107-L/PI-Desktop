@@ -449,7 +449,9 @@ export function createSubagentTool({
   }
   function childTools(entry, ctx, names) {
     const available = new Map((ctx.tools ?? []).map(t => [t.name, t]));
-    return names.filter(name => available.has(name)).map(name => wrapTool(entry, available.get(name), ctx));
+    const tools = names.filter(name => available.has(name)).map(name => wrapTool(entry, available.get(name), ctx));
+    if (!tools.length) throw new Error(`Cannot start ${entry.record.type} agent: the parent session supplies none of its required tools (${names.join(', ')}). Check the parent session's active tools; a damaged session may need /pidesk-recover-tools.`);
+    return tools;
   }
   function forkSetup(entry, ctx, callId, name, task) {
     // The parent's declared tools in its order, so the fork's requests reuse the parent's prompt cache.
@@ -798,12 +800,12 @@ export function createSubagentTool({
           : `Not started: at most ${limit} new agent${limit === 1 ? '' : 's'} per user request (Settings → Subagents), and this request has already started ${startedInRequest}.${left ? ` You can start ${left} more.` : ''} Do this work yourself, or send an existing agent more instructions with subagent_message.`;
         return { content: [{ type: 'text', text }], details: { kind: 'pidesk-subagents', refused: text, results: [] }, isError: true };
       }
-      startedInRequest += params.tasks.length;
       const background = params.background !== false;
       const cwd = ctx.cwd ?? promptOptions.cwd ?? process.cwd();
       const created = [];
       try { params.tasks.forEach((task, index) => created.push(createEntry({ ctx, callId, index, task, context: params.context, background, cwd }))); }
       catch (error) { for (const entry of created) entries.delete(entry.record.id); throw error; }
+      startedInRequest += created.length;
       const controls = created.map(() => ({ notify: background }));
       // A stop of the parent's run cancels only agents it is still waiting for.
       const onParentAbort = () => created.forEach((entry, i) => { if (!controls[i].notify) entry.stop.abort(parentSignal.reason ?? new Error('Cancelled')); });
