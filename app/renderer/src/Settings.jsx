@@ -2,7 +2,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { MenuItem, Modal, Popover, Spinner } from './ui.jsx';
-import { api, loadCatalog, openSettings, setAddConnectionOpen, setEnvironments, setSettings, useStore } from './store.js';
+import { api, loadCatalog, openSettings, setAddConnectionOpen, setChatGPT, setEnvironments, setSettings, useStore } from './store.js';
 import { formatTokens as fmtTokens } from './transcript.js';
 
 const CUSTOM_APIS = [
@@ -235,7 +235,7 @@ function ProviderEditor({ initial, onDone }) {
 }
 
 function ModelsPage() {
-  const providers = useStore(s => s.settings.providers);
+  const providers = useStore(s => s.settings.providers.filter(p => p.kind !== 'subscription'));
   const builtin = useStore(s => s.settings.builtinProviders);
   const [editing, setEditing] = useState(null); // provider id | 'new'
   return (
@@ -267,6 +267,57 @@ function ModelsPage() {
       </ul>
     </section>
   );
+}
+
+// ---------------------------------------------------------------- ChatGPT
+function ChatGPTPage() {
+  const environments = useStore(s => s.environments.filter(e => e.kind === 'local' || e.added));
+  const status = useStore(s => s.chatgpt);
+  const [error, setError] = useState(null);
+  const [callback, setCallback] = useState('');
+  const [busy, setBusy] = useState(null);
+  const login = status?.login;
+  const active = login && !['failed', 'cancelled'].includes(login.state);
+  useEffect(() => { api('chatGPTStatus').then(setChatGPT).catch(() => setError('Could not load ChatGPT connections.')); }, []);
+  const run = async (id, method, ...args) => {
+    setError(null); setBusy(id);
+    try { const next = await api(method, ...args); if (next) setChatGPT(next); }
+    catch (e) { setError(e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')); }
+    finally { setBusy(null); }
+  };
+  const submit = async e => { e.preventDefault(); await run(login.environmentId, 'submitChatGPTCallback', callback); setCallback(''); };
+  return <section className="section">
+    <div className="section-head"><h2 className="section-title">ChatGPT accounts</h2></div>
+    <ul className="rows">
+      {environments.map(env => {
+        const connected = !!status?.accounts?.[env.id]?.connected;
+        const current = login?.environmentId === env.id ? login : null;
+        const working = current && active;
+        return <li key={env.id} className="row-card">
+          <div className="row-head">
+            <span className={`credential-dot ${connected ? 'ok' : 'missing'}`} title={connected ? 'Signed in · encrypted credentials on this environment' : 'Not signed in'} />
+            <div className="row-identity"><span className="row-name">{env.label}</span></div>
+            <div className="row-actions">
+              {working ? <><span className="button small" aria-live="polite"><Spinner size={13} /> {current.state === 'preparing' ? 'Preparing…' : current.state === 'saving' ? 'Connecting…' : 'Waiting for browser…'}</span>
+                <button className="button small" disabled={current.state === 'saving' || busy === env.id} onClick={() => run(env.id, 'cancelChatGPTLogin')}>Cancel</button></>
+                : <><button className="button small" disabled={!!active || busy === env.id || (env.kind === 'ssh' && !env.enabled)} onClick={() => { setCallback(''); run(env.id, 'signInChatGPT', env.id); }} title="Authorize this environment separately so it can refresh without this Mac">{connected ? 'Reconnect' : 'Sign in with ChatGPT'}</button>
+                  {connected && <button className="button small danger" disabled={busy === env.id} onClick={() => run(env.id, 'signOutChatGPT', env.id)} title="Remove this environment’s stored authorization; this does not cancel your subscription">Sign out</button>}</>}
+            </div>
+          </div>
+          {working && current.manual && <form className="editor" onSubmit={submit}>
+            <label className="field"><span className="field-label">Authorization callback</span>
+              <input type="password" value={callback} onChange={e => setCallback(e.target.value)} placeholder="Paste the final browser URL if automatic sign-in does not finish" autoComplete="off" spellCheck={false} /></label>
+            <div className="editor-actions">
+              <button type="button" className="button ghost" onClick={() => run(env.id, 'reopenChatGPTLogin')}>Open browser</button>
+              <button type="submit" className="button primary" disabled={!callback.trim() || busy === env.id}>Complete sign-in</button>
+            </div>
+          </form>}
+          {current?.error && <div className="form-error"><Icon name="alert" size={14} /> {current.error}</div>}
+        </li>;
+      })}
+    </ul>
+    {error && <div className="form-error"><Icon name="alert" size={14} /> {error}</div>}
+  </section>;
 }
 
 // ---------------------------------------------------------------- connections
@@ -517,6 +568,7 @@ export function SettingsPage() {
   const tab = useStore(s => s.settingsTab);
   const pages = [
     { id: 'providers', label: 'Models', icon: 'sparkle', title: 'Models' },
+    { id: 'chatgpt', label: 'ChatGPT', icon: 'chat', title: 'ChatGPT' },
     { id: 'connections', label: 'Connections', icon: 'server', title: 'Connections' },
     { id: 'agents', label: 'Agents', icon: 'fork', title: 'Agents' },
     { id: 'usage', label: 'Usage', icon: 'gauge', title: 'Usage' },
@@ -535,7 +587,7 @@ export function SettingsPage() {
         <div className="settings-drag drag" />
         <div className="settings-content">
           <h1 className="settings-title">{page.title}</h1>
-          {page.id === 'providers' ? <ModelsPage /> : page.id === 'usage' ? <UsagePage /> : page.id === 'agents' ? <AgentsPage /> : <ConnectionsPage />}
+          {page.id === 'providers' ? <ModelsPage /> : page.id === 'chatgpt' ? <ChatGPTPage /> : page.id === 'usage' ? <UsagePage /> : page.id === 'agents' ? <AgentsPage /> : <ConnectionsPage />}
         </div>
       </main>
     </div>

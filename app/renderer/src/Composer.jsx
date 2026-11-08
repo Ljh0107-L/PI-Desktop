@@ -6,6 +6,7 @@ import { api, captureComposerDraft, clearQueued, defaultFolder, getState, notify
 import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerDraft as takeDraft, restoreComposerDraft as restoreDraft, recoverComposerDraft as recoverDraft } from './composer-draft.js';
 import { createComposerSizer } from './composer-size.js';
 import { cachedDir, listDir, prefetchDir } from './dirs.js';
+import { modelsForEnvironment } from './model-catalog.js';
 
 const EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 export const effortLabel = level => ({ off: 'Off', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max' }[level] ?? level);
@@ -119,8 +120,8 @@ function FolderMenu({ environmentId, value, onChange, close, onBrowse }) {
 }
 
 // ---------------------------------------------------------------- models
-export function ModelMenu({ value, onChange, close }) {
-  const catalog = useStore(s => s.catalog);
+export function ModelMenu({ value, environmentId, onChange, close }) {
+  const catalog = useStore(s => modelsForEnvironment(s.catalog, environmentId));
   const catalogError = useStore(s => s.catalogError);
   const providers = useStore(s => s.settings?.providers ?? []);
   const builtin = useStore(s => s.settings?.builtinProviders ?? {});
@@ -141,7 +142,7 @@ export function ModelMenu({ value, onChange, close }) {
       <input className="menu-search" autoFocus placeholder="Search models…" value={query} onChange={e => setQuery(e.target.value)} />
       <div className="menu-scroll">
         {catalogError && <div className="menu-empty error">{catalogError}</div>}
-        {!catalog.length && !catalogError && <div className="menu-empty">No models yet — add a provider and its API key.</div>}
+        {!catalog.length && !catalogError && <div className="menu-empty">No models for this environment — add a provider or sign in to ChatGPT.</div>}
         {groups.map(([provider, models]) => (
           <MenuSection key={provider} title={providerName(provider)}>
             {models.map(m => <MenuItem key={m.id} label={m.name} title={`${m.provider}/${m.id}`} checked={value?.provider === m.provider && value?.id === m.id}
@@ -453,7 +454,7 @@ export function ComposerBar({ session }) {
           <Icon name="infinity" size={16} /><span>Ultra</span>
         </button>
         {catalog.length || model
-          ? <Trigger width={320} label="Model" title={modelTitle} className="model-trigger" menu={close => <ModelMenu value={model} onChange={changeModel} close={close} />}>
+          ? <Trigger width={320} label="Model" title={modelTitle} className="model-trigger" menu={close => <ModelMenu value={model} environmentId={environmentId} onChange={changeModel} close={close} />}>
               <span className="strong">{modelLabel(model, catalog)}</span>
             </Trigger>
           : <button type="button" className="trigger attention" onClick={() => openSettings(true, 'providers')}><Icon name="key" size={15} /><span>Add a model</span></button>}

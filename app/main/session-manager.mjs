@@ -4,13 +4,14 @@ import { EventEmitter } from 'node:events';
 import { execFile } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { PiSession } from '../../core/pi-session.mjs';
 import { closeSshMux, egressEnv, localRelayTransport, localTransport, relaySpawnSpec, shellQuote, sshRelayTransport } from '../../core/transports.mjs';
 import { startEgressProxy, hostPortOf } from '../../core/egress-proxy.mjs';
 import { listRelaySessions, prepareRemote, readInstallHint, runSsh, stopRelaySession } from './remote-setup.mjs';
 import { providerBaseUrl } from './custom-providers.mjs';
+import { CHATGPT_PROVIDER } from '../../agent/pidesk-chatgpt-vault.mjs';
 import { SPEEDS, speedOptions } from '../../agent/pidesk-speed.mjs';
 import { readHistory } from '../../agent/pidesk-history.mjs';
 import { historyEvent } from '../../core/history-view.mjs';
@@ -142,9 +143,18 @@ export class SessionManager extends EventEmitter {
     return stopRelaySession(env, await this.prepare(env.id), id);
   }
 
+  async chatGPTTarget(environmentId) {
+    const env = this.env(environmentId);
+    if (env.kind === 'local') return { ...this.local, env, authPath: join(dirname(this.bridgePath), 'pidesk-chatgpt-auth.mjs') };
+    if (!env.enabled) throw new Error('Enable this SSH connection before signing in.');
+    const facts = await this.prepare(environmentId);
+    return { env, node: facts.node, piCli: facts.piCli, agentDir: facts.agentDir, runDir: facts.runDir,
+      authPath: join(dirname(facts.bridge), 'pidesk-chatgpt-auth.mjs') };
+  }
+
   // ---------------------------------------------------------------- providers and models
-  bootProviders() {
-    return this.store.settings.providers.flatMap(provider => {
+  bootProviders(environmentId = 'local') {
+    const providers = this.store.settings.providers.flatMap(provider => {
       const apiKey = this.store.getKey(provider.id);
       if (!apiKey && provider.kind === 'builtin') return [];
       const entry = { id: provider.id, apiKey: apiKey ?? undefined };
@@ -154,6 +164,8 @@ export class SessionManager extends EventEmitter {
       else if (provider.models?.length) entry.models = provider.models;
       return [entry];
     });
+    const subscription = this.chatgpt?.config(environmentId);
+    return subscription ? [...providers, subscription] : providers;
   }
 
   invalidateCatalog() { this.catalogCache = null; }
@@ -192,6 +204,10 @@ export class SessionManager extends EventEmitter {
       if (runtime.session !== session) return;
       let applied = runtime.applied ?? {};
       const want = record.model;
+      if (want?.provider === CHATGPT_PROVIDER) {
+        if (!this.chatgpt) throw new Error('Reconnect ChatGPT in Settings.');
+        await this.chatgpt.ensure(record.environmentId);
+      }
       if (want?.provider && want.id && (applied.model?.provider !== want.provider || applied.model?.id !== want.id)) {
         await this.#syncProviders(runtime);
         await session.setModel(want.provider, want.id);
@@ -216,7 +232,7 @@ export class SessionManager extends EventEmitter {
       // then re-check the version so an older acknowledgement cannot mark newer keys as synced.
       if (runtime.providerSync?.session === session) { await runtime.providerSync.promise; continue; }
       const version = this.providersVersion;
-      const payload = Buffer.from(JSON.stringify(this.bootProviders())).toString('base64');
+      const payload = Buffer.from(JSON.stringify(this.bootProviders(this.#recordOf(session.id)?.environmentId ?? 'local'))).toString('base64');
       const sync = { session };
       sync.promise = session.prompt(`/pidesk-providers ${payload}`).then(() => {
         if (runtime.session === session) runtime.providersVersion = version;
@@ -231,15 +247,16 @@ export class SessionManager extends EventEmitter {
     if (this.catalogCache) return this.catalogCache;
     this.catalogCache = (async () => {
       const configured = new Set(this.store.settings.providers.map(p => p.id));
-      if (!configured.size) return [];
+      const subscription = this.chatgpt?.catalog() ?? [];
+      if (!configured.size) return subscription.map(m => ({ ...m, speeds: speedOptions(m) }));
       const session = new PiSession({ id: 'catalog', boot: { providers: this.bootProviders() }, transport: this.#localTransport({ cwd: this.local.agentDir }) });
       try {
         await session.start();
         const models = await session.request('get_available_models').then(d => d.models);
         // Built-in providers can be narrowed to the models the user picked in Settings.
         const enabled = Object.fromEntries(this.store.settings.providers.filter(p => p.enabledModels?.length).map(p => [p.id, new Set(p.enabledModels)]));
-        return models.filter(m => configured.has(m.provider) && (!enabled[m.provider] || enabled[m.provider].has(m.id)))
-          .map(m => ({ provider: m.provider, id: m.id, name: m.name ?? m.id, reasoning: !!m.reasoning, thinkingLevelMap: m.thinkingLevelMap, contextWindow: m.contextWindow, maxTokens: m.maxTokens, baseUrl: m.baseUrl, input: m.input, speeds: speedOptions(m) }));
+        return [...models.filter(m => configured.has(m.provider) && (!enabled[m.provider] || enabled[m.provider].has(m.id))), ...subscription]
+          .map(m => ({ provider: m.provider, id: m.id, name: m.name ?? m.id, reasoning: !!m.reasoning, thinkingLevelMap: m.thinkingLevelMap, contextWindow: m.contextWindow, maxTokens: m.maxTokens, baseUrl: m.baseUrl, input: m.input, speeds: speedOptions(m), ...(m.environments ? { environments: m.environments } : {}) }));
       } finally { await session.stop(); }
     })();
     const cached = this.catalogCache;
@@ -578,7 +595,7 @@ export class SessionManager extends EventEmitter {
   async #start(record, runtime) {
     const env = this.env(record.environmentId);
     const bootVersion = this.providersVersion;
-    const boot = { providers: this.bootProviders(), config: this.bootConfig(record) };
+    const boot = { providers: this.bootProviders(record.environmentId), config: this.bootConfig(record) };
     const piArgs = record.piSessionFile ? ['--session', record.piSessionFile] : [];
     let session;
     if (env.kind === 'local') {
@@ -890,6 +907,22 @@ export class SessionManager extends EventEmitter {
     // A host that can't reach this model's endpoint needs its traffic relayed through this Mac, which is
     // wired up when Pi starts. A session started without it is restarted (same session file, history kept).
     const env = this.env(record.environmentId);
+    if (provider === CHATGPT_PROVIDER) {
+      if (!this.chatgpt) throw new Error('Sign in to ChatGPT in Settings first.');
+      if (!this.chatgpt.catalog().some(m => m.id === modelId && m.environments.includes(record.environmentId))) throw new Error('This ChatGPT model is not configured for this environment.');
+      await this.chatgpt.ensure(record.environmentId);
+      // An older relay Pi has cached the previous bridge factory. Restart only the chosen idle
+      // session if it cannot register the new subscription provider; its JSONL remains untouched.
+      if (runtime?.status === 'connected') {
+        await this.#syncProviders(runtime);
+        const available = await runtime.session.request('get_available_models');
+        if (!available.models?.some(m => m.provider === provider && m.id === modelId)) {
+          if (runtime.streaming) throw new Error('Wait for the current reply to finish, then switch models.');
+          this.#save(record, { model: { provider, id: modelId } });
+          await this.close(id); await this.stopRelay(env, id); await this.ensureStarted(id); return;
+        }
+      }
+    }
     if (env.kind === 'ssh' && runtime?.session && !record.egressPort) {
       const baseUrl = (await this.catalog().catch(() => [])).find(m => m.provider === provider && m.id === modelId)?.baseUrl;
       const facts = baseUrl?.startsWith('https://') ? await this.prepare(env.id) : null;

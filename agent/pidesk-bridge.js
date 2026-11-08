@@ -33,6 +33,8 @@ import { createSubagentTool, isActiveAgent } from './pidesk-subagent.mjs';
 import { createSpeed } from './pidesk-speed.mjs';
 import { registerSessionTools } from './pidesk-session-tools.mjs';
 import { GEMINI_API, geminiAlias, geminiModel, geminiStream } from './pidesk-gemini.mjs';
+import { chatGPTProvider } from './pidesk-chatgpt.mjs';
+import { CHATGPT_PROVIDER } from './pidesk-chatgpt-vault.mjs';
 import { AWAY_ANSWER, createUltra, parseVerdict, reviewBrief } from './pidesk-ultra.mjs';
 
 function literalKey(key) {
@@ -351,8 +353,15 @@ export default function pideskBridge(pi) {
   }
   const boot = globalThis[BOOT] ?? {};
 
+  let subscriptionRegistered = false;
   const register = providers => {
+    if (subscriptionRegistered && !providers?.some(p => p.id === CHATGPT_PROVIDER && p.kind === 'subscription')) {
+      pi.unregisterProvider(CHATGPT_PROVIDER); subscriptionRegistered = false;
+    }
     for (const provider of providers ?? []) {
+      if (provider.id === CHATGPT_PROVIDER && provider.kind === 'subscription') {
+        pi.registerProvider(chatGPTProvider(provider)); subscriptionRegistered = true; continue;
+      }
       const { id, apiKey, models, ...rest } = provider;
       const config = { ...rest };
       if (apiKey) config.apiKey = literalKey(apiKey);

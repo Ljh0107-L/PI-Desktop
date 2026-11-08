@@ -14,6 +14,7 @@ import './transcript.mjs';
 import './projectless.mjs';
 import { checkReading } from './reading.mjs';
 import { checkFilePreview } from './file-preview-ui.mjs';
+import { checkChatGPT } from './chatgpt-ui.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -40,7 +41,7 @@ const defaultWorkspace = join(work, 'Pi');
 const downloads = join(work, 'downloads');
 rmSync(downloads, { recursive: true, force: true }); mkdirSync(downloads, { recursive: true });
 const BINARY = Buffer.from([...Array(256).keys(), 0, 10, 13, 255]);
-const env = { PIDESK_SSH_CONFIG: opts['ssh-config'], PIDESK_TEST_PICK_FOLDER: localProject, PIDESK_TEST_PICK_FILES: attachFile, PIDESK_DEFAULT_WORKSPACE: defaultWorkspace, PIDESK_TEST_SAVE_DIR: downloads };
+const env = { PIDESK_CHATGPT_TEST: '1', PIDESK_SSH_CONFIG: opts['ssh-config'], PIDESK_TEST_PICK_FOLDER: localProject, PIDESK_TEST_PICK_FILES: attachFile, PIDESK_DEFAULT_WORKSPACE: defaultWorkspace, PIDESK_TEST_SAVE_DIR: downloads };
 // 1×1 PNG
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 const profile = join(work, 'profile');
@@ -152,6 +153,10 @@ try {
   const providerRow = page.locator('.row-card', { hasText: 'Mock Lab' });
   check('provider list omits model count and URL', !(await providerRow.locator('.row-meta').count()) && !(await providerRow.innerText()).includes(mock.baseUrl('mock-lab')));
   await S('03-providers');
+  const modelRowStyle = await providerRow.evaluate(el => {
+    const style = getComputedStyle(el), head = getComputedStyle(el.querySelector('.row-head'));
+    return { background: style.backgroundColor, radius: style.borderRadius, padding: head.padding, font: head.fontSize };
+  });
   // ---- add the SSH connection the way Codex does: pick it from ~/.ssh/config
   await page.click('.settings-sidebar-nav .nav-item:has-text("Connections")');
   await page.click('.section-head .button.pill');
@@ -162,6 +167,8 @@ try {
   await page.locator('.connection.ready', { hasText: 'pidesk-test' }).waitFor({ timeout: 300000 });
   check('SSH connection added from ssh config and set up automatically', true);
   await S('03c-connections');
+  await checkChatGPT({ page, screenshot: S, settingsBefore: modelRowStyle });
+  check('ChatGPT Settings matches Models styling; independent local/SSH login, cancellation and logout preserve API keys', true);
   await page.click('.nav-item.back');
 
   // ---- background pre-warm cancellation must not leak a red connection-closed toast

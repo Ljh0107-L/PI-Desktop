@@ -1,13 +1,14 @@
 // Client-side state for the renderer: one immutable snapshot, updated from IPC events.
 import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerDraft as takeDraft, restoreComposerDraft as restoreDraft, recoverComposerDraft as recoverDraft } from './composer-draft.js';
 import { relativeSessionPath } from './file-paths.js';
+import { modelForEnvironment } from './model-catalog.js';
 import { useRef, useSyncExternalStore } from 'react';
 import { applyEvent, emptyTranscript, fromHistory, rewindTo } from './transcript.js';
 import { historyKey, mergeHistory, mergeReloadedHistory } from './history.js';
 import { HistoryBuffer, prepareHistoryPage } from './history-buffer.js';
 import { isSubagentFinished, subagentBatches, subagentHistoryId, visibleSubagentBatches } from './subagent-state.js';
 
-// Generation timing per reply (Pi's history keeps token counts but not timing), so tok/s survives reloads.
+// Source timing per reply, so request TPS survives reloads.
 const TIMING_KEY = 'pidesk.timings.v1';
 const timingStore = (() => { try { return JSON.parse(localStorage.getItem(TIMING_KEY)) ?? {}; } catch { return {}; } })();
 const timingsOf = id => timingStore[id] ?? {};
@@ -25,7 +26,7 @@ const listeners = new Set();
 const deleting = new Set(); // Suppress stale session-list events while deletion is being acknowledged.
 let state = {
   ready: false,
-  settings: null, environments: [], sessions: [], catalog: [], catalogError: null,
+  settings: null, chatgpt: null, environments: [], sessions: [], catalog: [], catalogError: null,
   activeId: null, view: 'new',             // 'new' | 'session'
   transcripts: {},                          // session id -> transcript
   questions: {},
@@ -119,6 +120,12 @@ window.pidesk.subscribe(({ channel, payload }) => {
       }
       break;
     }
+    case 'chatgpt':
+      setChatGPT(payload);
+      break;
+    case 'settings':
+      setSettings(payload); loadCatalog();
+      break;
     case 'open-settings':
       openSettings(true);
       break;
@@ -280,13 +287,17 @@ export async function loadCatalog() {
     const catalog = await api('catalog');
     set(s => {
       const draft = { ...s.draft };
-      if (!draft.model || !catalog.some(m => m.provider === draft.model.provider && m.id === draft.model.id)) draft.model = catalog[0] ? { provider: catalog[0].provider, id: catalog[0].id } : null;
+      draft.model = modelForEnvironment(catalog, draft.environmentId, draft.model);
       return { catalog, catalogError: null, draft };
     });
   } catch (error) { set({ catalogError: error.message }); }
 }
 
-export const setDraft = patch => set(s => ({ draft: { ...s.draft, ...patch } }));
+export const setDraft = patch => set(s => {
+  const draft = { ...s.draft, ...patch };
+  if (Object.hasOwn(patch, 'environmentId')) draft.model = modelForEnvironment(s.catalog, draft.environmentId, draft.model);
+  return { draft };
+});
 // Retain empty entries as lifetime/revision guards. Only session deletion removes them.
 const changeComposerDraft = (key, transform) => {
   let result;
@@ -380,6 +391,7 @@ export function goForward() {
 }
 export function pickRecent(environmentId, cwd) { set(s => ({ draft: { ...s.draft, environmentId, cwd } })); if (environmentId !== 'local') api('prepareEnvironment', environmentId); }
 export const setSettings = settings => set({ settings });
+export const setChatGPT = chatgpt => set(s => !s.chatgpt || chatgpt.revision >= s.chatgpt.revision ? { chatgpt } : {});
 export const setEnvironments = environments => set({ environments });
 
 // Hovering a conversation in the sidebar starts its Pi, so it is usually running by the time it opens.
