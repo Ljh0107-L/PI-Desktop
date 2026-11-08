@@ -370,11 +370,16 @@ export function displayBlocks(t) {
   };
   let ordinal = 0;
   all.forEach((message, mi) => {
+    const mk = message.__entryId ?? `${message.role}:${message.timestamp ?? mi}:${message.toolCallId ?? ''}`;
+    if (message.__history?.truncated) {
+      flush();
+      blocks.push({ kind: 'deferred', key: `detail:${mk}`, ref: message.__history.ref, role: message.role });
+    }
     if (message.role === 'assistant') turn.push(message);
     if (message.role === 'user') {
       flush();
       closeTurn();
-      turnKey = message.timestamp ?? `u${mi}`;
+      turnKey = message.__entryId ?? message.timestamp ?? `u${mi}`;
       const parts = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content ?? [];
       let text = stripImageNotes(parts.filter(c => c.type === 'text').map(c => c.text).join('\n'));
       if (text.startsWith('/pidesk-')) return;
@@ -382,16 +387,16 @@ export function displayBlocks(t) {
       let files = [];
       const att = /(?:^|\n\n)Attached files:\n((?:- .+(?:\n|$))+)$/.exec(text);
       if (att) { files = att[1].trim().split('\n').map(l => l.replace(/^- /, '')); text = text.slice(0, att.index); }
-      const images = parts.filter(c => c.type === 'image');
-      blocks.push({ kind: 'user', key: `u${mi}`, text, files, images, ordinal: ordinal++ });
+      const images = parts.filter(c => c.type === 'image' && c.data);
+      blocks.push({ kind: 'user', key: `u${mk}`, text, files, images, entryId: message.__entryId, truncated: message.__history?.truncated, ordinal: ordinal++ });
       return;
     }
     // A goal started with /goal (the bridge's hidden prompt): show what was set.
     if (message.role === 'custom' && message.customType === 'pidesk-goal') {
       const objective = /^The user set a goal[\s\S]*?<objective>\n([\s\S]*?)\n<\/objective>/.exec(typeof message.content === 'string' ? message.content : '')?.[1];
-      if (objective) { flush(); closeTurn(); turnKey = `goal:${mi}`; blocks.push({ kind: 'goal', key: `g${mi}`, objective }); }
+      if (objective) { flush(); closeTurn(); turnKey = `goal:${mi}`; blocks.push({ kind: 'goal', key: `g${mk}`, objective }); }
       // A goal continuation is a new prompt: the reply before it is an answer, not folded work.
-      else { flush(); blocks.push({ kind: 'break', key: `x${mi}` }); }
+      else { flush(); blocks.push({ kind: 'break', key: `x${mk}` }); }
       return;
     }
     // Background agents' reports. Reports in a row share one card, a row per agent with its latest
@@ -417,38 +422,39 @@ export function displayBlocks(t) {
     if (message.role === 'custom' && message.customType === 'pidesk-subagent-notice') {
       flush(); blocks.push({ kind: 'notice', key: message.id ?? `notice:${mi}`, text: String(message.content ?? '') }); return;
     }
-    if (message.role === 'bashExecution') { flush(); blocks.push({ kind: 'bash', key: `b${mi}`, message }); return; }
-    if (message.role === 'compactionSummary') { flush(); blocks.push({ kind: 'compaction', key: `c${mi}`, summary: message.summary, tokensBefore: message.tokensBefore }); return; }
+    if (message.role === 'bashExecution') { flush(); blocks.push({ kind: 'bash', key: `b${mk}`, message }); return; }
+    if (message.role === 'compactionSummary') { flush(); blocks.push({ kind: 'compaction', key: `c${mk}`, summary: message.summary, tokensBefore: message.tokensBefore }); return; }
     if (message.role !== 'assistant') return;
     const reasoning = message.usage?.reasoning ?? 0;
     let sawThinking = false;
     const firstBlock = blocks.length;
     (message.content ?? []).forEach((block, bi) => {
       if (!block) return;
-      if (block.type === 'toolCall' && block.name === 'ask_user') { flush(); blocks.push({ kind: 'ask', key: `q${mi}-${bi}`, call: block }); return; }
+      if (block.type === 'toolCall' && message.__history?.truncated) block = { ...block, __historyTruncated: true };
+      if (block.type === 'toolCall' && block.name === 'ask_user') { flush(); blocks.push({ kind: 'ask', key: `q${mk}-${bi}`, call: block }); return; }
       if (block.type === 'toolCall' && block.name === 'subagent') { flush(); blocks.push({ kind: 'subagents', key: `subagents:${block.id}`, call: block }); return; }
       // Files handed to the user are cards in the conversation, not a folded tool step.
       if (block.type === 'toolCall' && block.name === 'present_files') { flush(); blocks.push({ kind: 'files', key: `files:${block.id}`, call: block }); return; }
       if (block.type === 'toolCall') {
-        if (!group) group = { kind: 'tools', key: `g${mi}-${bi}`, calls: [] };
+        if (!group) group = { kind: 'tools', key: `g${mk}-${bi}`, calls: [] };
         group.calls.push(block);
         return;
       }
       if (block.type === 'text' && !block.text?.trim()) return;
       flush();
-      if (block.type === 'text') blocks.push({ kind: 'text', key: `t${mi}-${bi}`, text: block.text, streaming: message === t.live });
-      if (block.type === 'thinking' && block.redacted) { sawThinking = true; blocks.push({ kind: 'thinking', key: `k${mi}-${bi}`, redacted: true, tokens: reasoning }); }
+      if (block.type === 'text') blocks.push({ kind: 'text', key: `t${mk}-${bi}`, text: block.text, streaming: message === t.live });
+      if (block.type === 'thinking' && block.redacted) { sawThinking = true; blocks.push({ kind: 'thinking', key: `k${mk}-${bi}`, redacted: true, tokens: reasoning }); }
       else if (block.type === 'thinking' && block.thinking?.trim()) {
         sawThinking = true;
         // Far fewer characters than reasoning tokens: the provider sent a summary, not the full reasoning.
         const summary = reasoning > 0 && block.thinking.length / 4 < reasoning * 0.5;
-        blocks.push({ kind: 'thinking', key: `k${mi}-${bi}`, text: block.thinking, streaming: message === t.live, summary, tokens: reasoning, durationMs: message.__timing?.think ?? null });
+        blocks.push({ kind: 'thinking', key: `k${mk}-${bi}`, text: block.thinking, streaming: message === t.live, summary, tokens: reasoning, durationMs: message.__timing?.think ?? null });
       }
     });
     // Reasoning that was billed but never shown (OpenAI o-series, hidden thinking): say so.
     if (!sawThinking && reasoning > 0 && message !== t.live) {
       const tm = message.__timing;
-      blocks.splice(firstBlock, 0, { kind: 'thinking', key: `h${mi}`, hidden: true, tokens: reasoning, durationMs: tm?.first && tm.start ? tm.first - tm.start : null });
+      blocks.splice(firstBlock, 0, { kind: 'thinking', key: `h${mk}`, hidden: true, tokens: reasoning, durationMs: tm?.first && tm.start ? tm.first - tm.start : null });
     }
     const aborted = isAbortMessage(message);
     if (message.errorMessage && !aborted) {
@@ -464,9 +470,9 @@ export function displayBlocks(t) {
       }
       const text = recovered ? `Recovered automatically after: ${message.errorMessage}`
         : message.__retryOmitted ? `${t.retry ? 'Retrying model request' : 'Model request was retried'} after: ${message.errorMessage}` : failureText(message.errorMessage);
-      blocks.push({ kind: message.__retryOmitted ? 'notice' : 'error', key: `e${mi}`, text });
+      blocks.push({ kind: message.__retryOmitted ? 'notice' : 'error', key: `e${mk}`, text });
     }
-    if (aborted) { flush(); blocks.push({ kind: 'notice', key: `a${mi}`, text: 'Interrupted' }); }
+    if (aborted) { flush(); blocks.push({ kind: 'notice', key: `a${mk}`, text: 'Interrupted' }); }
   });
   flush();
   closeTurn();
@@ -548,7 +554,7 @@ export function toolSummary(calls) {
 export function changesOf(messages, tools = {}) {
   const byPath = new Map();
   for (const m of messages) {
-    if (m.role !== 'assistant') continue;
+    if (m.role !== 'assistant' || m.__history?.truncated) continue;
     for (const c of m.content ?? []) {
       if (c?.type !== 'toolCall' || c.__trace || !['edit', 'write'].includes(c.name)) continue;
       if (tools[c.id]?.status !== 'done') continue;
@@ -575,9 +581,9 @@ export function rewindTo(t, ordinal, text, images = []) {
   let seen = 0, cut = -1;
   t.messages.forEach((m, i) => {
     if (cut !== -1 || m.role !== 'user' || userText(m).startsWith('/pidesk-')) return;
-    if (seen++ === ordinal) cut = i;
+    if (typeof ordinal === 'string' ? m.__entryId === ordinal : seen++ === ordinal) cut = i;
   });
   if (cut === -1) return t;
   const content = [{ type: 'text', text }, ...images.map(img => ({ type: 'image', data: img.data, mimeType: img.mimeType }))];
-  return { ...t, live: null, rewinding: true, messages: [...t.messages.slice(0, cut), { role: 'user', content, timestamp: Date.now(), __optimistic: true }] };
+  return { ...t, live: null, history: undefined, rewinding: true, messages: [...t.messages.slice(0, cut), { role: 'user', content, timestamp: Date.now(), __optimistic: true }] };
 }

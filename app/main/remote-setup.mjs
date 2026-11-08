@@ -202,7 +202,7 @@ function installHintPath(env, cacheDir) {
   const key = createHash('sha256').update(JSON.stringify([env.host, env.sshArgs ?? []])).digest('hex');
   return join(cacheDir, `remote-install-${key}.json`);
 }
-function readInstallHint(env, root, cacheDir) {
+export function readInstallHint(env, root, cacheDir) {
   if (!root) return null;
   try {
     const hint = JSON.parse(readFileSync(installHintPath(env, cacheDir), 'utf8'));

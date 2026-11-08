@@ -2,7 +2,8 @@ import { createContext, useCallback, useContext, useEffect, useLayoutEffect, use
 import { Icon } from './Icons.jsx';
 import { Markdown, Spinner } from './ui.jsx';
 import { changesOf, displayBlocks, formatTokens, isAbortText, toolSummary } from './transcript.js';
-import { api, editMessage, notify, openChanges, openFile } from './store.js';
+import { api, editMessage, loadEarlierHistory, loadHistoryEntry, reloadTranscript, notify, openChanges, openFile } from './store.js';
+import { VirtualHistory } from './VirtualHistory.jsx';
 import { DownloadButton, iconFor, sizeLabel } from './FilePane.jsx';
 import { changeStats, hunkLines } from './diffs.js';
 import { Composer } from './Composer.jsx';
@@ -102,8 +103,8 @@ function ToolCall({ call, tool }) {
   const status = tool?.status ?? 'pending';
   const failed = ['error', 'cancelled', 'timed_out'].includes(status);
   const output = textOf(tool?.result);
-  const filePath = trace?.path ?? (['read', 'edit', 'write', 'cursor_edit'].includes(call.name) && !failed ? (call.arguments?.path ?? call.arguments?.file_path) : null);
-  const hunks = trace ? [] : call.name === 'edit' ? editHunks(call.arguments) : call.name === 'write' ? [{ oldText: null, newText: String(call.arguments?.content ?? '') }] : [];
+  const filePath = call.__historyTruncated ? null : trace?.path ?? (['read', 'edit', 'write', 'cursor_edit'].includes(call.name) && !failed ? (call.arguments?.path ?? call.arguments?.file_path) : null);
+  const hunks = trace || call.__historyTruncated ? [] : call.name === 'edit' ? editHunks(call.arguments) : call.name === 'write' ? [{ oldText: null, newText: String(call.arguments?.content ?? '') }] : [];
   const stats = hunks.length && status !== 'error' ? changeStats({ hunks }) : null;
   return (
     <div className={`step tool-call ${status} ${open ? 'open' : ''}`} data-tool-id={call.id}>
@@ -320,7 +321,7 @@ function UserMessage({ block, sessionId, editable }) {
             const images = (block.images ?? []).map(img => ({ kind: 'image', name: 'image', mimeType: img.mimeType, data: img.data }));
             const files = (block.files ?? []).map(path => ({ kind: 'file', name: path.split('/').pop(), path }));
             setEditing(false);
-            await editMessage(sessionId, block.ordinal, block.text, text, [...images, ...files, ...attachments]);
+            await editMessage(sessionId, block.entryId ?? block.ordinal, block.text, text, [...images, ...files, ...attachments]);
           }} />
       </div>
     );
@@ -426,6 +427,15 @@ function FileCards({ sessionId, call, tool }) {
   );
 }
 
+function HistoryDetails({ sessionId, block }) {
+  const [loading, setLoading] = useState(false);
+  return <button className="button small history-detail" disabled={loading || !sessionId}
+    title="Load the original visible content, tool arguments and attachments. Hidden model signatures stay out of the UI."
+    onClick={async () => { setLoading(true); try { await loadHistoryEntry(sessionId, block.ref); } finally { setLoading(false); } }}>
+    {loading ? 'Loading…' : block.role === 'toolResult' ? 'Load full tool result' : 'Load full content'}
+  </button>;
+}
+
 export function Transcript({ session, transcript, questions = NO_QUESTIONS, readOnly = false, onOpenFile, renderSubagents, renderAgentReport, copyText }) {
   const scroller = useRef(null);
   const stick = useRef(true);
@@ -442,17 +452,27 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
     scrollIntent.current = false;
   }, []);
   const followLatest = () => {
+    if (transcript.history?.viewingOlder && session?.id) reloadTranscript(session.id);
     stick.current = true;
     setFollowing(true);
     scroller.current?.scrollTo({ top: scroller.current.scrollHeight });
   };
   const blocks = useMemo(() => displayBlocks(transcript), [transcript]);
+  const earlier = async () => {
+    const el = scroller.current;
+    if (!el || !transcript.history?.next || transcript.history.loading) return;
+    pauseFollowing();
+    const height = el.scrollHeight, top = el.scrollTop;
+    await loadEarlierHistory(session.id);
+    requestAnimationFrame(() => { if (scroller.current === el) el.scrollTop = top + el.scrollHeight - height; });
+  };
   const lastUsage = blocks.findLast(b => b.kind === 'usage');
   const onScroll = e => {
     // Output panes also scroll. Their events must not re-enable transcript auto-follow.
     if (e.target !== scroller.current) return;
     const el = scroller.current;
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    if (el.scrollTop < 60 && scrollIntent.current && transcript.history?.next) earlier();
     if (!atBottom) stick.current = false;
     else if (scrollIntent.current) stick.current = true;
     scrollIntent.current = false;
@@ -485,9 +505,13 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
         {transcript.error && (isAbortText(transcript.error)
           ? <div className="block-notice">Interrupted</div>
           : <div className="block-error"><Icon name="alert" size={15} /> {transcript.error}</div>)}
-        {blocks.map(block => {
+        {transcript.history?.next && <button className="button small history-earlier" onClick={earlier} disabled={transcript.history.loading}
+          title="Load an earlier page. Very long turns may span pages; original history is kept in full.">{transcript.history.loading ? 'Loading earlier messages…' : 'Load earlier messages'}</button>}
+        {transcript.history?.warning && <div className="block-notice">{transcript.history.warning}</div>}
+        <VirtualHistory items={blocks} scroller={scroller} onMeasure={() => { if (stick.current && scroller.current) scroller.current.scrollTop = scroller.current.scrollHeight; }} renderItem={block => {
           switch (block.kind) {
-            case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!readOnly && session?.engine !== 'cursor' && !!session && session.id !== 'pending' && session.status === 'connected' && !session.streaming && !block.text.startsWith('/')} />;
+            case 'deferred': return <HistoryDetails key={block.key} sessionId={session?.id} block={block} />;
+            case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!block.truncated && (!transcript.history || !!block.entryId) && !readOnly && session?.engine !== 'cursor' && !!session && session.id !== 'pending' && session.status === 'connected' && !session.streaming && !block.text.startsWith('/')} />;
             case 'goal': return <GoalMarker key={block.key} objective={block.objective} />;
             case 'text': return <Markdown key={block.key} text={block.text} streaming={block.streaming} />;
             case 'usage': return <TurnFooter key={block.key} text={block.text} changes={readOnly ? [] : block.changes} sessionId={session?.id} last={block === lastUsage} />;
@@ -504,7 +528,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             case 'notice': return <div key={block.key} className="block-notice">{block.text}</div>;
             default: return null;
           }
-        })}
+        }} />
         {readOnly && copyText && <TurnFooter text={copyText} last />}
         {(transcript.queued ?? []).map(q => (
           <div key={q.id} className="user-row queued" aria-label="Queued message">

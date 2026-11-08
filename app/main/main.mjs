@@ -238,6 +238,7 @@ const api = {
   setThinking: (id, level) => manager.setThinking(id, level),
   setSpeed: (id, speed) => manager.setSpeed(id, speed),
   messages: id => manager.messages(id),
+  historyPage: (id, options) => manager.historyPage(id, options ?? {}),
   clearSubagentHistory: (id, ids) => manager.clearSubagentHistory(id, ids),
   stats: id => manager.stats(id),
   rename: (id, title) => manager.rename(id, title),

@@ -65,6 +65,7 @@ jobs:
         run: |
           node test/e2e.mjs --ssh-config /tmp/pidesk-e2e/ssh_config
           node test/runtime-ui.mjs
+          node test/history-ui.mjs
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: e2e-screenshots, path: /tmp/pidesk-e2e/shots, if-no-files-found: ignore }
@@ -84,6 +85,8 @@ jobs:
         run: |
           sh test/sshd.sh > /tmp/pidesk-sshd.log 2>&1 &
           for i in $(seq 1 50); do [ -f /tmp/pidesk-sshd/ssh_config ] && ssh -F /tmp/pidesk-sshd/ssh_config pidesk-test true 2>/dev/null && break; sleep 0.2; done
+      - name: Bounded history over SSH
+        run: node test/history-ssh.mjs
       - name: Protocol + relay + latency
         run: |
           set +e

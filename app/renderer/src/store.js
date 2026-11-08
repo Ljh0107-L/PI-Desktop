@@ -3,6 +3,7 @@ import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerD
 import { relativeSessionPath } from './file-paths.js';
 import { useRef, useSyncExternalStore } from 'react';
 import { applyEvent, emptyTranscript, fromHistory, rewindTo } from './transcript.js';
+import { historyKey, mergeHistory } from './history.js';
 import { isSubagentFinished, subagentBatches, subagentHistoryId, visibleSubagentBatches } from './subagent-state.js';
 
 // Generation timing per reply (Pi's history keeps token counts but not timing), so tok/s survives reloads.
@@ -111,6 +112,7 @@ window.pidesk.subscribe(({ channel, payload }) => {
         }
         if (payload.event.type === 'compaction_end') { reloadTranscript(payload.id); refreshStats(payload.id); } } // history now starts with the summary
       if (payload.event.type === 'agent_settled') {
+        if (state.activeId === payload.id && !transcriptOf(payload.id).history?.viewingOlder) reloadTranscript(payload.id);
         scheduleStats(payload.id);
         if (transcriptOf(payload.id).queued?.length) setTranscript(payload.id, { ...transcriptOf(payload.id), queued: [] });
       }
@@ -189,12 +191,54 @@ export async function bootstrap() {
   else if (state.draft.environmentId !== 'local') api('prepareEnvironment', state.draft.environmentId);
 }
 
-// Drop the cached transcript and reload it from Pi (after a replay gap or for a fresh view).
+// Page generations prevent a slow response from restoring a deleted/edited branch.
+const historySeq = new Map();
 export async function reloadTranscript(id) {
+  const seq = (historySeq.get(id) ?? 0) + 1; historySeq.set(id, seq);
+  const baseline = new Set(transcriptOf(id).messages.map(historyKey));
   try {
-    const messages = await api('messages', id);
-    setTranscript(id, { ...fromHistory(messages, timingsOf(id)), live: null });
-  } catch (error) { setTranscript(id, { ...transcriptOf(id), error: error.message }); }
+    const page = await api('historyPage', id);
+    if (historySeq.get(id) !== seq || deleting.has(id)) return;
+    const current = transcriptOf(id);
+    const arrived = current.messages.filter(message => !baseline.has(historyKey(message)));
+    const history = fromHistory(mergeHistory(page.messages, arrived), timingsOf(id));
+    const active = Object.fromEntries(Object.entries(current.tools).filter(([, tool]) => tool.status === 'running'));
+    setTranscript(id, { ...history, live: current.live, tools: { ...history.tools, ...active }, history: { next: page.next, warning: page.warning, snapshot: page.snapshot } });
+  } catch (error) {
+    if (historySeq.get(id) === seq && !deleting.has(id)) setTranscript(id, { ...transcriptOf(id), loaded: true, error: error.message });
+  }
+}
+
+export async function loadEarlierHistory(id) {
+  const current = transcriptOf(id), cursor = current.history?.next;
+  if (!cursor || current.history.loading) return;
+  const seq = historySeq.get(id);
+  setTranscript(id, { ...current, history: { ...current.history, loading: true, viewingOlder: true } });
+  try {
+    const page = await api('historyPage', id, { cursor });
+    if (historySeq.get(id) !== seq || deleting.has(id)) return;
+    const now = transcriptOf(id);
+    const history = fromHistory(mergeHistory(page.messages, now.messages), timingsOf(id));
+    setTranscript(id, { ...now, messages: history.messages, tools: { ...history.tools, ...now.tools },
+      history: { ...now.history, next: page.next, warning: page.warning ?? now.history.warning, loading: false } });
+  } catch (error) {
+    if (historySeq.get(id) !== seq || deleting.has(id)) return;
+    const now = transcriptOf(id);
+    setTranscript(id, { ...now, history: { ...now.history, loading: false } });
+    notify(error.message, 'error');
+  }
+}
+
+export async function loadHistoryEntry(id, ref) {
+  const seq = historySeq.get(id);
+  try {
+    const message = await api('historyPage', id, { ref });
+    if (historySeq.get(id) !== seq || deleting.has(id)) return;
+    const now = transcriptOf(id);
+    const messages = now.messages.map(m => m.__entryId === message.__entryId ? { ...message, __retryOmitted: m.__retryOmitted } : m);
+    const history = fromHistory(messages, timingsOf(id));
+    setTranscript(id, { ...now, messages: history.messages, tools: { ...now.tools, ...history.tools } });
+  } catch (error) { notify(error.message, 'error'); }
 }
 
 export async function loadCatalog() {
@@ -240,6 +284,8 @@ export const setView = patch => set(patch);
 // Inspect child activity in the existing right panel, only after an explicit click.
 // Keep file tabs/selection intact so closing a preview returns to the same child.
 export function openSubagent(id, callId, taskIndex = null) {
+  const result = transcriptOf(id).messages.find(m => m.role === 'toolResult' && m.toolCallId === callId && m.__history?.truncated);
+  if (result) loadHistoryEntry(id, result.__history.ref);
   set(s => ({ subagentSelection: { ...s.subagentSelection, [id]: { callId, taskIndex } }, rightPanel: true, filePaneOpen: false, filePaneMax: false }));
 }
 // The inspector's controls for an agent running in this session's Pi.
@@ -318,11 +364,7 @@ export async function openSession(id, { record = true } = {}) {
   const t = transcriptOf(id);
   if (t.loaded) { api('focusSession', id).catch(() => {}); return; } // the sweep never stops the open conversation
   try {
-    const messages = await api('messages', id);
-    // Live events may have arrived while history loaded; history is authoritative for completed messages.
-    const current = transcriptOf(id);
-    const history = fromHistory(messages, timingsOf(id));
-    setTranscript(id, { ...history, live: current.live, tools: { ...history.tools, ...current.tools } });
+    await reloadTranscript(id);
     refreshStats(id);
     api('goal', id).then(goal => set(s => ({ goals: { ...s.goals, [id]: goal ?? s.goals[id] ?? null } }))).catch(() => {});
     api('ultra', id).then(ultra => set(s => ({ ultra: { ...s.ultra, [id]: ultra ?? s.ultra[id] ?? null } }))).catch(() => {});
@@ -439,6 +481,7 @@ export async function deleteSession(id) {
 }
 
 export async function editMessage(id, ordinal, originalText, text, attachments = []) {
+  historySeq.set(id, (historySeq.get(id) ?? 0) + 1);
   // Show the rewound conversation immediately; events from the old branch (an aborted reply) are
   // ignored until Pi reports the branch switch.
   setTranscript(id, rewindTo(transcriptOf(id), ordinal, text, attachments.filter(a => a.kind === 'image')));

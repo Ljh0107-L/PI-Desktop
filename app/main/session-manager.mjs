@@ -9,9 +9,10 @@ import { homedir } from 'node:os';
 import { PiSession } from '../../core/pi-session.mjs';
 import { closeSshMux, egressEnv, localRelayTransport, localTransport, relaySpawnSpec, shellQuote, sshRelayTransport } from '../../core/transports.mjs';
 import { startEgressProxy, hostPortOf } from '../../core/egress-proxy.mjs';
-import { listRelaySessions, prepareRemote, runSsh, stopRelaySession } from './remote-setup.mjs';
+import { listRelaySessions, prepareRemote, readInstallHint, runSsh, stopRelaySession } from './remote-setup.mjs';
 import { providerBaseUrl } from './custom-providers.mjs';
 import { SPEEDS, speedOptions } from '../../agent/pidesk-speed.mjs';
+import { readHistory } from '../../agent/pidesk-history.mjs';
 
 // A conversation record keeps a speed only when it isn't standard.
 const speedField = speed => SPEEDS.includes(speed) && speed !== 'standard' ? { speed } : {};
@@ -944,6 +945,36 @@ export class SessionManager extends EventEmitter {
   async compact(id) { const session = await this.ensureStarted(id); return session.request('compact', {}, { timeout: 300000 }); }
 
 
+  // UI pages are projected on the session's machine; never transport get_entries for opening a chat.
+  async historyPage(id, options = {}) {
+    this.focus(id);
+    const record = this.record(id);
+    const encoded = JSON.stringify(options);
+    if (encoded.length > 65536) throw new Error('History cursor is too large. Reload the conversation.');
+    if (record.engine !== 'cursor') this.ensureStarted(id).catch(() => {});
+    if (!record.piSessionFile) {
+      if (record.engine === 'cursor') return { messages: [], next: null };
+      const session = await this.ensureStarted(id);
+      const state = await session.state();
+      if (!state.sessionFile) return { messages: [], next: null };
+      record.piSessionFile = state.sessionFile;
+    }
+    const env = this.env(record.environmentId);
+    if (env.kind === 'local') {
+      try { return await readHistory(record.piSessionFile, options); }
+      catch (error) { if (error.code === 'ENOENT') return { messages: [], next: null }; throw error; }
+    }
+    const readRemote = async facts => {
+      const reader = `${facts.root}/ext/pidesk-history.mjs`;
+      return JSON.parse(await runSsh(env, `${shellQuote(facts.node)} ${shellQuote(reader)} ${shellQuote(record.piSessionFile)} ${shellQuote(encoded)}`, { timeout: 30000 }));
+    };
+    // A validated path hint lets history open while provider discovery/Pi startup runs in parallel.
+    // Missing or stale installs fall back to the normal versioned deployment, never a full-file read.
+    const hint = readInstallHint(env, this.store.settings.environments?.[env.id]?.root, this.cacheDir);
+    if (hint) { try { return await readRemote(hint); } catch { /* first upgrade or moved runtime */ } }
+    return readRemote(await this.prepare(env.id));
+  }
+
   // Full visible history: the active branch of the session tree, including messages from before any
   // compaction (Pi's get_messages returns only what the model still sees), with compactions as markers.
   // Visible history. A running Pi answers from memory; otherwise the session file is read directly (local
@@ -1136,8 +1167,12 @@ export class SessionManager extends EventEmitter {
     // The desktop shows messages without Pi's notes about resized images; compare them the same way.
     const plain = text => String(text ?? '').replace(/\n*\[Image: original \d+x\d+, displayed at \d+x\d+\. Multiply coordinates by [\d.]+ to map to original image\.\]/g, '').trim();
     const same = m => plain(m.text) === plain(originalText);
-    let target = messages[ordinal];
-    if (!target || (originalText && !same(target))) target = [...messages].reverse().find(same);
+    let target;
+    if (typeof ordinal === 'string') target = messages.find(m => m.entryId === ordinal);
+    else {
+      target = messages[ordinal];
+      if (!target || (originalText && !same(target))) target = [...messages].reverse().find(same);
+    }
     if (!target) throw new Error('That message can no longer be edited.');
     const result = await session.request('fork', { entryId: target.entryId });
     if (result?.cancelled) throw new Error('Editing was cancelled.');
