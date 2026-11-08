@@ -216,7 +216,7 @@ export class SessionManager extends EventEmitter {
         await this.chatgpt.ensure(record.environmentId);
         if (runtime.chatgptSettingsReady === undefined) {
           const available = await session.request('get_available_models');
-          runtime.chatgptSettingsReady = available.models?.some(m => m.provider === CHATGPT_PROVIDER && m.pideskChatGPTSettings === 1) ?? false;
+          runtime.chatgptSettingsReady = available.models?.some(m => m.provider === CHATGPT_PROVIDER && m.pideskChatGPTSettings === 2) ?? false;
         }
       }
       if (want?.provider && want.id && (applied.model?.provider !== want.provider || applied.model?.id !== want.id)) {
@@ -238,6 +238,11 @@ export class SessionManager extends EventEmitter {
   async #syncProviders(runtime) {
     const session = runtime?.session;
     if (!session) return;
+    const record = this.#recordOf(session.id);
+    // Do not feed a new Codex grant to an old, still-running Responses adapter. The selected
+    // idle session is upgraded by setModel/next prompt; unrelated remote tasks keep their owner.
+    if (record?.model?.provider === CHATGPT_PROVIDER &&
+        ((runtime.streaming && !runtime.chatgptSettingsReady) || this.chatgpt?.status?.().accounts?.[record.environmentId]?.needsReconnect)) return;
     while (runtime.session === session && runtime.providersVersion !== this.providersVersion) {
       // Settings updates and the first prompt can arrive together. Send one update at a time,
       // then re-check the version so an older acknowledgement cannot mark newer keys as synced.
@@ -937,7 +942,7 @@ export class SessionManager extends EventEmitter {
       if (runtime?.status === 'connected') {
         await this.#syncProviders(runtime);
         const available = await runtime.session.request('get_available_models');
-        runtime.chatgptSettingsReady = available.models?.some(m => m.provider === provider && m.id === modelId && m.pideskChatGPTSettings === 1) ?? false;
+        runtime.chatgptSettingsReady = available.models?.some(m => m.provider === provider && m.id === modelId && m.pideskChatGPTSettings === 2) ?? false;
         if (!runtime.chatgptSettingsReady) {
           if (runtime.streaming) throw new Error('Wait for the current reply to finish, then switch models.');
           this.#save(record, { model: { provider, id: modelId } });

@@ -36,7 +36,7 @@ test('selected models inherit official defaults and retain only explicit safe ov
   assert.equal(models[0].contextWindow, 512000); assert.equal(models[0].maxTokens, 64000);
   assert.equal(models[0].baseUrl, astra.baseUrl); assert.equal(models[0].api, astra.api);
   assert.equal(models[1].contextWindow, sol.contextWindow); assert.deepEqual(models[1].thinkingLevelMap, sol.thinkingLevelMap);
-  assert.deepEqual(models[1].input, sol.input); assert.equal(models[1].pideskChatGPTSettings, 1);
+  assert.deepEqual(models[1].input, sol.input); assert.equal(models[1].pideskChatGPTSettings, 2);
   assert.equal(models[1].compat.supportsMidConvoEffort, false, 'the subscription protocol, not API-key-only configuration updates');
   assert.equal(chatGPTModels(provider, []).length, 0, 'selecting none does not accidentally enable every model');
   for (const selection of [[{ id: 'unknown' }], [{ id: astra.id }, { id: astra.id }], [{ id: astra.id, maxTokens: -1 }],
@@ -53,7 +53,7 @@ test('picker selections preserve edits; deselected and re-added models use offic
 
 test('global ChatGPT model preferences persist across environments without touching credentials', () => {
   let changed = 0, writes = 0;
-  const account = () => ({ connected: true, vaultId: randomUUID(), runDir: '/tmp/fixture' });
+  const account = () => ({ connected: true, authProvider: 'openai-codex', vaultId: randomUUID(), runDir: '/tmp/fixture' });
   const store = { settings: { providers: [{ id: 'openai', kind: 'builtin' }], chatgpt: { accounts: { local: account(), remote: account() } } },
     saveSettings: () => writes++, getKey: () => 'a'.repeat(64) };
   const login = new ChatGPTLogin({ store, provider, configured: () => changed++, target: () => { throw Error('No host calls for model settings'); } });

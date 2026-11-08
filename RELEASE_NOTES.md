@@ -2,11 +2,13 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## 0.2.8 — ChatGPT model settings and faster processing
+## 0.2.8 — Codex subscriptions, model settings and speed tiers
+
+- **Use the Codex subscription route.** ChatGPT now signs in through Pi's native Codex OAuth and calls `/backend-api/codex/responses`, instead of requiring access to OpenAI's separate subscription-sharing API. Existing grants need Reconnect per environment. New Codex grants use separate encrypted vaults; old running sessions, API keys and original history are not rewritten. Host-local refresh still works without the Mac online.
 
 - **The same model editor as Models.** Settings → ChatGPT now has Choose models, search, select/deselect all, editable context/output budgets, display names, input capabilities and thinking levels. Selections apply to local and SSH environments; Manage models opens the right page. Reset parameters restores the selected models' official catalog defaults.
 - **Exact official defaults.** Editable token limits retain the catalog's exact integers instead of rounding through K/M labels. Only explicit overrides are stored. Changed limits refresh the active model even when its ID is unchanged; older idle ChatGPT runtimes are upgraded on model/speed selection or the next prompt without rewriting conversation history.
-- **Fast and Ultrafast for ChatGPT.** Eligible GPT-5.6/GPT-6 models support Fast. GPT-6 Astra and GPT-6.1 Sol also support Ultrafast. The chosen tier reaches the actual request, with existing rate-limit cooldown and reported-tier handling. Subscription requests follow Pi's official protocol restrictions: output budgets remain model metadata; unsupported max_output_tokens, temperature and cache fields are not sent.
+- **Fast and Ultrafast for ChatGPT.** Eligible GPT-5.6/GPT-6 models support Fast. GPT-6 Astra and GPT-6.1 Sol also support Ultrafast. The chosen tier reaches the actual request (Codex Fast uses `priority`, Ultrafast uses `ultrafast`), with existing rate-limit cooldown and reported-tier handling. Availability still depends on the account; offline CI does not establish real subscription entitlement. Subscription requests follow Pi's official protocol restrictions: output budgets remain model metadata; unsupported max_output_tokens, temperature and cache fields are not sent.
 
 ## 0.2.7 — ChatGPT subscriptions and request TPS
 

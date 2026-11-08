@@ -12,6 +12,7 @@ import { runSsh } from '../app/main/remote-setup.mjs';
 import { shellQuote } from '../core/transports.mjs';
 
 process.env.PIDESK_NO_SSH_MUX = '1'; // every admin/client connection really closes before the next
+for (const authProvider of ['openai', 'openai-codex']) {
 const root = mkdtempSync(join(tmpdir(), 'pd-auth-ssh-'));
 const env = { id: 'ssh:pidesk-test', kind: 'ssh', host: 'pidesk-test', label: 'CI SSH', sshArgs: ['-F', '/tmp/pidesk-sshd/ssh_config'] };
 const target = { env, node: process.execPath, authPath: resolve('agent/pidesk-chatgpt-auth.mjs'),
@@ -31,7 +32,7 @@ let pid;
 try {
   const transcript = join(root, 'unrelated.jsonl'); writeFileSync(transcript, 'original session prefix\n');
   const ready = await runChatGPTAuth(target, { op: 'configure', vaultId, key, agentDir: target.agentDir, piCli: target.piCli,
-    encoded: sealChatGPT({ openai: credential }, key) });
+    authProvider, encoded: sealChatGPT({ [authProvider]: credential }, key) });
   assert.equal(ready.connected, true); assert.ok(Number.isInteger(ready.pid)); pid = ready.pid;
   const request = { op: 'access', vaultId, capability: chatGPTCapability(key) };
   const first = await client(request, credential.access);
@@ -50,8 +51,9 @@ try {
   assert.equal((await client(request, credential.access)).rejected, true);
   assert.equal((await client({ op: 'configure', vaultId, key: request.capability, agentDir: target.agentDir, piCli: target.piCli })).rejected, true,
     'logout does not open the owner to reconfiguration by old request clients');
-  console.log('PASS  SSH ChatGPT: native owner survives client disconnect, private capabilities, encrypted grant, logout, unchanged history; no model requests');
+  console.log(`PASS  SSH ChatGPT (${authProvider}): native owner survives client disconnect, private capabilities, encrypted grant, logout, unchanged history; no model requests`);
 } finally {
   if (pid) await runSsh(env, `kill -TERM ${pid}`, { timeout: 5000 }).catch(() => {});
   rmSync(root, { recursive: true, force: true });
+}
 }

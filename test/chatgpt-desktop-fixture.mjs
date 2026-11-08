@@ -2,11 +2,11 @@
 // Exercises the real controller/vault/UI without opening a browser or contacting OpenAI.
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
+import { openaiCodexProvider } from '@earendil-works/pi-ai/providers/openai-codex';
 import { ChatGPTAuthHost } from '../agent/pidesk-chatgpt-auth.mjs';
 
 export function chatGPTDesktopFixture(profile) {
-  const original = openaiProvider();
+  const original = openaiCodexProvider();
   const host = new ChatGPTAuthHost({ loadModels: async () => ({ getAuth: async () => { throw new Error('No inference in the OAuth UI fixture'); } }) });
   return {
     provider: { ...original, getModels: () => original.getModels().filter(m => ['gpt-6-astra', 'gpt-6-luna', 'gpt-6.1-sol'].includes(m.id)), auth: { oauth: {

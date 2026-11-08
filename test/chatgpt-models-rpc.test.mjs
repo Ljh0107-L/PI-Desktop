@@ -14,7 +14,7 @@ test('bundled Pi applies selected ChatGPT models and exact edited limits without
   let session;
   t.after(async () => { await session?.stop(); rmSync(root, { recursive: true, force: true }); });
   const bridge = stageExtensions(resolve('agent'), join(root, 'ext'));
-  const provider = { id: 'pidesk-chatgpt', kind: 'subscription', vaultId: randomUUID(), capability: 'a'.repeat(64),
+  const provider = { id: 'pidesk-chatgpt', kind: 'subscription', authProvider: 'openai-codex', vaultId: randomUUID(), capability: 'a'.repeat(64),
     socketPath: join(root, 'no-auth-owner.sock'), models: [{ id: 'gpt-6-astra' }, { id: 'gpt-6.1-sol' }] };
   session = new PiSession({ id: 'models', boot: { providers: [provider] },
     transport: localTransport({ node: process.execPath, cwd: root, agentDir: join(root, 'agent'),
@@ -24,7 +24,9 @@ test('bundled Pi applies selected ChatGPT models and exact edited limits without
   assert.deepEqual(new Set(before.map(m => m.id)), new Set(['gpt-6-astra', 'gpt-6.1-sol']));
   const astra = before.find(m => m.id === 'gpt-6-astra');
   assert.equal(astra.contextWindow, 272000); assert.equal(astra.maxTokens, 128000);
-  assert.equal(astra.pideskChatGPTSettings, 1);
+  assert.equal(astra.pideskChatGPTSettings, 2);
+  assert.equal(astra.api, 'openai-codex-responses');
+  assert.equal(astra.baseUrl, 'https://chatgpt.com/backend-api');
   await session.setModel(provider.id, 'gpt-6-astra');
   const next = { ...provider, models: [{ id: 'gpt-6-astra', contextWindow: 512000, maxTokens: 64000 }] };
   await session.prompt(`/pidesk-providers ${Buffer.from(JSON.stringify([next])).toString('base64')}`);

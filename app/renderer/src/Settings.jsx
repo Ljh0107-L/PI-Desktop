@@ -304,17 +304,18 @@ function ChatGPTPage() {
     <ul className="rows">
       {environments.map(env => {
         const connected = !!status?.accounts?.[env.id]?.connected;
+        const needsReconnect = !!status?.accounts?.[env.id]?.needsReconnect;
         const current = login?.environmentId === env.id ? login : null;
         const working = current && active;
         return <li key={env.id} className="row-card">
           <div className="row-head">
-            <span className={`credential-dot ${connected ? 'ok' : 'missing'}`} title={connected ? 'Signed in · encrypted credentials on this environment' : 'Not signed in'} />
+            <span className={`credential-dot ${connected ? 'ok' : 'missing'}`} title={connected ? 'Signed in through Codex · model and speed access depend on your subscription' : needsReconnect ? 'Reconnect using Codex; the previous subscription-sharing grant cannot be reused' : 'Not signed in'} />
             <div className="row-identity"><span className="row-name">{env.label}</span></div>
             <div className="row-actions">
               {working ? <><span className="button small" aria-live="polite"><Spinner size={13} /> {current.state === 'preparing' ? 'Preparing…' : current.state === 'saving' ? 'Connecting…' : 'Waiting for browser…'}</span>
                 <button className="button small" disabled={current.state === 'saving' || busy === env.id} onClick={() => run(env.id, 'cancelChatGPTLogin')}>Cancel</button></>
-                : <><button className="button small" disabled={!!active || busy === env.id || (env.kind === 'ssh' && !env.enabled)} onClick={() => { setCallback(''); run(env.id, 'signInChatGPT', env.id); }} title="Authorize this environment separately so it can refresh without this Mac">{connected ? 'Reconnect' : 'Sign in with ChatGPT'}</button>
-                  {connected && <button className="button small danger" disabled={busy === env.id} onClick={() => run(env.id, 'signOutChatGPT', env.id)} title="Remove this environment’s stored authorization; this does not cancel your subscription">Sign out</button>}</>}
+                : <><button className="button small" disabled={!!active || busy === env.id || (env.kind === 'ssh' && !env.enabled)} onClick={() => { setCallback(''); run(env.id, 'signInChatGPT', env.id); }} title="Authorize this environment separately so it can refresh without this Mac">{connected || needsReconnect ? 'Reconnect' : 'Sign in with ChatGPT'}</button>
+                  {(connected || needsReconnect) && <button className="button small danger" disabled={busy === env.id} onClick={() => run(env.id, 'signOutChatGPT', env.id)} title="Remove this environment’s stored authorization; this does not cancel your subscription">Sign out</button>}</>}
             </div>
           </div>
           {working && current.manual && <form className="editor" onSubmit={submit}>

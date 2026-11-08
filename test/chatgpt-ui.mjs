@@ -70,6 +70,7 @@ export async function checkChatGPT({ page, screenshot, settingsBefore }) {
   assert.deepEqual(subscription.map(m => m.id), ['gpt-6-astra', 'gpt-6.1-sol']);
   assert.equal(subscription[0].contextWindow, 512000); assert.equal(subscription[0].maxTokens, 64000);
   assert.deepEqual(subscription[0].speeds, ['standard', 'fast', 'ultrafast']);
+  assert.equal(subscription.find(m => m.id === 'gpt-6.1-sol').contextWindow, 500000);
   await settings.getByRole('button', { name: 'Edit', exact: true }).click();
   await astra.getByRole('button', { name: 'Parameters', exact: true }).click();
   assert.equal(await context.inputValue(), '512000'); assert.equal(await output.inputValue(), '64000');
@@ -77,6 +78,7 @@ export async function checkChatGPT({ page, screenshot, settingsBefore }) {
   await settings.getByRole('button', { name: 'Save', exact: true }).click();
   await settings.locator('form').waitFor({ state: 'detached' });
   const restored = await page.evaluate(() => window.pidesk.invoke('chatGPTModelSettings'));
+  assert.ok(restored.models.every(m => m.api === 'openai-codex-responses'));
   assert.equal(restored.models[0].contextWindow, 272000); assert.equal(restored.models[0].maxTokens, 128000);
   await page.locator('.nav-item.back').click();
   for (const model of subscription) {

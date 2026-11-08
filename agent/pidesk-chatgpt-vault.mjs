@@ -5,6 +5,8 @@ import { lstatSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSy
 import { dirname, join } from 'node:path';
 
 export const CHATGPT_PROVIDER = 'pidesk-chatgpt';
+export const CODEX_AUTH_PROVIDER = 'openai-codex';
+const AUTH_PROVIDERS = ['openai', CODEX_AUTH_PROVIDER];
 export const validVaultId = id => typeof id === 'string' && /^[0-9a-f-]{36}$/.test(id);
 const keyBytes = key => {
   if (typeof key !== 'string' || !/^[0-9a-f]{64}$/.test(key)) throw new Error('Invalid ChatGPT vault key');
@@ -12,11 +14,16 @@ const keyBytes = key => {
 };
 export const chatGPTCapability = key => createHmac('sha256', keyBytes(key)).update('Pi Desktop ChatGPT access v1').digest('hex');
 function validate(data) {
-  const credential = data?.openai;
-  if (credential !== undefined && (credential?.type !== 'oauth' || typeof credential.access !== 'string' ||
-      typeof credential.refresh !== 'string' || !Number.isFinite(credential.expires) ||
-      !credential.access || !credential.refresh)) throw new Error('Invalid ChatGPT credential');
-  return credential ? { openai: credential } : {};
+  const result = {};
+  for (const id of AUTH_PROVIDERS) {
+    const credential = data?.[id];
+    if (credential !== undefined && (credential?.type !== 'oauth' || typeof credential.access !== 'string' ||
+        typeof credential.refresh !== 'string' || !Number.isFinite(credential.expires) ||
+        !credential.access || !credential.refresh)) throw new Error('Invalid ChatGPT credential');
+    if (credential) result[id] = credential;
+  }
+  if (Object.keys(result).length > 1) throw new Error('Each ChatGPT vault owns one authorization flow');
+  return result;
 }
 export function sealChatGPT(data, key) {
   const iv = randomBytes(12), cipher = createCipheriv('aes-256-gcm', keyBytes(key), iv);
@@ -73,19 +80,19 @@ export class ChatGPTCredentials {
     const operation = this.#queue.catch(() => {}).then(async () => { options?.signal?.throwIfAborted(); return fn(); });
     this.#queue = operation; return operation;
   }
-  async read(id, options) { options?.signal?.throwIfAborted(); return id === 'openai' ? this.#load().openai : undefined; }
-  async list(options) { return await this.read('openai', options) ? [{ providerId: 'openai', type: 'oauth' }] : []; }
+  async read(id, options) { options?.signal?.throwIfAborted(); return AUTH_PROVIDERS.includes(id) ? this.#load()[id] : undefined; }
+  async list(options) { options?.signal?.throwIfAborted(); return Object.keys(this.#load()).map(providerId => ({ providerId, type: 'oauth' })); }
   modify(id, fn, options) {
     return this.#locked(async () => {
-      if (id !== 'openai') throw new Error('Unsupported ChatGPT credential provider');
-      const data = this.#load(), next = await fn(data.openai);
+      if (!AUTH_PROVIDERS.includes(id)) throw new Error('Unsupported ChatGPT credential provider');
+      const data = this.#load(), next = await fn(data[id]);
       options?.signal?.throwIfAborted();
-      if (next !== undefined) { data.openai = next; this.#save(data); }
-      return data.openai;
+      if (next !== undefined) { data[id] = next; this.#save(data); }
+      return data[id];
     }, options);
   }
   delete(id, options) {
-    return this.#locked(() => { options?.signal?.throwIfAborted(); if (id === 'openai') this.#save({}); }, options);
+    return this.#locked(() => { options?.signal?.throwIfAborted(); if (AUTH_PROVIDERS.includes(id)) { const data = this.#load(); delete data[id]; this.#save(data); } }, options);
   }
   install(encoded, options) {
     return this.#locked(() => { const data = openChatGPT(encoded, this.#key); options?.signal?.throwIfAborted(); this.#save(data); }, options);

@@ -2,9 +2,9 @@
 // each environment has its own grant and an independent, encrypted host-side refresh owner.
 import { spawn } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { openaiProvider } from '@earendil-works/pi-ai/providers/openai';
+import { openaiCodexProvider } from '@earendil-works/pi-ai/providers/openai-codex';
 import { chatGPTModels, chatGPTModelOverrides } from '../../agent/pidesk-chatgpt.mjs';
-import { CHATGPT_PROVIDER, chatGPTCapability, chatGPTSocketPath, sealChatGPT } from '../../agent/pidesk-chatgpt-vault.mjs';
+import { CHATGPT_PROVIDER, CODEX_AUTH_PROVIDER, chatGPTCapability, chatGPTSocketPath, sealChatGPT } from '../../agent/pidesk-chatgpt-vault.mjs';
 import { runSsh } from './remote-setup.mjs';
 import { shellQuote } from '../../core/transports.mjs';
 
@@ -43,13 +43,13 @@ export async function runChatGPTAuth(target, request) {
 async function directAccess(target) {
   if (target.env.kind !== 'ssh') return;
   // No credentials or model requests: prove this host does not need the Mac's temporary egress.
-  const script = `const tls=require('node:tls');Promise.all(['auth.openai.com','api.openai.com'].map(host=>new Promise((resolve,reject)=>{const s=tls.connect({host,port:443,servername:host},()=>{s.destroy();resolve()});s.setTimeout(12000,()=>s.destroy(new Error('timeout')));s.on('error',reject)}))).then(()=>process.stdout.write('ok'),()=>{process.stderr.write('OpenAI is not directly reachable');process.exitCode=1})`;
+  const script = `const tls=require('node:tls');Promise.all(['auth.openai.com','chatgpt.com'].map(host=>new Promise((resolve,reject)=>{const s=tls.connect({host,port:443,servername:host},()=>{s.destroy();resolve()});s.setTimeout(12000,()=>s.destroy(new Error('timeout')));s.on('error',reject)}))).then(()=>process.stdout.write('ok'),()=>{process.stderr.write('OpenAI is not directly reachable');process.exitCode=1})`;
   try { await runSsh(target.env, [target.node, '-e', script].map(shellQuote).join(' '), { timeout: 15000 }); }
-  catch { throw new Error('This SSH environment must reach auth.openai.com and api.openai.com directly to keep running while this Mac is offline.'); }
+  catch { throw new Error('This SSH environment must reach auth.openai.com and chatgpt.com directly to keep running while this Mac is offline.'); }
 }
 export class ChatGPTLogin {
   #pending = null; #ready = new Map(); #revision = 0;
-  constructor({ store, target, openExternal, changed = () => {}, configured = () => {}, provider = openaiProvider(), run = runChatGPTAuth, probe = directAccess }) {
+  constructor({ store, target, openExternal, changed = () => {}, configured = () => {}, provider = openaiCodexProvider(), run = runChatGPTAuth, probe = directAccess }) {
     this.store = store; this.target = target; this.openExternal = openExternal; this.changed = changed; this.configured = configured;
     this.provider = provider; this.run = run; this.probe = probe;
   }
@@ -57,13 +57,22 @@ export class ChatGPTLogin {
   status() {
     const pending = this.#pending;
     return { revision: this.#revision,
-      accounts: Object.fromEntries(Object.entries(this.accounts()).map(([id, account]) => [id, { connected: !!account.connected }])),
+      accounts: Object.fromEntries(Object.entries(this.accounts()).map(([id, account]) => [id, {
+        connected: !!account.connected && account.authProvider === CODEX_AUTH_PROVIDER,
+        needsReconnect: !!account.connected && account.authProvider !== CODEX_AUTH_PROVIDER,
+      }])),
       login: pending ? { environmentId: pending.environmentId, state: pending.state, manual: !!pending.prompt, error: pending.error } : null,
     };
   }
   #publish() { this.#revision++; this.changed(this.status()); }
+  selection() {
+    const selection = this.store.settings.chatgpt?.models;
+    const ids = new Set(this.provider.getModels().map(m => m.id));
+    // Retain old preferences on disk, but never advertise an API-only model on the Codex route.
+    return Array.isArray(selection) ? selection.filter(m => ids.has(m.id)) : selection;
+  }
   modelSettings() {
-    return { available: chatGPTModels(this.provider), models: chatGPTModels(this.provider, this.store.settings.chatgpt?.models) };
+    return { available: chatGPTModels(this.provider), models: chatGPTModels(this.provider, this.selection()) };
   }
   saveModels(selection) {
     const models = chatGPTModelOverrides(this.provider.getModels(), selection);
@@ -74,27 +83,28 @@ export class ChatGPTLogin {
     return this.modelSettings();
   }
   catalog() {
-    const environments = Object.entries(this.accounts()).filter(([, a]) => a.connected).map(([id]) => id);
-    return environments.length ? chatGPTModels(this.provider, this.store.settings.chatgpt?.models).map(m => ({ ...m, environments })) : [];
+    const environments = Object.entries(this.accounts()).filter(([, a]) => a.connected && a.authProvider === CODEX_AUTH_PROVIDER).map(([id]) => id);
+    return environments.length ? chatGPTModels(this.provider, this.selection()).map(m => ({ ...m, environments })) : [];
   }
   config(environmentId) {
     const account = this.accounts()[environmentId];
-    if (!account?.connected) return null;
+    if (!account?.connected || account.authProvider !== CODEX_AUTH_PROVIDER) return null;
     const key = this.store.getKey(keyId(account.vaultId));
     if (!key) return null;
     return { id: CHATGPT_PROVIDER, kind: 'subscription', vaultId: account.vaultId,
       socketPath: chatGPTSocketPath(account.runDir, account.vaultId), capability: chatGPTCapability(key),
-      models: this.store.settings.chatgpt?.models };
+      models: this.selection(), authProvider: CODEX_AUTH_PROVIDER };
   }
   ensure(environmentId) {
     const account = this.accounts()[environmentId];
     if (!account?.connected) return Promise.reject(new Error('Sign in to ChatGPT for this environment in Settings first.'));
+    if (account.authProvider !== CODEX_AUTH_PROVIDER) return Promise.reject(new Error('Reconnect ChatGPT in Settings to authorize the Codex subscription route. The previous subscription-sharing grant cannot be reused.'));
     const current = this.#ready.get(environmentId);
     if (current?.account === account) return current.promise;
     const promise = (async () => {
       const target = await this.target(environmentId);
       if (target.runDir !== account.runDir || target.agentDir !== account.agentDir) throw new Error('This environment moved. Reconnect ChatGPT in Settings.');
-      const result = await this.run(target, { op: 'configure', vaultId: account.vaultId, key: this.store.getKey(keyId(account.vaultId)), agentDir: target.agentDir, piCli: target.piCli });
+      const result = await this.run(target, { op: 'configure', vaultId: account.vaultId, key: this.store.getKey(keyId(account.vaultId)), agentDir: target.agentDir, piCli: target.piCli, authProvider: CODEX_AUTH_PROVIDER });
       if (!result.connected) throw new Error('Reconnect ChatGPT for this environment in Settings.');
     })();
     const entry = { account, promise }; this.#ready.set(environmentId, entry);
@@ -122,11 +132,14 @@ export class ChatGPTLogin {
     signal.throwIfAborted();
     const settings = this.store.settings;
     settings.chatgpt ??= { accounts: {} }; settings.chatgpt.accounts ??= {};
-    let account = settings.chatgpt.accounts[run.environmentId];
-    if (!account) {
-      account = { vaultId: randomUUID(), deviceId: randomUUID(), connected: false, agentDir: target.agentDir, runDir: target.runDir };
+    const previous = settings.chatgpt.accounts[run.environmentId];
+    let account = previous;
+    if (!account || account.authProvider !== CODEX_AUTH_PROVIDER) {
+      account = { vaultId: randomUUID(), deviceId: randomUUID(), connected: false, authProvider: CODEX_AUTH_PROVIDER, agentDir: target.agentDir, runDir: target.runDir,
+        ...(previous?.connected ? { retired: [{ vaultId: previous.vaultId, authProvider: previous.authProvider ?? 'openai', agentDir: previous.agentDir, runDir: previous.runDir }] } : {}) };
       this.store.setKey(keyId(account.vaultId), randomBytes(32).toString('hex'));
-      settings.chatgpt.accounts[run.environmentId] = account; this.store.saveSettings();
+      // Never install Codex tokens into an old daemon, or replace a working grant on cancellation.
+      if (!previous) { settings.chatgpt.accounts[run.environmentId] = account; this.store.saveSettings(); }
     }
     run.state = 'authorizing'; this.#publish();
     const credential = await this.provider.auth.oauth.login({ signal,
@@ -139,6 +152,7 @@ export class ChatGPTLogin {
         }
       },
       prompt: prompt => new Promise((resolve, reject) => {
+        if (prompt.type === 'select' && prompt.options?.some(option => option.id === 'browser')) { resolve('browser'); return; }
         if (prompt.type !== 'manual_code') { reject(loginError()); return; }
         const cancelled = () => { clear(); reject(loginError()); };
         const clear = () => { signal.removeEventListener('abort', cancelled); prompt.signal?.removeEventListener('abort', cancelled); if (run.prompt?.resolve === done) run.prompt = null; };
@@ -151,9 +165,10 @@ export class ChatGPTLogin {
     }, { agentName: 'Pi Desktop', getDeviceId: () => account.deviceId });
     signal.throwIfAborted();
     const key = this.store.getKey(keyId(account.vaultId));
-    const encoded = sealChatGPT({ openai: credential }, key);
+    const encoded = sealChatGPT({ [CODEX_AUTH_PROVIDER]: credential }, key);
     run.state = 'saving'; run.prompt = null; run.url = null; this.#publish();
-    await this.run(target, { op: 'configure', vaultId: account.vaultId, key, encoded, agentDir: target.agentDir, piCli: target.piCli });
+    const result = await this.run(target, { op: 'configure', vaultId: account.vaultId, key, encoded, agentDir: target.agentDir, piCli: target.piCli, authProvider: CODEX_AUTH_PROVIDER });
+    if (!result.connected || result.authProvider !== CODEX_AUTH_PROVIDER) throw loginError();
     settings.chatgpt.accounts[run.environmentId] = { ...account, connected: true, agentDir: target.agentDir, runDir: target.runDir };
     this.store.saveSettings(); this.#ready.delete(run.environmentId);
     this.#pending = null; this.#publish(); this.configured();
@@ -184,10 +199,13 @@ export class ChatGPTLogin {
     }
     const account = this.accounts()[environmentId];
     if (!account) return this.status();
-    const target = await this.target(environmentId), key = this.store.getKey(keyId(account.vaultId));
-    if (target.runDir !== account.runDir || target.agentDir !== account.agentDir) throw new Error('Reconnect the original environment before signing out.');
-    await this.run(target, { op: 'configure', vaultId: account.vaultId, key, agentDir: target.agentDir, piCli: target.piCli });
-    await this.run(target, { op: 'logout', vaultId: account.vaultId, key });
+    const target = await this.target(environmentId), grants = [account, ...(account.retired ?? [])];
+    if (grants.some(grant => target.runDir !== grant.runDir || target.agentDir !== grant.agentDir)) throw new Error('Reconnect the original environment before signing out.');
+    for (const grant of grants) {
+      const key = this.store.getKey(keyId(grant.vaultId));
+      await this.run(target, { op: 'configure', vaultId: grant.vaultId, key, agentDir: target.agentDir, piCli: target.piCli, authProvider: grant.authProvider ?? 'openai' });
+      await this.run(target, { op: 'logout', vaultId: grant.vaultId, key });
+    }
     this.store.settings.chatgpt.accounts[environmentId] = { ...account, connected: false };
     this.store.saveSettings(); this.#ready.delete(environmentId); this.#publish(); this.configured();
     return this.status();

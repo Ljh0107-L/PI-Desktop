@@ -52,7 +52,7 @@ export async function chatGPTRequest(socketPath, message, { signal, timeout = 60
 
 export class ChatGPTAuthHost {
   #vaults = new Map();
-  constructor({ loadModels = async (piCli, credentials) => {
+  constructor({ loadModels = async (piCli, credentials, authProvider) => {
     const paths = createRequire(piCli).resolve.paths('@earendil-works/pi-ai') ?? [];
     let root, manifest;
     for (const path of paths) {
@@ -65,12 +65,12 @@ export class ChatGPTAuthHost {
     // This ESM-only package has no require export. Resolve its declared public import entries,
     // relative to the host's installed Pi, rather than relying on the extension's node_modules.
     if (!root) throw unavailable();
-    const [{ createModels }, { openaiProvider }] = await Promise.all([
+    const [{ createModels }, providerModule] = await Promise.all([
       import(pathToFileURL(join(root, manifest.exports['.'].import)).href),
-      import(pathToFileURL(join(root, manifest.exports['./providers/*'].import.replace('*', 'openai'))).href),
+      import(pathToFileURL(join(root, manifest.exports['./providers/*'].import.replace('*', authProvider))).href),
     ]);
     const models = createModels({ credentials, authContext: { env: async () => undefined, fileExists: async () => false } });
-    const provider = openaiProvider();
+    const provider = authProvider === 'openai-codex' ? providerModule.openaiCodexProvider() : providerModule.openaiProvider();
     models.setProvider({ ...provider, auth: { oauth: provider.auth.oauth } });
     return models;
   } } = {}) { this.loadModels = loadModels; }
@@ -79,22 +79,24 @@ export class ChatGPTAuthHost {
     const id = message.vaultId;
     let vault = this.#vaults.get(id);
     if (message.op === 'configure') {
+      const authProvider = message.authProvider ?? 'openai';
+      if (!['openai', 'openai-codex'].includes(authProvider)) throw unavailable();
       if (typeof message.key !== 'string' || !/^[0-9a-f]{64}$/.test(message.key) ||
           !isAbsolute(message.agentDir ?? '') || !isAbsolute(message.piCli ?? '')) throw unavailable();
-      if (vault && (!equalSecret(vault.key, message.key) || vault.agentDir !== message.agentDir)) throw unavailable();
+      if (vault && (!equalSecret(vault.key, message.key) || vault.agentDir !== message.agentDir || vault.authProvider !== authProvider)) throw unavailable();
       const created = !vault;
       if (!vault) {
         const credentials = new ChatGPTCredentials(chatGPTVaultPath(message.agentDir, id), message.key);
-        vault = { key: message.key, capability: chatGPTCapability(message.key), credentials, agentDir: message.agentDir };
+        vault = { key: message.key, capability: chatGPTCapability(message.key), credentials, agentDir: message.agentDir, authProvider };
         // Publish before imports so simultaneous reconnects share one mutation queue.
         this.#vaults.set(id, vault);
-        vault.models = this.loadModels(message.piCli, credentials);
+        vault.models = this.loadModels(message.piCli, credentials, authProvider);
         vault.models.catch(() => { if (this.#vaults.get(id) === vault) this.#vaults.delete(id); });
       }
       try {
         if (message.encoded !== undefined) await vault.credentials.install(message.encoded);
         await vault.models;
-        return { ok: true, connected: !!await vault.credentials.read('openai') };
+        return { ok: true, connected: !!await vault.credentials.read(authProvider), authProvider };
       } catch {
         if (created && this.#vaults.get(id) === vault) this.#vaults.delete(id);
         throw unavailable();
@@ -103,16 +105,16 @@ export class ChatGPTAuthHost {
     if (!vault) throw unavailable();
     if (message.op === 'logout') {
       if (!equalSecret(message.key, vault.key)) throw unavailable();
-      await vault.credentials.delete('openai');
+      await vault.credentials.delete(vault.authProvider);
       if (this.#vaults.get(id) === vault) this.#vaults.delete(id);
       return { ok: true };
     }
     if (message.op !== 'access' || !equalSecret(message.capability, vault.capability)) throw unavailable();
-    if (!await vault.credentials.read('openai')) throw unavailable();
+    if ((message.authProvider !== undefined && message.authProvider !== vault.authProvider) || !await vault.credentials.read(vault.authProvider)) throw unavailable();
     const models = await vault.models;
     const controller = new AbortController(), timer = setTimeout(() => controller.abort(), 45000);
     try {
-      const result = await models.getAuth('openai', { signal: controller.signal, minOAuthValidityMs: 5 * 60 * 1000 });
+      const result = await models.getAuth(vault.authProvider, { signal: controller.signal, minOAuthValidityMs: 5 * 60 * 1000 });
       if (!result?.auth?.apiKey) throw unavailable();
       return { ok: true, access: result.auth.apiKey };
     } catch { throw unavailable(); }

@@ -20,8 +20,8 @@ export const SPEED_COOLDOWN_MS = 5 * 60 * 1000;
 // The speeds a model offers, standard first; none for models (and custom endpoints) without any.
 export function speedOptions(model) {
   const { provider, api, id } = model ?? {};
-  if (['openai', 'pidesk-chatgpt'].includes(provider) && OPENAI_FAST.test(id ?? '')) {
-    if (api === 'openai-responses') return OPENAI_ULTRAFAST.has(id) ? [...SPEEDS] : ['standard', 'fast'];
+  if (['openai', 'openai-codex', 'pidesk-chatgpt'].includes(provider) && OPENAI_FAST.test(id ?? '')) {
+    if (['openai-responses', 'openai-codex-responses'].includes(api)) return OPENAI_ULTRAFAST.has(id) ? [...SPEEDS] : ['standard', 'fast'];
     if (api === 'openai-completions') return ['standard', 'fast'];
   }
   if (provider === 'anthropic' && api === 'anthropic-messages' && ANTHROPIC_FAST.has(id)) return ['standard', 'fast'];
@@ -38,7 +38,7 @@ export function effectiveSpeed(wanted, offered, cooling = () => false) {
 // The request body at that speed, or undefined to leave it as it is.
 export function withSpeed(payload, model, speed) {
   if (!speed || speed === 'standard' || !model || payload?.model !== model.id || !speedOptions(model).includes(speed)) return undefined;
-  if (model.api !== 'anthropic-messages') return { ...payload, service_tier: speed };
+  if (model.api !== 'anthropic-messages') return { ...payload, service_tier: model.api === 'openai-codex-responses' && speed === 'fast' ? 'priority' : speed };
   // pi-ai sends `betas` as the anthropic-beta header.
   const betas = ANTHROPIC_PREVIEW.has(model.id) ? { betas: [...new Set([...(payload.betas ?? []), ANTHROPIC_FAST_BETA])] } : {};
   return { ...payload, speed: 'fast', ...betas };

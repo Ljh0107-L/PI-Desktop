@@ -75,7 +75,7 @@ test('host capabilities cannot read refresh tokens, install grants, or log out a
   const host = new ChatGPTAuthHost();
   const configure = { op: 'configure', vaultId, key, agentDir: root, piCli: resolve('node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'), encoded: sealChatGPT({ openai: credential() }, key) };
   const ready = await host.handle(configure);
-  assert.deepEqual(ready, { ok: true, connected: true });
+  assert.deepEqual(ready, { ok: true, connected: true, authProvider: 'openai' });
   const access = await host.handle({ op: 'access', vaultId, capability: chatGPTCapability(key) });
   assert.deepEqual(access, { ok: true, access: 'fixture-access' }); assert.equal(access.refresh, undefined);
   await assert.rejects(host.handle({ op: 'access', vaultId, capability: 'wrong' }));
@@ -152,6 +152,7 @@ function loginFixture(t) {
   const provider = { getModels: () => [{ id: 'fixture-model', name: 'Fixture', api: 'openai-responses', contextWindow: 128000, maxTokens: 16000, reasoning: true }], auth: { oauth: {
     async login(interaction, supplied) {
       options = supplied;
+      assert.equal(await interaction.prompt({ type: 'select', options: [{ id: 'browser' }, { id: 'device_code' }] }), 'browser');
       interaction.notify({ type: 'auth_url', url: 'https://auth.openai.com/fixture' });
       const value = await interaction.prompt({ type: 'manual_code', signal: interaction.signal });
       if (value !== 'approved') throw new Error('private fixture-refresh-token');
@@ -210,6 +211,27 @@ test('provider response details never reach the login status or overwrite a good
   login.submit('wrong'); await waitFor(() => login.status().login?.state === 'failed');
   assert.doesNotMatch(JSON.stringify(login.status()), /fixture-refresh/);
   assert.equal(login.config('local'), null); assert.equal(login.catalog().length, 0);
+});
+
+test('Codex reconnect keeps the old grant untouched until successful new authorization', async t => {
+  const { login, store, keys } = loginFixture(t);
+  const previous = { connected: true, vaultId: randomUUID(), deviceId: randomUUID(), ...(await login.target('local')) };
+  store.settings.chatgpt = { accounts: { local: previous } };
+  const oldKey = randomBytes(32).toString('hex'); keys.set(`chatgpt-vault:${previous.vaultId}`, oldKey);
+  assert.equal(login.status().accounts.local.needsReconnect, true);
+  assert.equal(login.status().accounts.local.connected, false);
+  assert.equal(login.config('local'), null); assert.deepEqual(login.catalog(), []);
+  await assert.rejects(login.ensure('local'), /previous subscription-sharing grant/);
+  await login.start('local'); await waitFor(() => login.status().login?.manual); await login.cancel();
+  assert.equal(store.settings.chatgpt.accounts.local, previous);
+  assert.equal(keys.get(`chatgpt-vault:${previous.vaultId}`), oldKey);
+  await login.start('local'); await waitFor(() => login.status().login?.manual);
+  login.submit('approved'); await waitFor(() => !login.status().login);
+  const next = store.settings.chatgpt.accounts.local;
+  assert.notEqual(next.vaultId, previous.vaultId); assert.equal(next.authProvider, 'openai-codex');
+  assert.equal(login.config('local').authProvider, 'openai-codex');
+  assert.equal(login.status().accounts.local.needsReconnect, false);
+  assert.equal(keys.get(`chatgpt-vault:${previous.vaultId}`), oldKey, 'old running sessions retain their owner and grant');
 });
 
 test('subscription models preserve context/effort and use native streaming, not a second chat engine', async () => {
