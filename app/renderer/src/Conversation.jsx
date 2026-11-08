@@ -516,10 +516,10 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
     const movedUp = el.scrollTop < previousTop.current;
     const moved = Math.abs(el.scrollTop - previousTop.current) > 1;
     previousTop.current = el.scrollTop;
-    if (!atBottom) {
-      if (stick.current || scrollIntent.current || moved) bookmark.current = historyBookmark(el);
-      stick.current = false;
-    } else if (scrollIntent.current) stick.current = true;
+    if (moved) {
+      stick.current = atBottom;
+      if (!atBottom) bookmark.current = historyBookmark(el);
+    }
     if (el.scrollTop < el.clientHeight * 3 && movedUp && scrollIntent.current && transcript.history?.next) earlier();
     scrollIntent.current = false;
     updateLatest();
@@ -531,6 +531,14 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
     previousTop.current = scroller.current?.scrollTop ?? 0;
     updateLatest();
   };
+  const retainRef = useRef(retainPosition); retainRef.current = retainPosition;
+  useEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const observer = new ResizeObserver(() => { if (el.clientHeight) retainRef.current(); });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
   useLayoutEffect(retainPosition, [blocks, questions]);
   useEffect(() => { initialFill.current = 0; setExpanded({}); followLatest(); }, [session?.id]);
   useEffect(() => {

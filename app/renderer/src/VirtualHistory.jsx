@@ -7,7 +7,15 @@ export function VirtualHistory({ items, scroller, renderItem, onMeasure }) {
   const [visible, setVisible] = useState(() => new Set(items.slice(-20).map(item => item.key)));
   const [, setMeasured] = useState(0);
   const measureCallback = useRef(onMeasure); measureCallback.current = onMeasure;
-  useLayoutEffect(() => { measureCallback.current?.(); }, [items, visible]);
+  useLayoutEffect(() => {
+    // Cache real heights before an immediate scroll can unmount newly shown rows.
+    // Waiting for ResizeObserver leaves a frame where a large row can collapse to
+    // its estimate and clamp the viewport, even with a correct reading bookmark.
+    for (const [key, node] of nodes.current) {
+      if (node.dataset.mounted === 'true') heights.current.set(key, node.getBoundingClientRect().height);
+    }
+    measureCallback.current?.();
+  });
   useEffect(() => {
     const io = new IntersectionObserver(entries => {
       setVisible(previous => {

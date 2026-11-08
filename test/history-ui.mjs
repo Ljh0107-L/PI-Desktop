@@ -152,7 +152,7 @@ try {
       const node = [...el.querySelectorAll(anchor.tool ? '[data-tool-id]' : '[data-history-key]')].find(n => (anchor.tool ? n.dataset.toolId : n.dataset.historyKey) === anchor.key);
       return node.getBoundingClientRect().top - el.getBoundingClientRect().top - anchor.offset;
     }, anchor);
-    assert.ok(Math.abs(shift) < 3, `prepend moved the reading anchor by ${shift}px`);
+    assert.ok(Math.abs(shift) < 3, `page ${i} moved reading anchor ${anchor.key} by ${shift}px`);
   }
   const mounted = await page.locator('.session-main .history-virtual-row[data-mounted="true"]').count();
   const rows = await page.locator('.session-main .history-virtual-row').count();
