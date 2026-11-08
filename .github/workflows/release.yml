@@ -13,7 +13,8 @@ jobs:
   # Re-runs the offline suites; the end-to-end UI suite already ran when this commit was pushed to main.
   verify:
     uses: ./.github/workflows/ci.yml
-    jobs: ['bridge', 'core']
+    with:
+      skip_ui: true
   # The build does not depend on the suites, so it runs alongside them; only publishing is gated on both.
   mac:
     name: macOS app (arm64 + x64)
@@ -76,10 +77,11 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: pi-desktop-mac
+          path: release
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ls -la release
-          gh release create "$GITHUB_REF_NAME#v" release/*.dmg release/*.zip release/latest-mac.yml \
+          gh release create "$GITHUB_REF_NAME" release/*.dmg release/*.zip release/latest-mac.yml \
             --title "Pi Desktop ${GITHUB_REF_NAME#v}" --notes-file RELEASE_NOTES.md --repo "$GITHUB_REPOSITORY"

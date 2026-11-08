@@ -8,6 +8,11 @@ on:
     paths-ignore: ['**.md', 'docs/**', 'build/make-icon.py', 'build/icon-source.png']
   workflow_dispatch:
   workflow_call:
+    inputs:
+      skip_ui:
+        type: boolean
+        default: false
+        description: Skip the UI suite when the release commit has already passed it
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -33,6 +38,7 @@ jobs:
         run: python -m unittest discover -s tests -p 'test_bridge_unit.py' -v
 
   ui:
+    if: ${{ !inputs.skip_ui }}
     name: End-to-end UI
     runs-on: macos-latest
     timeout-minutes: 20
