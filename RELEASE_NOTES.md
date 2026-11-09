@@ -2,7 +2,7 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## Unreleased
+## 0.2.11 — Background jobs
 
 - **Background jobs.** Long-running commands can be offloaded with `run_in_background`: the call returns at once with a job id and the command keeps running (on this Mac or the SSH host) while the model does other work. When it finishes, an automated message with the exit code and the output tail starts the model's next turn — no timer polling. `background_status` shows a job's progress and output tail on demand, and `background_stop` kills a runaway job (SIGTERM, then SIGKILL). Up to 8 jobs run at once, and a job still running after 30 minutes gets a one-time reminder. Jobs are shell children of the session's Pi process and are killed when the session shuts down.
 
