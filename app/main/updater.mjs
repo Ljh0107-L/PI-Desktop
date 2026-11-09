@@ -2,6 +2,9 @@
 // Squirrel.Mac, so this downloads the release zip for this architecture, checks its SHA-512 against
 // the release's latest-mac.yml, unpacks it next to the update cache, and swaps the .app bundle in
 // place after the app quits, then relaunches it.
+// GitHub's release-download edge is flaky: individual requests intermittently get 504 (Gateway
+// Time-out) and a large transfer can drop mid-stream. Transient failures are retried with backoff
+// before the user ever sees an error.
 import { execFile, spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { accessSync, constants, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
@@ -10,6 +13,16 @@ import { dirname, join } from 'node:path';
 import { MAX_MANIFEST_BYTES, parseUpdateManifest, UPDATE_MANIFEST_URL } from '../../core/update-manifest.mjs';
 
 const CHECK_EVERY_MS = 6 * 60 * 60 * 1000;
+const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+// Transport-level failures (dropped socket, DNS blip, deadline expiry) are transient, and so are
+// 5xx responses. 4xx, checksum and size failures are deterministic and are never retried.
+const transportFailure = error =>
+  error?.name === 'TimeoutError' ||
+  ['ECONNRESET', 'ECONNREFUSED', 'EAI_AGAIN', 'ETIMEDOUT', 'ENOTFOUND', 'UND_ERR_SOCKET',
+    'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT']
+    .includes(error?.cause?.code) ||
+  /fetch failed|timed? ?out/i.test(String(error?.message));
 
 const newer = (a, b) => {
   const pa = a.replace(/^v/, '').split(/[.-]/).map(n => parseInt(n, 10) || 0), pb = b.replace(/^v/, '').split(/[.-]/).map(n => parseInt(n, 10) || 0);
@@ -42,9 +55,7 @@ export class Updater {
     try {
       // No api.github.com call: unauthenticated REST requests share a 60/hour
       // allowance across a company's outbound proxy. The public asset needs no token.
-      const res = await this.net.fetch(UPDATE_MANIFEST_URL, {
-        cache: 'no-store', headers: { 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(30000),
-      });
+      const res = await this.#fetchWithRetry(UPDATE_MANIFEST_URL, { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' }, timeoutMs: 30000, attempts: 3, baseMs: 1000 });
       if (!res.ok) throw new Error(`Could not read the update manifest (HTTP ${res.status}). Try the Releases download page if your network blocks GitHub assets.`);
       const chunks = [];
       let bytes = 0;
@@ -63,13 +74,39 @@ export class Updater {
     }
   }
 
+  // Each attempt gets a fresh deadline, since one that expired cannot be reused.
+  async #fetchWithRetry(url, init) {
+    const { attempts, baseMs, ...options } = init;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        const res = await this.net.fetch(url, { ...options, signal: AbortSignal.timeout(options.timeoutMs) });
+        if (res.status >= 500 && attempt < attempts) { res.body?.cancel?.().catch(() => {}); await sleep(baseMs * 2 ** (attempt - 1)); continue; }
+        return res;
+      } catch (error) {
+        if (!transportFailure(error) || attempt >= attempts) throw error;
+        await sleep(baseMs * 2 ** (attempt - 1));
+      }
+    }
+  }
+
   async #download(version, asset, sha512) {
     this.#set({ state: 'downloading', version, progress: 0 });
+    for (let attempt = 1; ; attempt++) {
+      try { await this.#downloadOnce(version, asset, sha512); return; }
+      catch (error) {
+        const retryable = transportFailure(error) || /HTTP 5\d\d/.test(String(error.message));
+        if (!retryable || attempt >= 3) throw error;
+        await sleep(2000 * (attempt - 1));
+      }
+    }
+  }
+
+  async #downloadOnce(version, asset, sha512) {
     const dir = join(this.cacheDir, version);
     rmSync(dir, { recursive: true, force: true });
     mkdirSync(dir, { recursive: true });
     const res = await this.net.fetch(asset.browser_download_url, { signal: AbortSignal.timeout(10 * 60 * 1000) });
-    if (!res.ok) throw new Error(`Download failed (${res.status})`);
+    if (!res.ok) throw new Error(`Download failed (HTTP ${res.status})`);
     const total = asset.size;
     const chunks = [];
     let received = 0, last = 0;

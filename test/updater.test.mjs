@@ -128,3 +128,50 @@ test('overlapping checks make one request; network failure releases checking sta
   reject(new Error('network unavailable'));
   assert.equal((await first).state, 'error');
 });
+
+test('a flaky 504 on the manifest is retried before reaching the user', async t => {
+  let flaky = true;
+  const f = fixture(t, { version: '0.1.18', fetch: url => (flaky ? (flaky = false, new Response('flaky', { status: 504 })) : new Response(stringify(manifest()))) });
+  const status = await f.updater.check({ manual: true });
+  assert.equal(status.state, 'current');
+  assert.equal(f.calls.length, 2);
+  assert.equal(f.calls[0].url, UPDATE_MANIFEST_URL);
+});
+
+test('a 404 on the manifest is not retried', async t => {
+  const f = fixture(t, { version: '0.1.18', fetch: () => new Response('missing', { status: 404 }) });
+  const status = await f.updater.check({ manual: true });
+  assert.equal(status.state, 'error');
+  assert.match(status.message, /HTTP 404/);
+  assert.equal(f.calls.length, 1);
+});
+
+test('a flaky 504 on the ZIP is retried and the update completes', { skip: process.platform !== 'darwin' }, async t => {
+  let archive, flakyZip = true;
+  const f = fixture(t, { fetch: url => url === UPDATE_MANIFEST_URL
+    ? new Response(stringify(manifest(archive)))
+    : (flakyZip ? (flakyZip = false, new Response('flaky', { status: 504 })) : new Response(archive)) });
+  const contents = join(f.dir, 'Pi Desktop.app', 'Contents'); mkdirSync(contents, { recursive: true });
+  writeFileSync(join(contents, 'version.txt'), '0.1.18');
+  const zip = join(f.dir, 'fixture.zip');
+  execFileSync('/usr/bin/ditto', ['-c', '-k', '--keepParent', join(f.dir, 'Pi Desktop.app'), zip]);
+  archive = readFileSync(zip);
+  const status = await f.updater.check({ manual: true });
+  assert.equal(status.state, 'ready');
+  assert.equal(f.calls.filter(c => c.url.includes('/download/')).length, 2);
+  assert.equal(readFileSync(join(status.path, 'Contents/version.txt'), 'utf8'), '0.1.18');
+});
+
+test('a ZIP transfer dropped mid-stream is retried; a repeated drop fails without extracting', async t => {
+  const data = Buffer.from('zip');
+  const drop = () => new Response(new ReadableStream({ start(controller) { controller.error(new Error('fetch failed')); } }));
+  let attempts = 0;
+  const f = fixture(t, { fetch: url => url === UPDATE_MANIFEST_URL
+    ? new Response(stringify(manifest(data)))
+    : ((attempts += 1) < 3 ? drop() : new Response('wrong')) });
+  const status = await f.updater.check({ manual: true });
+  assert.equal(status.state, 'error');
+  assert.equal(f.calls.length, 4); // the manifest plus three download attempts
+  assert.ok(!f.events.some(e => e.state === 'ready'));
+  assert.ok(!existsSync(join(f.dir, 'updates/0.1.18/app')));
+});
