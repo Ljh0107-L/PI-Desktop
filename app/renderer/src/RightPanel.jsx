@@ -1,11 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useId, useMemo, useState } from 'react';
 import { Icon } from './Icons.jsx';
-import { useResizable } from './ui.jsx';
+import { Spinner, useResizable } from './ui.jsx';
 import { formatTokens, speedDisplay, speedReply, speedTier, usageOf } from './transcript.js';
 import { stopBackgroundJob, useStore } from './store.js';
 import { subagentBatches, visibleSubagentBatches } from './subagent-state.js';
 import { SubagentDetail, SubagentList } from './Subagents.jsx';
-import { backgroundElapsed, backgroundOutcome, sortedBackgroundJobs } from './background-jobs.js';
+import { backgroundElapsed, sortedBackgroundJobs } from './background-jobs.js';
 
 function Card({ title, children, open: initial = true, aside }) {
   const [open, setOpen] = useState(initial);
@@ -65,9 +65,7 @@ function UsageCard({ transcript }) {
   );
 }
 
-// Live background jobs from this session's Pi (started with run_in_background): running jobs first,
-// newest first. Each row shows its state, how long it has run (ticked locally while anything runs),
-// a Stop button while running, and the output tail under a fold.
+// Only active jobs stay in the card. Completion messages and host-side records are unchanged.
 const jobMs = ms => {
   const s = Math.max(0, Math.round(ms / 1000));
   if (s < 60) return `${s}s`;
@@ -76,54 +74,60 @@ const jobMs = ms => {
 };
 function BackgroundJob({ job, sessionId, connected, elapsed }) {
   const [stopping, setStopping] = useState(false);
-  const outcome = backgroundOutcome(job);
-  const running = job.status === 'running';
+  const [expanded, setExpanded] = useState(false);
+  const detailId = useId();
+  const isStopping = stopping || job.stopping;
   const stop = async () => {
     setStopping(true);
     try { await stopBackgroundJob(sessionId, job.id, job.startedAt); }
     catch { /* the store shows the error */ }
     finally { setStopping(false); }
   };
-  return <div className={`job ${outcome.kind}`} data-job-id={job.id}>
-    <div className="job-name" title={job.description || job.command}>{job.description || job.command}</div>
-    <div className="job-line">
-      <span className="job-id">{job.id}</span>
-      <span className={`job-state ${outcome.kind}`}>{outcome.label}</span>
-      <span className="job-elapsed muted">{jobMs(elapsed)}</span>
-      {running && <button className="link-button job-stop" aria-label={`Stop job ${job.id}`} disabled={!connected || stopping || job.stopping} onClick={stop}>Stop</button>}
+  return <div className="job running" data-job-id={job.id}>
+    <div className="job-head">
+      {connected ? <Spinner size={13} /> : <Icon name="timer" size={13} />}
+      <div className="job-text">
+        <div className="job-name" title={job.description || job.command}>{job.description || job.command}</div>
+        <div className="job-meta">
+          <span className="job-id">{job.id}</span><span aria-hidden="true">·</span>
+          <span className="job-elapsed">{jobMs(elapsed)}</span>
+          {isStopping && <span>Stopping…</span>}
+        </div>
+      </div>
     </div>
-    <details className="job-tail">
-      <summary>Command and output</summary>
-      <pre className="job-command">{job.command}</pre>
-      <div className="job-cwd">{job.cwd}</div>
-      {job.error && <div className="job-error">{job.error}</div>}
-      <pre className="job-output">{job.tail || 'No output yet.'}</pre>
-    </details>
+    <div className="job-actions">
+      <button className="job-details-toggle" aria-expanded={expanded} aria-controls={detailId} onClick={() => setExpanded(value => !value)}>
+        <Icon name={expanded ? 'caretDown' : 'caretRight'} size={13} />Details
+      </button>
+      <button className="link-button job-stop" aria-label={`Stop job ${job.id}`} disabled={!connected || isStopping} onClick={stop}>Stop</button>
+    </div>
+    {expanded && <div className="job-details" id={detailId}>
+      <div className="job-cwd"><Icon name="folder" size={13} /><span title={job.cwd}>{job.cwd}</span></div>
+      <div className="job-terminal">
+        <div className="job-code"><span className="job-code-label">Command</span><pre className="job-command">{job.command}</pre></div>
+        <div className="job-code"><span className="job-code-label">Output</span><pre className="job-output">{job.tail || 'Waiting for output…'}</pre></div>
+      </div>
+    </div>}
   </div>;
 }
 function BackgroundJobs({ sessionId }) {
   const snapshot = useStore(s => s.jobs[sessionId]);
   const connected = useStore(s => s.sessions.find(session => session.id === sessionId)?.status === 'connected');
-  const list = sortedBackgroundJobs(snapshot?.jobs);
-  const running = list.filter(job => job.status === 'running');
-  const [showAll, setShowAll] = useState(false);
+  // Finished tasks are dropped from the card the moment they end; only running jobs stay visible.
+  const list = sortedBackgroundJobs(snapshot?.jobs).filter(job => job.status === 'running');
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (!running.length || !connected) return;
+    if (!list.length || !connected) return;
     const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
-  }, [running.length, connected]);
+  }, [list.length, connected]);
   if (!list.length) return null;
-  // Always expose all active jobs, including the seventh and eighth Stop buttons.
-  const visible = showAll ? list : list.slice(0, Math.max(6, running.length));
-  return <Card title="Background tasks" aside={<span className="muted">{running.length} running</span>}>
+  return <Card title="Background tasks">
     <div className="jobs">
-      {!connected && <div className="jobs-offline muted">Disconnected — showing last known state</div>}
-      {visible.map(job => <BackgroundJob key={`${job.id}:${job.startedAt}`} job={job} sessionId={sessionId} connected={connected}
+      <div className="jobs-summary">{list.length} running</div>
+      {!connected && <div className="jobs-offline">Disconnected — showing last known state</div>}
+      {list.map(job => <BackgroundJob key={`${job.id}:${job.startedAt}`} job={job} sessionId={sessionId} connected={connected}
         elapsed={backgroundElapsed(job, snapshot, now, connected)} />)}
-      {list.length > Math.max(6, running.length) && <button className="link-button jobs-more" onClick={() => setShowAll(v => !v)}>
-        {showAll ? 'Show fewer' : `Show ${list.length - visible.length} earlier tasks`}
-      </button>}
     </div>
   </Card>;
 }

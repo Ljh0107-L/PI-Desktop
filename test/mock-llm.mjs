@@ -188,9 +188,11 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
     const backgroundMatch = /\[\[background-job(?:-(fail|stop|many))?\]\]/.exec(userText);
     if (backgroundMatch && last.role !== 'tool') {
       const mode = backgroundMatch[1];
-      const command = mode === 'fail' ? 'echo failed; exit 7' : mode ? 'echo ready; sleep 60' : 'echo started; sleep 4; echo job-done';
+      const command = mode === 'fail' ? 'echo failed; exit 7' : mode === 'stop'
+        ? "printf 'ready\\nChecking background task state and reconnect handling\\nWaiting for the stop request\\n'; sleep 60"
+        : mode ? 'echo ready; sleep 60' : 'echo started; sleep 4; echo job-done';
       send({ role: 'assistant', content: '' });
-      send({ tool_calls: Array.from({ length: mode === 'many' ? 8 : 1 }, (_, index) => ({ index, id: `call_bgjob${requests.length}_${index}`, type: 'function', function: { name: 'run_in_background', arguments: JSON.stringify({ command, description: mode ? `${mode} check ${index + 1}` : 'Soak check' }) } })) });
+      send({ tool_calls: Array.from({ length: mode === 'many' ? 8 : 1 }, (_, index) => ({ index, id: `call_bgjob${requests.length}_${index}`, type: 'function', function: { name: 'run_in_background', arguments: JSON.stringify({ command, description: mode === 'stop' ? '验证后台任务卡片的状态与连接恢复' : mode ? `${mode} check ${index + 1}` : 'Soak check' }) } })) });
       finish('tool_calls');
       return;
     }

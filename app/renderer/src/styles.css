@@ -1015,25 +1015,33 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 .subagent-clear:disabled { opacity: .35; cursor: default; }
 .subagent-summary-head:disabled { cursor: default; }
 .subagent-stop { flex-shrink: 0; font-size: 12px; color: #ff7b72; }
-.jobs { display: flex; flex-direction: column; gap: 10px; min-width: 0; }
-.job { min-width: 0; }
-.job + .job { padding-top: 10px; border-top: 1px solid var(--hairline); }
-.job-name { font-size: 12px; font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.job-line { display: flex; align-items: center; gap: 8px; min-height: 26px; font-size: 11px; }
-.job-id { color: var(--muted); flex-shrink: 0; }
-.job-state { flex-shrink: 0; }
-.job-state.running { color: #ee7c58; }
-.job-state.done { color: #56d364; }
-.job-state.failed, .job-error { color: #ff7b72; }
-.job-state.stopped { color: var(--muted); }
-.job-elapsed { flex: 1; text-align: right; white-space: nowrap; }
-.job-stop { flex-shrink: 0; height: 24px; margin: 0; padding: 0 6px; font-size: 12px; color: #ff7b72; }
-.job-stop:disabled { opacity: .4; cursor: default; }
-.job-tail, .jobs-offline { font-size: 11px; color: var(--muted); }
-.job-tail summary { cursor: pointer; padding: 2px 0; }
-.job-tail pre { margin: 4px 0; padding: 8px; border: 1px solid var(--hairline); border-radius: 8px; background: var(--surface); font-size: 11px; max-height: 160px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
-.job-cwd, .job-error { overflow-wrap: anywhere; }
-.jobs-more { font-size: 11px; align-self: flex-start; }
+.jobs { min-width: 0; }
+.jobs-summary { padding: 6px 8px 8px; color: var(--muted); font-size: 11px; }
+.jobs-offline { padding: 0 8px 10px; color: var(--muted); font-size: 11px; }
+.job { min-width: 0; padding: 12px 8px 8px; border-top: 1px solid var(--hairline); }
+.job-head { display: flex; align-items: flex-start; gap: 10px; min-width: 0; }
+.job-head > .spinner, .job-head > svg { flex-shrink: 0; margin-top: 3px; color: var(--muted); }
+.job-text { display: grid; gap: 4px; flex: 1; min-width: 0; }
+.job-name { font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+.job-meta { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; font-size: 11px; color: var(--muted); }
+.job-elapsed { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.job-actions { display: flex; justify-content: space-between; align-items: center; gap: 16px; margin-top: 8px; }
+.job-details-toggle { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; color: var(--muted); font-size: 11px; border-radius: 6px; }
+.job-details-toggle:hover { color: var(--text); }
+.job-stop.link-button { flex-shrink: 0; height: 28px; margin: 0; padding: 0 8px; font-size: 11px; color: var(--muted); }
+.job-stop:hover:not(:disabled) { color: var(--red); }
+.job-stop:disabled { cursor: default; }
+.job-details { display: grid; gap: 8px; min-width: 0; margin-top: 8px; }
+.job-cwd { display: flex; align-items: center; gap: 6px; min-width: 0; font-size: 11px; color: var(--muted); }
+.job-cwd > svg { flex-shrink: 0; }
+.job-cwd > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; user-select: text; }
+.job-terminal { min-width: 0; border: 1px solid var(--hairline); border-radius: 8px; background: rgba(0, 0, 0, .16); user-select: text; }
+.job-code { min-width: 0; padding: 8px 10px; }
+.job-code + .job-code { border-top: 1px solid var(--hairline); }
+.job-code-label { font-size: 11px; color: var(--muted); }
+.job-code pre { margin: 6px 0 0; padding: 0; font: 11px/1.6 var(--mono); color: var(--text-2); }
+.job-command { white-space: pre; max-height: 72px; overflow: auto; }
+.job-output { max-height: 144px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .subagent-inspector-worktree { display: flex; align-items: center; gap: 6px; padding: 0 8px 8px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 .subagent-message { display: flex; align-items: flex-end; gap: 6px; padding: 8px 4px 12px; border-top: 1px solid var(--hairline); }
 .subagent-message textarea { flex: 1; min-height: 38px; max-height: 140px; resize: vertical; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: inherit; font: inherit; font-size: 13px; }
