@@ -2,7 +2,7 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## Unreleased
+## 0.2.10 — Resilient update checks
 
 - **Update checks tolerate GitHub's flaky download edge.** The Releases download endpoint intermittently answers 504 (Gateway Time-out); the update check and package download now retry transient 5xx and transport failures with backoff before surfacing an error, while 4xx, checksum and size mismatches still fail at once.
 
