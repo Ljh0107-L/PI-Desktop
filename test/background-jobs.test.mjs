@@ -169,6 +169,8 @@ test('finished records are bounded without evicting active work', async t => {
   assert.equal(bg.get(active.id).status, 'running');
   bg.stop(active.id);
   await settled(bg, active.id);
+  assert.equal(bg.get(active.id).status, 'stopped', 'a long-running job is retained when it has only just finished');
+  assert.equal(bg.list().length, FINISHED_LIMIT);
 });
 
 test('shutdown cancels UI updates and reminders and rejects new jobs', async t => {

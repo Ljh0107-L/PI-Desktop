@@ -25,7 +25,8 @@ export function createBackground({ notify, isIdle, signal, publish, escalateMs =
     escalated: job.escalated, error: job.error ?? null, tail: tailLines(job, 10).slice(-2048),
   });
   function trimFinished() {
-    const finished = [...jobs.values()].filter(j => j.status !== 'running');
+    const finished = [...jobs.values()].filter(j => j.status !== 'running')
+      .sort((a, b) => a.endedAt - b.endedAt || a.startedAt - b.startedAt);
     for (const job of finished.slice(0, Math.max(0, finished.length - FINISHED_LIMIT))) jobs.delete(job.id);
   }
   function sync() {
