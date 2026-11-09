@@ -484,11 +484,12 @@ try {
     await page.locator('.ultra-trigger.on').waitFor({ state: 'detached', timeout: 10000 });
     await page.click('.ultra-banner .goal-close');
     await page.locator('.ultra-banner').waitFor({ state: 'detached', timeout: 15000 });
-    const progressFile = await page.evaluate(async () => (await window.pidesk.invoke('listSessions')).find(s => s.id === window.__pideskState().activeId)?.piSessionFile);
-    const progressPrefix = readFileSync(progressFile);
+    const progressSession = await page.evaluate(async () => (await window.pidesk.invoke('listSessions')).find(s => s.id === window.__pideskState().activeId));
+    const progressPrefix = readFileSync(progressSession.piSessionFile);
     await page.reload();
+    await page.locator('.session-row-main').getByText(progressSession.title, { exact: true }).click();
     await page.locator('.ultra-progress').filter({ hasText: '检查完成：fixture-check-ok' }).waitFor({ timeout: 20000 });
-    check('Ultra progress survives reopening and disabling Ultra without rewriting history', await page.locator('.ultra-progress').count() === 1 && readFileSync(progressFile).subarray(0, progressPrefix.length).equals(progressPrefix));
+    check('Ultra progress survives reopening and disabling Ultra without rewriting history', await page.locator('.ultra-progress').count() === 1 && readFileSync(progressSession.piSessionFile).subarray(0, progressPrefix.length).equals(progressPrefix));
   } catch (error) { check('Ultra', false, error.message.split('\n')[0]); }
 
   // ---- edit an earlier message and regenerate from there
