@@ -2,10 +2,10 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## Unreleased
+## 0.2.9 — Visible Ultra progress and subscription removal
 
 - Remove ChatGPT subscription sign-in, per-environment OAuth ownership and subscription model registration. Old subscription history remains readable; resuming requires an explicit model choice, never a silent switch to a paid API key. Existing API keys and encrypted legacy grants are not deleted.
-- Make Ultra progress visible. Milestone reports appear inline with completed work, next steps and assumptions rather than inside collapsed tool groups, including older saved reports. Ultra's instructions now distinguish autonomous work from silence, ask for concise updates at meaningful transitions, and avoid duplicate or command-by-command narration. Reporting alone no longer prevents a stalled task from being detected.
+- Make Ultra progress visible. Milestone reports appear inline with completed work, next steps and assumptions rather than inside collapsed tool groups, including older saved reports. Ultra's instructions now distinguish autonomous work from silence, ask for concise updates at meaningful transitions, and avoid duplicate or command-by-command narration. Reporting alone no longer prevents a stalled task from being detected. Updated instructions apply to newly started Pi processes; existing background tasks are not forcibly restarted.
 - Keep exact token-limit editing and existing API-provider Fast/Ultrafast support.
 
 ## 0.2.8 — Codex subscriptions, model settings and speed tiers
