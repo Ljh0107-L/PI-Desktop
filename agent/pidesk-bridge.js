@@ -398,7 +398,7 @@ export default function pideskBridge(pi) {
     notify: (message, options) => pi.sendMessage(message, options),
     isIdle: () => !parentRunning,
     signal: backgroundSignal.signal,
-    publish: payload => agentUi?.setStatus('pidesk-background', payload),
+    publish: payload => agentUi?.setStatus('pidesk-background', JSON.stringify(payload)),
   });
   const jobLine = job => `Job ${job.id} [${job.status}]${job.description ? ` — ${job.description}` : ''}: ${job.command} (elapsed ${Math.round(job.elapsedMs / 1000)}s)${job.exitCode !== null ? `, exit ${job.exitCode}` : ''}${job.exitSignal ? `, signal ${job.exitSignal}` : ''}`;
   pi.registerTool({
