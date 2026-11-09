@@ -142,7 +142,7 @@ export function ModelMenu({ value, environmentId, onChange, close }) {
       <input className="menu-search" autoFocus placeholder="Search models…" value={query} onChange={e => setQuery(e.target.value)} />
       <div className="menu-scroll">
         {catalogError && <div className="menu-empty error">{catalogError}</div>}
-        {!catalog.length && !catalogError && <div className="menu-empty">No models for this environment — add a provider or sign in to ChatGPT.</div>}
+        {!catalog.length && !catalogError && <div className="menu-empty">No models for this environment — add a provider in Settings → Models.</div>}
         {groups.map(([provider, models]) => (
           <MenuSection key={provider} title={providerName(provider)}>
             {models.map(m => <MenuItem key={m.id} label={m.name} title={`${m.provider}/${m.id}`} checked={value?.provider === m.provider && value?.id === m.id}
@@ -150,7 +150,7 @@ export function ModelMenu({ value, environmentId, onChange, close }) {
           </MenuSection>
         ))}
       </div>
-      <div className="menu-foot"><MenuItem icon="settings" label="Manage models…" onClick={() => { close(); openSettings(true, value?.provider === 'pidesk-chatgpt' ? 'chatgpt' : 'providers'); }} /></div>
+      <div className="menu-foot"><MenuItem icon="settings" label="Manage models…" onClick={() => { close(); openSettings(true, 'providers'); }} /></div>
     </div>
   );
 }

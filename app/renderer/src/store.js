@@ -1,6 +1,7 @@
 // Client-side state for the renderer: one immutable snapshot, updated from IPC events.
 import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerDraft as takeDraft, restoreComposerDraft as restoreDraft, recoverComposerDraft as recoverDraft } from './composer-draft.js';
 import { relativeSessionPath } from './file-paths.js';
+import { isRetiredProvider, RETIRED_PROVIDER_MESSAGE } from '../../../core/retired-providers.mjs';
 import { modelForEnvironment, modelsForEnvironment } from './model-catalog.js';
 import { useRef, useSyncExternalStore } from 'react';
 import { applyEvent, emptyTranscript, fromHistory, rewindTo } from './transcript.js';
@@ -26,7 +27,7 @@ const listeners = new Set();
 const deleting = new Set(); // Suppress stale session-list events while deletion is being acknowledged.
 let state = {
   ready: false,
-  settings: null, chatgpt: null, environments: [], sessions: [], catalog: [], catalogError: null,
+  settings: null, environments: [], sessions: [], catalog: [], catalogError: null,
   activeId: null, view: 'new',             // 'new' | 'session'
   transcripts: {},                          // session id -> transcript
   questions: {},
@@ -120,12 +121,6 @@ window.pidesk.subscribe(({ channel, payload }) => {
       }
       break;
     }
-    case 'model-settings':
-      if (state.activeId === payload.id) refreshStats(payload.id);
-      break;
-    case 'chatgpt':
-      setChatGPT(payload);
-      break;
     case 'settings':
       setSettings(payload); loadCatalog();
       break;
@@ -394,7 +389,6 @@ export function goForward() {
 }
 export function pickRecent(environmentId, cwd) { set(s => ({ draft: { ...s.draft, environmentId, cwd } })); if (environmentId !== 'local') api('prepareEnvironment', environmentId); }
 export const setSettings = settings => set({ settings });
-export const setChatGPT = chatgpt => set(s => !s.chatgpt || chatgpt.revision >= s.chatgpt.revision ? { chatgpt } : {});
 export const setEnvironments = environments => set({ environments });
 
 // Hovering a conversation in the sidebar starts its Pi, so it is usually running by the time it opens.
@@ -444,9 +438,8 @@ function scheduleStats(id) {
 
 export async function startSession(text, attachments = []) {
   const { draft } = state;
-  if (!draft.model) throw new Error('Choose a model or sign in to ChatGPT in Settings first.');
-  if (draft.model.provider === 'pidesk-chatgpt' && !modelsForEnvironment(state.catalog, draft.environmentId)
-    .some(m => m.provider === draft.model.provider && m.id === draft.model.id)) throw new Error('Sign in to ChatGPT for this environment in Settings → ChatGPT.');
+  if (!draft.model) throw new Error('Choose a model in Settings → Models first.');
+  if (isRetiredProvider(draft.model.provider)) throw new Error(RETIRED_PROVIDER_MESSAGE);
   const pendingId = 'pending';
   set({ view: 'session', activeId: pendingId, transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: [{ role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] } } });
   try {

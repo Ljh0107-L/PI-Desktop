@@ -132,6 +132,18 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
       });
       return;
     }
+    // Ultra feedback uses actual registered tools; the checkpoint must be visible without prose duplication.
+    if (!subagent && userText.includes('[[ultra-progress]]')) {
+      const reported = messages.some(m => m.tool_calls?.some(c => c.function?.name === 'report_progress'));
+      send({ role: 'assistant', content: '' });
+      if (reported) { send({ content: 'Ultra mode: continue the task (fixture has no further actions).' }); finish('stop'); return; }
+      if (last.role !== 'tool') send({ content: '我先检查当前输出，再验证异常路径。' });
+      const name = last.role === 'tool' ? 'report_progress' : 'bash';
+      const args = name === 'bash' ? { command: 'printf fixture-check-ok', description: '检查当前输出' }
+        : { done: '检查完成：fixture-check-ok。', next: '接下来验证异常路径。', assumptions: '保留现有输入格式。' };
+      send({ tool_calls: [{ index: 0, id: `call_ultra_${requests.length}`, type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
+      finish('tool_calls'); return;
+    }
     const askMatch = /\[\[ask:([^|\]]+)(?:\|([^\]]*))?\]\]/.exec(userText);
     // Functional-test fixtures: real SSE finish_reason/usage goes through the actual SDK.
     const childLength = subagent && messages.some(m => m.role === 'user' && /\[\[child-length(?:-repeat|-tools)?\]\]/.test(textOf(m.content)));

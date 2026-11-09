@@ -260,6 +260,21 @@ export function applyEvent(t, event) {
   }
 }
 
+// Reported milestones are ordinary readable transcript content, not folded command details.
+export function ultraProgress(call, tool) {
+  if (call?.name !== 'report_progress' || tool?.status !== 'done' || call.__trace?.status === 'skipped' || tool.result?.isError) return null;
+  const details = tool.result?.details;
+  const legacy = (tool.result?.content ?? []).some(c => c.type === 'text' && /^Progress noted\./.test(c.text ?? ''));
+  const report = details?.kind === 'pidesk-ultra-progress' ? details.progress : legacy ? call.arguments : null;
+  if (!report) return null;
+  const field = (value, max) => {
+    const text = typeof value === 'string' ? value.trim() : '';
+    return text.length > max ? `${text.slice(0, max - 1)}…` : text;
+  };
+  const done = field(report.done, 1200), next = field(report.next, 600), notes = field(report.notes ?? report.assumptions, 600);
+  return done || next || notes ? { done, next, notes } : null;
+}
+
 // Display blocks: user bubbles, assistant text/thinking, and groups of consecutive tool calls.
 export function displayBlocks(t) {
   const blocks = [];
@@ -338,7 +353,11 @@ export function displayBlocks(t) {
       flush(); blocks.push({ kind: 'notice', key: message.id ?? `notice:${mi}`, text: String(message.content ?? ''), historyRef: ref }); return;
     }
     if (message.role === 'toolResult' && message.__history && !declaredCalls.has(message.toolCallId)) {
-      flush(); blocks.push({ kind: 'orphanResult', key: `result:${mk}`, message, historyRef: ref }); return;
+      flush();
+      blocks.push(message.toolName === 'report_progress'
+        ? { kind: 'progress', key: `progress:${message.toolCallId}`, call: { id: message.toolCallId, name: message.toolName } }
+        : { kind: 'orphanResult', key: `result:${mk}`, message, historyRef: ref });
+      return;
     }
     if (message.role === 'bashExecution') { flush(); blocks.push({ kind: 'bash', key: `b${mk}`, message, historyRef: ref }); return; }
     if (message.role === 'compactionSummary') { flush(); blocks.push({ kind: 'compaction', key: `c${mk}`, summary: message.summary, tokensBefore: message.tokensBefore, historyRef: ref }); return; }
@@ -353,6 +372,7 @@ export function displayBlocks(t) {
       if (block.type === 'toolCall' && block.name === 'ask_user') { flush(); blocks.push({ kind: 'ask', key: `q${mk}-${bi}`, call: block }); return; }
       if (block.type === 'toolCall' && block.name === 'subagent') { flush(); blocks.push({ kind: 'subagents', key: `subagents:${block.id}`, call: block }); return; }
       // Files handed to the user are cards in the conversation, not a folded tool step.
+      if (block.type === 'toolCall' && block.name === 'report_progress') { flush(); blocks.push({ kind: 'progress', key: `progress:${block.id}`, call: block }); return; }
       if (block.type === 'toolCall' && block.name === 'present_files') { flush(); blocks.push({ kind: 'files', key: `files:${block.id}`, call: block }); return; }
       if (block.type === 'toolCall') {
         if (!group) group = { kind: 'tools', key: `g${mk}-${bi}`, calls: [] };

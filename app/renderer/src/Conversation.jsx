@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { Markdown, Spinner } from './ui.jsx';
-import { changesOf, displayBlocks, formatTokens, isAbortText, retainWorkKeys, toolSummary } from './transcript.js';
+import { changesOf, displayBlocks, formatTokens, isAbortText, retainWorkKeys, toolSummary, ultraProgress } from './transcript.js';
 import { api, editMessage, loadEarlierHistory, loadHistoryEntry, notify, openChanges, openFile } from './store.js';
 import { VirtualHistory } from './VirtualHistory.jsx';
 import { historyBookmark, restoreHistoryBookmark } from './history-scroll.js';
@@ -167,6 +167,17 @@ function ToolGroup({ calls, tools, live }) {
       {open && <div className="tool-group-body">{calls.map(call => <ToolCall key={call.id} call={call} tool={tools[call.id]} />)}</div>}
     </div>
   );
+}
+
+function ProgressReport({ call, tool, sessionId, live }) {
+  const detailState = useHistoryDetails([call.__historyRef, tool?.historyRef]);
+  const report = ultraProgress(call, tool);
+  if (detailState.pending && !report) return <HistoryLoading {...detailState} />;
+  if (!report) return <ToolGroup calls={[call]} tools={{ [call.id]: tool }} live={live} />;
+  const text = [report.done, report.next && `**Next:** ${report.next}`, report.notes && `**Assumptions:** ${report.notes}`].filter(Boolean).join('\n\n');
+  return <div className="ultra-progress" data-tool-id={call.id} role="group" aria-label="Progress update" title="Progress reported by the agent">
+    <Markdown text={text} sessionId={sessionId} documentPath="" />
+  </div>;
 }
 
 // One reasoning step inside a folded group: its first line, opening to the full text.
@@ -594,6 +605,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             case 'work': return <WorkGroup key={block.key} items={block.items} tools={transcript.tools} live={!!transcript.live} />;
             case 'tools': return <ToolGroup key={block.key} calls={block.calls} tools={transcript.tools} live={!!transcript.live} />;
             case 'subagents': return renderSubagents?.(block);
+            case 'progress': return <ProgressReport key={block.key} call={block.call} tool={transcript.tools[block.call.id]} sessionId={session?.id} live={!!transcript.live} />;
             case 'files': return <FileCards key={block.key} sessionId={readOnly ? null : session?.id} call={block.call} tool={transcript.tools[block.call.id]} />;
             case 'agentReports': return renderAgentReport?.(block) ?? null;
             case 'ask': return transcript.tools[block.call.id]?.status === 'done' ? <AskBlock key={block.key} call={block.call} tool={transcript.tools[block.call.id]} /> : null;

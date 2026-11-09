@@ -15,6 +15,12 @@ const file = join(profile, 'long-session.jsonl');
 const sessionId = '11111111-2222-4333-8444-555555555555', desktopId = 'history-ui';
 const sparseId = 'history-sparse', sparseSessionId = '22222222-2222-4333-8444-555555555555';
 const sparseFile = join(profile, 'tool-heavy-session.jsonl');
+const retiredId = 'retired-subscription', retiredFile = join(profile, 'retired-subscription.jsonl');
+const retiredOriginal = [
+  { type: 'session', version: 3, id: '33333333-2222-4333-8444-555555555555', cwd, timestamp: new Date().toISOString() },
+  { type: 'message', id: 'retired-answer', parentId: null, message: { role: 'assistant', provider: 'pidesk-chatgpt', model: 'gpt-6-astra', api: 'openai-codex-responses', timestamp: 1, stopReason: 'stop', content: [{ type: 'text', text: 'Previously saved subscription answer' }] } },
+].map(entry => JSON.stringify(entry)).join('\n') + '\n';
+writeFileSync(retiredFile, retiredOriginal);
 const png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 writeFileSync(join(cwd, 'plot.svg'), '<svg xmlns="http://www.w3.org/2000/svg" width="180" height="90"><rect width="180" height="90" fill="#42a5f5"/></svg>');
 const mock = await startMockLlm({ chunkDelay: 0 });
@@ -24,7 +30,9 @@ writeFileSync(join(profile, 'settings.json'), JSON.stringify({ providers: [provi
 writeFileSync(join(profile, 'secrets.json'), JSON.stringify({ [provider.id]: { insecure: Buffer.from('test-only').toString('base64') } }));
 writeFileSync(join(profile, 'sessions.json'), JSON.stringify([{ id: desktopId, title: 'Long history fixture', environmentId: 'local', environmentLabel: 'This computer', cwd,
   project: 'History', piSessionFile: file, piSessionId: sessionId, model: { provider: provider.id, id: 'model' }, thinkingLevel: 'off', createdAt: 1, updatedAt: 1 },
-  { id: sparseId, title: 'Tool-heavy history fixture', environmentId: 'local', environmentLabel: 'This computer', cwd, project: 'History', piSessionFile: sparseFile, piSessionId: sparseSessionId, model: { provider: provider.id, id: 'model' }, thinkingLevel: 'off', createdAt: 1, updatedAt: 1 }]));
+  { id: sparseId, title: 'Tool-heavy history fixture', environmentId: 'local', environmentLabel: 'This computer', cwd, project: 'History', piSessionFile: sparseFile, piSessionId: sparseSessionId, model: { provider: provider.id, id: 'model' }, thinkingLevel: 'off', createdAt: 1, updatedAt: 1 },
+  { id: retiredId, title: 'Retired subscription fixture', environmentId: 'local', environmentLabel: 'This computer', cwd, project: 'History', piSessionFile: retiredFile,
+    model: { provider: 'pidesk-chatgpt', id: 'gpt-6-astra' }, createdAt: 1, updatedAt: 1 }]));
 writeFileSync(file, JSON.stringify({ type: 'session', version: 3, id: sessionId, cwd, timestamp: new Date().toISOString() }) + '\n');
 let parentId = null, index = 0;
 function append(message) {
@@ -184,6 +192,18 @@ try {
   assert.equal(mock.requests.length, 0);
   console.log(`PASS useful initial history window after folded tools: ${sparse.messages.length}/${sparseIndex} records, at least 2.5 screens, no loading spinner`);
   await shot(page, '/tmp/pidesk-e2e/shots', '16-prefetched-tool-history');
+  await page.locator('.session-row', { hasText: 'Retired subscription fixture' }).click();
+  await page.locator('.session-main .markdown', { hasText: 'Previously saved subscription answer' }).waitFor();
+  const blocked = await page.evaluate(id => window.pidesk.invoke('prompt', id, 'Must not send').then(() => false, e => /subscriptions were removed/.test(e.message)), retiredId);
+  assert.equal(blocked, true); assert.equal(mock.requests.length, 0);
+  assert.equal(readFileSync(retiredFile, 'utf8'), retiredOriginal);
+  await page.locator('.model-trigger').click();
+  assert.equal(await page.locator('.model-menu [title^="pidesk-chatgpt/"]').count(), 0);
+  await page.locator('.model-menu').getByTitle('history-lab/model', { exact: true }).click();
+  await page.waitForFunction(id => window.__pideskState().sessions.find(s => s.id === id)?.model?.provider === 'history-lab', retiredId);
+  assert.equal(mock.requests.length, 0);
+  await shot(page, '/tmp/pidesk-e2e/shots', '17-retired-subscription');
+  console.log('PASS retired subscription history remains readable; sending is blocked until explicit model selection, no API fallback');
 } catch (error) {
   if (page) await shot(page, '/tmp/pidesk-e2e/shots', 'zz-history-failure').catch(() => {});
   throw error;

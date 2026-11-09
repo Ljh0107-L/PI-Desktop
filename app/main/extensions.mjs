@@ -9,9 +9,9 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-export const EXTENSION_FILES = ['pidesk-speed.mjs', 'pidesk-ultra.mjs', 'pidesk-subagent.mjs', 'pidesk-gemini.mjs', 'pidesk-chatgpt-vault.mjs', 'pidesk-chatgpt-auth.mjs', 'pidesk-chatgpt.mjs', 'pidesk-session-tools.mjs', 'pidesk-history.mjs', 'pidesk-bridge.js'];
-// Left by versions with the (removed) Cursor CLI engine.
-export const OBSOLETE_FILES = ['cursor-acp.mjs', 'pidesk-cursor.mjs'];
+export const EXTENSION_FILES = ['pidesk-speed.mjs', 'pidesk-ultra.mjs', 'pidesk-subagent.mjs', 'pidesk-gemini.mjs', 'pidesk-session-tools.mjs', 'pidesk-history.mjs', 'pidesk-bridge.js'];
+// Retired extension code only; stored credentials and conversation history are left untouched.
+export const OBSOLETE_FILES = ['cursor-acp.mjs', 'pidesk-cursor.mjs', 'pidesk-chatgpt-vault.mjs', 'pidesk-chatgpt-auth.mjs', 'pidesk-chatgpt.mjs'];
 export const EXTENSION_PACKAGE = '{"private":true}\n';
 
 // Copies changed files atomically (a running relay may start a Pi at any moment) and returns the

@@ -13,7 +13,7 @@
 //   - finish_task first asks for an audit against the request; a second call in a later turn has an
 //     independent reviewer (a fresh agent that can run checks but not edit) check the work. Gaps send
 //     the model back to work; after 3 reviews the task finishes with what is still open;
-//   - runs that keep making no progress (no tool calls) get a nudge, then stop the task as stalled.
+//   - runs that keep making no progress (no substantive tool calls) get a nudge, then stall.
 // Stopping the run (the desktop's Stop) pauses the task; Ultra off stops continuing it. A Pi that
 // restarts with a task in progress picks it up again.
 import { isRetryableAssistantError } from '@earendil-works/pi-ai';
@@ -30,10 +30,12 @@ export const ULTRA_TOOLS = ['report_progress', 'finish_task'];
 export const ULTRA_PROMPT = `Ultra mode is on: the user handed you this work and is away until it is done, for hours if it takes that. You have their full trust for it: work entirely on your own.
 - Nobody will answer questions or approve plans. Decide yourself: take the most reasonable option, note the assumption, and keep going. Never stop to ask, to offer choices, or to wait for confirmation.
 - Do whatever the work needs without asking: read, change, install, run and test what it takes, and commit, push or publish when the request calls for it. Follow the user's instructions and the project's rules as always.
-- Tokens are no concern; finishing the work well is. When an approach fails, find out why and try another. Break large work into steps and keep moving. End a turn only after making progress, never with just a status update; to wait for agents you started, end your turn and their reports start the next one.
+- Tokens are no concern; finishing the work well is. When an approach fails, find out why and try another. Break large work into steps and keep moving. A progress update is not a stopping point: continue with the next action in the same turn; to wait for agents you started, end your turn and their reports start the next one.
+- Unattended does not mean silent. Before your first tools, give a brief user-facing sentence about what you will check or do, then act. Keep updates in the user's language and describe observable findings, results and next steps, not private deliberation.
+- At a meaningful milestone, a failed check or a change of approach, share what changed and what you will do next. Before a long-running command or wait, say what is running and what result you are waiting for. After several tool batches without a visible update, give a concise account of the current findings; do not narrate every command or repeat unchanged status.
 - Before ending a turn, reread your last paragraph: if it is a plan, a promise or a list of next steps, carry it out now instead.
 - Before a command that changes a system's state (restarting a service, deleting data, changing configuration), make sure what you have actually seen calls for it, not just what you suspect.
-- After each meaningful step, call report_progress: what is done, what comes next, and any assumption you made. The user sees it, and it reminds you where you are after the context is compacted.
+- Use report_progress for milestone checkpoints: what is done, what comes next, and any important assumption. It is shown inline to the user and carried across context compaction. Do not repeat the same update in both prose and report_progress, and do not use reports as a substitute for doing the work.
 - When everything the request asks for is done and verified, call finish_task with a summary for the user: what you did, how you verified it, the assumptions you made, and what is still open. Pi Desktop then has an independent reviewer check the work, so you need no review agents of your own; fix whatever it finds.`;
 
 export const AWAY_ANSWER = 'Nobody will answer: Ultra mode is on and the user is away. Decide yourself — choose the most reasonable option, note the assumption with report_progress and in your final summary, and keep working.';
@@ -42,7 +44,7 @@ const AUDIT = `Before finishing, audit the work against the request. Go through 
 
 const clip = (value, max) => { const text = String(value ?? '').trim(); return text.length > max ? `${text.slice(0, max - 1)}…` : text; };
 const lastAssistant = messages => [...(messages ?? [])].reverse().find(m => m?.role === 'assistant');
-const toolCallsIn = messages => (messages ?? []).reduce((n, m) => n + (m?.role === 'assistant' ? (m.content ?? []).filter(c => c?.type === 'toolCall').length : 0), 0);
+const toolCallsIn = messages => (messages ?? []).reduce((n, m) => n + (m?.role === 'assistant' ? (m.content ?? []).filter(c => (c?.type === 'toolCall' && !ULTRA_TOOLS.includes(c.name))).length : 0), 0);
 const minutesAgo = (at, now) => { const m = Math.max(0, Math.round((now - at) / 60000)); return m < 1 ? 'just now' : m === 1 ? '1 minute ago' : `${m} minutes ago`; };
 
 const requestBlock = task => `<request>
@@ -64,7 +66,7 @@ function continuation(task, now) {
 ${requestBlock(task)}${progress}
 
 - Check the current state (files, command output, test results) and take the next concrete step toward finishing the request.
-- Don't restate status or ask anything: nobody is there to answer.
+- Don't repeat unchanged status or stop to ask anything. When there are new findings, a failure or a long wait, give a brief user-facing update and continue working; unattended does not mean silent.
 ${step}`;
 }
 
@@ -205,10 +207,10 @@ export function createUltra(pi, { enabled: initial = false, review = null, agent
     },
     dismiss() { clearRetry(); if (task && task.status !== 'active') { task = null; save(); } },
     progress(params) {
-      if (!enabled || task?.status !== 'active') return 'Ultra mode has no task in progress.';
+      if (!enabled || task?.status !== 'active') return { text: 'Ultra mode has no task in progress.' };
       const entry = { at: now(), done: clip(params?.done, 1200), next: clip(params?.next, 600), notes: clip(params?.assumptions, 600) };
       update({ progress: [...(task.progress ?? []), entry].slice(-MAX_PROGRESS) });
-      return 'Progress noted. Keep going.';
+      return { text: 'Progress noted and shown to the user. Keep going without repeating this update.', details: { kind: 'pidesk-ultra-progress', progress: entry } };
     },
     // The audit, then the independent review. Returns { text, details? } for the tool result.
     async finish(params, toolContext = {}) {

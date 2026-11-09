@@ -14,7 +14,6 @@ import './transcript.mjs';
 import './projectless.mjs';
 import { checkReading } from './reading.mjs';
 import { checkFilePreview } from './file-preview-ui.mjs';
-import { checkChatGPT } from './chatgpt-ui.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -41,7 +40,7 @@ const defaultWorkspace = join(work, 'Pi');
 const downloads = join(work, 'downloads');
 rmSync(downloads, { recursive: true, force: true }); mkdirSync(downloads, { recursive: true });
 const BINARY = Buffer.from([...Array(256).keys(), 0, 10, 13, 255]);
-const env = { PIDESK_CHATGPT_TEST: '1', PIDESK_SSH_CONFIG: opts['ssh-config'], PIDESK_TEST_PICK_FOLDER: localProject, PIDESK_TEST_PICK_FILES: attachFile, PIDESK_DEFAULT_WORKSPACE: defaultWorkspace, PIDESK_TEST_SAVE_DIR: downloads };
+const env = { PIDESK_SSH_CONFIG: opts['ssh-config'], PIDESK_TEST_PICK_FOLDER: localProject, PIDESK_TEST_PICK_FILES: attachFile, PIDESK_DEFAULT_WORKSPACE: defaultWorkspace, PIDESK_TEST_SAVE_DIR: downloads };
 // 1×1 PNG
 const PNG = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==';
 const profile = join(work, 'profile');
@@ -153,10 +152,6 @@ try {
   const providerRow = page.locator('.row-card', { hasText: 'Mock Lab' });
   check('provider list omits model count and URL', !(await providerRow.locator('.row-meta').count()) && !(await providerRow.innerText()).includes(mock.baseUrl('mock-lab')));
   await S('03-providers');
-  const modelRowStyle = await providerRow.evaluate(el => {
-    const style = getComputedStyle(el), head = getComputedStyle(el.querySelector('.row-head'));
-    return { background: style.backgroundColor, radius: style.borderRadius, padding: head.padding, font: head.fontSize };
-  });
   // ---- add the SSH connection the way Codex does: pick it from ~/.ssh/config
   await page.click('.settings-sidebar-nav .nav-item:has-text("Connections")');
   await page.click('.section-head .button.pill');
@@ -167,8 +162,9 @@ try {
   await page.locator('.connection.ready', { hasText: 'pidesk-test' }).waitFor({ timeout: 300000 });
   check('SSH connection added from ssh config and set up automatically', true);
   await S('03c-connections');
-  await checkChatGPT({ page, screenshot: S, settingsBefore: modelRowStyle });
-  check('ChatGPT Settings matches Models styling; independent local/SSH login, cancellation and logout preserve API keys', true);
+  check('subscription login is absent from Settings', await page.getByRole('button', { name: 'ChatGPT', exact: true }).count() === 0);
+  const removedApi = await page.evaluate(() => window.pidesk.invoke('signInChatGPT', 'local').then(() => false, e => /Unknown method/.test(e.message)));
+  check('removed subscription login cannot be invoked', removedApi);
   await page.click('.nav-item.back');
 
   // ---- background pre-warm cancellation must not leak a red connection-closed toast
@@ -472,7 +468,12 @@ try {
     await page.click('.ultra-trigger');
     await page.locator('.ultra-trigger.on').waitFor({ timeout: 10000 });
     const before = await page.locator('.markdown', { hasText: 'Ultra mode: continue the task' }).count();
-    await send('ultra demo task');
+    await send('ultra demo task [[ultra-progress]]');
+    await page.locator('.ultra-progress').filter({ hasText: '检查完成：fixture-check-ok' }).waitFor({ timeout: 20000 });
+    const update = page.locator('.ultra-progress').filter({ hasText: '检查完成：fixture-check-ok' });
+    check('Ultra milestone is readable without expanding tool groups', await update.isVisible() && await update.locator('.tool-group').count() === 0 && (await update.innerText()).includes('接下来验证异常路径'));
+    check('Ultra communication instructions reach the model', mock.requests.some(r => r.system?.includes('Unattended does not mean silent')));
+    await S('05f-ultra-progress');
     await page.locator('.ultra-banner').waitFor({ timeout: 20000 });
     await page.locator('.ultra-banner.stalled').waitFor({ timeout: 120000 });
     const continued = await page.locator('.markdown', { hasText: 'Ultra mode: continue the task' }).count() - before;
@@ -483,6 +484,11 @@ try {
     await page.locator('.ultra-trigger.on').waitFor({ state: 'detached', timeout: 10000 });
     await page.click('.ultra-banner .goal-close');
     await page.locator('.ultra-banner').waitFor({ state: 'detached', timeout: 15000 });
+    const progressFile = await page.evaluate(async () => (await window.pidesk.invoke('listSessions')).find(s => s.id === window.__pideskState().activeId)?.piSessionFile);
+    const progressPrefix = readFileSync(progressFile);
+    await page.reload();
+    await page.locator('.ultra-progress').filter({ hasText: '检查完成：fixture-check-ok' }).waitFor({ timeout: 20000 });
+    check('Ultra progress survives reopening and disabling Ultra without rewriting history', await page.locator('.ultra-progress').count() === 1 && readFileSync(progressFile).subarray(0, progressPrefix.length).equals(progressPrefix));
   } catch (error) { check('Ultra', false, error.message.split('\n')[0]); }
 
   // ---- edit an earlier message and regenerate from there

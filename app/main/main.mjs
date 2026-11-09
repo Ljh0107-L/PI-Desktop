@@ -16,8 +16,7 @@ import { Store } from './store.mjs';
 import { UsageLedger } from './usage.mjs';
 import { stageExtensions } from './extensions.mjs';
 import { listCustomModels, resolveProviderBaseUrl } from './custom-providers.mjs';
-import { ChatGPTLogin } from './chatgpt.mjs';
-import { CHATGPT_PROVIDER } from '../../agent/pidesk-chatgpt-vault.mjs';
+import { isRetiredProvider, RETIRED_PROVIDER_MESSAGE } from '../../core/retired-providers.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const piPackage = join(root, 'node_modules/@earendil-works/pi-coding-agent');
@@ -37,7 +36,7 @@ function nodeBinary() {
 if (process.env.PIDESK_USER_DATA) app.setPath('userData', process.env.PIDESK_USER_DATA);
 app.setName('Pi Desktop');
 
-let store, manager, window, usage, chatgpt;
+let store, manager, window, usage;
 // Hosts set up before Connections existed count as added.
 const migrateConnections = () => { for (const v of Object.values(store?.settings.environments ?? {})) if (v.root && v.added === undefined) v.added = true; };
 const environments = () => (migrateConnections(), listEnvironments({ sshConfig: process.env.PIDESK_SSH_CONFIG, customHosts: store?.settings.customHosts ?? [], state: store?.settings.environments ?? {} }));
@@ -87,7 +86,7 @@ function syncCompactionReserves() {
   try { settings = JSON.parse(readFileSync(path, 'utf8')); } catch { /* first run */ }
   if (!settings || typeof settings !== 'object' || Array.isArray(settings)) settings = {};
   const overrides = { ...(settings.compaction?.modelOverrides ?? {}) };
-  for (const provider of [...(store.settings.providers ?? []), ...(chatgpt ? [{ id: CHATGPT_PROVIDER, models: chatgpt.modelSettings().models }] : [])]) {
+  for (const provider of store.settings.providers.filter(p => !isRetiredProvider(p.id))) {
     for (const model of provider.models ?? []) {
       const maxTokens = Number(model.maxTokens);
       if (!provider.id || !model.id || !Number.isFinite(maxTokens) || maxTokens <= 0) continue;
@@ -104,9 +103,8 @@ function syncCompactionReserves() {
 }
 
 function publicSettings() {
-  const s = store.settings;
-  const providers = s.providers.map(p => ({ ...p, hasKey: store.hasKey(p.id) }));
-  if (chatgpt?.catalog().length) providers.push({ id: CHATGPT_PROVIDER, name: 'ChatGPT', kind: 'subscription', hasKey: true });
+  const { chatgpt: _retired, ...s } = store.settings;
+  const providers = s.providers.filter(p => !isRetiredProvider(p.id)).map(p => ({ ...p, hasKey: store.hasKey(p.id) }));
   return { ...s, providers, builtinProviders: BUILTIN_PROVIDERS };
 }
 
@@ -159,14 +157,6 @@ const api = {
     return result.canceled ? null : result.filePaths[0];
   },
   catalog: () => manager.catalog(),
-  chatGPTStatus: () => chatgpt.status(),
-  chatGPTModelSettings: () => chatgpt.modelSettings(),
-  saveChatGPTModels: models => chatgpt.saveModels(models),
-  signInChatGPT: environmentId => chatgpt.start(environmentId),
-  submitChatGPTCallback: value => chatgpt.submit(value),
-  reopenChatGPTLogin: () => chatgpt.reopen(),
-  cancelChatGPTLogin: () => chatgpt.cancel(),
-  signOutChatGPT: environmentId => chatgpt.logout(environmentId),
   // Models a provider offers: Pi's catalog for built-in providers, GET /models for custom endpoints.
   async listProviderModels(draft, key) {
     const apiKey = key || store.getKey(draft.id);
@@ -175,7 +165,7 @@ const api = {
     return listCustomModels(draft, apiKey);
   },
   async saveProvider(provider, key) {
-    if (provider.id === CHATGPT_PROVIDER) throw new Error('Manage ChatGPT subscriptions in Settings → ChatGPT.');
+    if (isRetiredProvider(provider.id)) throw new Error(RETIRED_PROVIDER_MESSAGE);
     // With or without the version: an OpenAI-compatible URL is kept as entered unless only the other form
     // serves the API, and a Google one without a version gets /v1beta.
     const baseUrl = provider.kind === 'custom' ? await resolveProviderBaseUrl(provider, key || store.getKey(provider.id)) : provider.baseUrl;
@@ -194,7 +184,6 @@ const api = {
     return publicSettings();
   },
   deleteProvider(id) {
-    if (id === CHATGPT_PROVIDER) throw new Error('Sign out in Settings → ChatGPT.');
     store.settings.providers = store.settings.providers.filter(p => p.id !== id);
     store.setKey(id, null);
     store.saveSettings();
@@ -335,18 +324,10 @@ app.whenReady().then(async () => {
       extraEnv: { ELECTRON_RUN_AS_NODE: '1' },
     },
   });
-  chatgpt = new ChatGPTLogin({
-    store, target: id => manager.chatGPTTarget(id), openExternal: url => shell.openExternal(url),
-    ...(process.env.PIDESK_INSECURE_TEST_STORAGE === '1' && process.env.PIDESK_CHATGPT_TEST === '1'
-      ? (await import('../../test/chatgpt-desktop-fixture.mjs')).chatGPTDesktopFixture(app.getPath('userData')) : {}),
-    changed: status => send('chatgpt', status),
-    configured: () => { syncCompactionReserves(); manager.providersChanged(); send('settings', publicSettings()); },
-  });
-  manager.chatgpt = chatgpt;
   usage = new UsageLedger({ path: join(app.getPath('userData'), 'usage.jsonl'), sessionsDir: join(app.getPath('userData'), 'agent', 'sessions') });
   manager.on('event', ({ event }) => { if (event.type === 'message_end') usage.record(event.message); });
   manager.on('environments-changed', () => send('environments', environments()));
-  for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'rewound', 'notice', 'environment', 'goal', 'agents', 'ultra', 'model-settings']) manager.on(channel, payload => send(channel, payload));
+  for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'rewound', 'notice', 'environment', 'goal', 'agents', 'ultra']) manager.on(channel, payload => send(channel, payload));
   manager.on('ultra', ultraChanged);
   manager.on('status', ultraPiStatus);
   manager.on('sessions', () => send('sessions', manager.list()));
@@ -388,7 +369,7 @@ app.on('before-quit', event => {
   event.preventDefault();
   quitting = true;
   terminals.closeAll();
-  Promise.resolve(chatgpt?.close()).finally(() => manager.shutdown()).finally(() => app.quit());
+  manager.shutdown().finally(() => app.quit());
 });
 app.on('window-all-closed', () => { if (process.platform !== 'darwin' || process.env.PIDESK_QUIT_ON_CLOSE) app.quit(); });
 

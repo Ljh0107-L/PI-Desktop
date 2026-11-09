@@ -48,6 +48,29 @@ test('the Ultra prompt has the model carry out what it planned, and act on what 
   assert.equal(harness({ enabled: false }).ultra.promptSection(), null);
 });
 
+test('Ultra asks for visible updates without status-only turns or command-by-command narration', () => {
+  const h = harness();
+  assert.match(h.ultra.promptSection(), /Unattended does not mean silent/);
+  assert.match(h.ultra.promptSection(), /Before your first tools/);
+  assert.match(h.ultra.promptSection(), /user's language/);
+  assert.match(h.ultra.promptSection(), /Before a long-running command or wait/);
+  assert.match(h.ultra.promptSection(), /do not narrate every command or repeat unchanged status/);
+  h.ultra.onInput('Fix the parser'); h.run(h.withTools);
+  assert.match(h.sent[0].message.content, /new findings, a failure or a long wait/);
+  assert.doesNotMatch(h.sent[0].message.content, /Don't restate status or ask anything/);
+  const progress = h.ultra.progress({ done: 'x'.repeat(1500), next: 'Validate', assumptions: 'Keep compatibility' });
+  assert.equal(progress.details.kind, 'pidesk-ultra-progress');
+  assert.equal(progress.details.progress.done.length, 1200);
+  assert.deepEqual(progress.details.progress, h.ultra.snapshot().task.progress);
+  assert.equal(h.sent.length, 1, 'reporting adds no synthetic assistant message or model request');
+});
+
+test('progress-only tool calls do not keep an otherwise stalled Ultra task running forever', () => {
+  const h = harness(); h.ultra.onInput('Do the work');
+  for (let i = 0; i < STALL_TURNS; i++) h.run([{ role: 'assistant', content: [{ type: 'toolCall', name: 'report_progress' }], stopReason: 'toolUse' }]);
+  assert.equal(h.ultra.task.status, 'stalled');
+});
+
 test('a message starts a task, and a run that ends unfinished starts the next one', () => {
   const h = harness();
   h.ultra.onInput('Make the TP4 experiment run end to end and write the report');
@@ -73,12 +96,12 @@ test('a message starts a task, and a run that ends unfinished starts the next on
 test('progress reports reach the desktop and every continuation, so compaction loses nothing', () => {
   const h = harness();
   h.ultra.onInput('Port the parser');
-  assert.match(h.ultra.progress({ done: 'Lexer ported, 40 tests pass', next: 'Port the grammar', assumptions: 'Kept the old token names' }), /noted/);
+  assert.match(h.ultra.progress({ done: 'Lexer ported, 40 tests pass', next: 'Port the grammar', assumptions: 'Kept the old token names' }).text, /noted/);
   h.tick(5 * 60000);
   h.run(h.withTools);
   assert.match(h.sent[0].message.content, /Your last progress report \(5 minutes ago\):\n- Done: Lexer ported, 40 tests pass\n- Next: Port the grammar\n- Assumptions: Kept the old token names/);
   assert.equal(h.statuses.at(-1)[1].task.progress.next, 'Port the grammar');
-  assert.match(createUltra({}, { enabled: false }).progress({ done: 'x', next: 'y' }), /no task/);
+  assert.match(createUltra({}, { enabled: false }).progress({ done: 'x', next: 'y' }).text, /no task/);
 });
 
 test('provider errors wait longer each time and never end the task; an unfixable one stops it', () => {
@@ -247,6 +270,9 @@ test('in the bridge: unattended answers, its own continuation over /goal, and a 
   // A goal is set too: Ultra, not /goal, continues while its task runs.
   await (await import('node:util')).promisify(setImmediate)();
   f.emit('input', { text: 'Ship the importer', source: 'rpc' }, ctx);
+  const progress = await f.tools.get('report_progress').execute('progress', { done: 'Read the importer', next: 'Run checks' }, undefined, undefined, ctx);
+  assert.equal(progress.details.kind, 'pidesk-ultra-progress');
+  assert.equal(progress.details.progress.done, 'Read the importer');
   f.emit('agent_end', { messages: [{ role: 'assistant', content: [{ type: 'toolCall', name: 'bash' }], stopReason: 'toolUse' }] }, ctx);
   f.emit('agent_settled', { aborted: false }, ctx);
   assert.equal(f.sent.filter(s => s.message.customType === 'pidesk-ultra').length, 1);

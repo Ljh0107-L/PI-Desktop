@@ -2,9 +2,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { MenuItem, Modal, Popover, Spinner } from './ui.jsx';
-import { api, loadCatalog, openSettings, setAddConnectionOpen, setChatGPT, setEnvironments, setSettings, useStore } from './store.js';
+import { api, loadCatalog, openSettings, setAddConnectionOpen, setEnvironments, setSettings, useStore } from './store.js';
 import { formatTokens as fmtTokens } from './transcript.js';
-import { parseTokens, toRow, fromRow, pickedRows } from './model-settings.js';
+import { toRow, fromRow, pickedRows } from './model-settings.js';
 
 const CUSTOM_APIS = [
   { id: 'openai-completions', label: 'OpenAI Chat Completions compatible' },
@@ -238,8 +238,8 @@ function ModelsPage() {
                   <span className="row-name">{p.name ?? builtin[p.id] ?? p.id}</span>
                 </div>
                 <div className="row-actions">
-                  <button className="button small" onClick={() => p.kind === 'subscription' ? openSettings(true, 'chatgpt') : setEditing(editing === p.id ? null : p.id)}>Edit</button>
-                  {p.kind !== 'subscription' && <button className="button small danger" onClick={async () => { setSettings(await api('deleteProvider', p.id)); loadCatalog(); }}>Remove</button>}
+                  <button className="button small" onClick={() => setEditing(editing === p.id ? null : p.id)}>Edit</button>
+                  <button className="button small danger" onClick={async () => { setSettings(await api('deleteProvider', p.id)); loadCatalog(); }}>Remove</button>
                 </div>
               </div>
               {editing === p.id && <ProviderEditor initial={p} onDone={() => setEditing(null)} />}
@@ -252,93 +252,6 @@ function ModelsPage() {
       </ul>
     </section>
   );
-}
-
-// ---------------------------------------------------------------- ChatGPT
-function ChatGPTModelEditor({ onDone }) {
-  const [models, setModels] = useState([]), [available, setAvailable] = useState(null);
-  const [picking, setPicking] = useState(false), [busy, setBusy] = useState(false), [error, setError] = useState(null);
-  useEffect(() => {
-    let current = true;
-    api('chatGPTModelSettings').then(data => { if (current) { setModels(data.models.map(toRow)); setAvailable(data.available); } }, () => { if (current) setError('Could not load the ChatGPT model catalog.'); });
-    return () => { current = false; };
-  }, []);
-  const save = async e => {
-    e.preventDefault(); setError(null);
-    if (models.some(m => !parseTokens(m.contextWindow) || !parseTokens(m.maxTokens))) { setError('Token limits must be positive whole numbers.'); return; }
-    setBusy(true);
-    try { await api('saveChatGPTModels', models.map(fromRow)); await loadCatalog(); onDone(); }
-    catch (e) { setError(e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')); }
-    finally { setBusy(false); }
-  };
-  return <form className="editor" onSubmit={save}>
-    <ModelCatalog models={models} setModels={setModels} lockedId fetching={!available} choose={() => setPicking(true)}
-      onReset={available ? () => setModels(list => list.map(m => toRow(available.find(a => a.id === m.id)))) : undefined}
-      outputTitle="Pi uses this output budget with the context window. ChatGPT controls the server-side limit and does not accept max_output_tokens." />
-    {picking && available && <ModelPicker available={available} selected={models.map(m => m.id)} onClose={() => setPicking(false)}
-      onDone={picked => { setModels(pickedRows(models, available, picked)); setPicking(false); }} />}
-    {error && <div className="form-error"><Icon name="alert" size={14} /> {error}</div>}
-    <div className="editor-actions"><button type="button" className="button ghost" onClick={onDone}>Cancel</button>
-      <button type="submit" className="button primary" disabled={busy || !available}>{busy ? <Spinner size={13} /> : 'Save'}</button></div>
-  </form>;
-}
-function ChatGPTPage() {
-  const environments = useStore(s => s.environments.filter(e => e.kind === 'local' || e.added));
-  const status = useStore(s => s.chatgpt);
-  const [error, setError] = useState(null);
-  const [callback, setCallback] = useState('');
-  const [busy, setBusy] = useState(null);
-  const [editingModels, setEditingModels] = useState(false);
-  const login = status?.login;
-  const active = login && !['failed', 'cancelled'].includes(login.state);
-  useEffect(() => { api('chatGPTStatus').then(setChatGPT).catch(() => setError('Could not load ChatGPT connections.')); }, []);
-  const run = async (id, method, ...args) => {
-    setError(null); setBusy(id);
-    try { const next = await api(method, ...args); if (next) setChatGPT(next); }
-    catch (e) { setError(e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')); }
-    finally { setBusy(null); }
-  };
-  const submit = async e => { e.preventDefault(); await run(login.environmentId, 'submitChatGPTCallback', callback); setCallback(''); };
-  return <><section className="section">
-    <div className="section-head"><h2 className="section-title">ChatGPT accounts</h2></div>
-    <ul className="rows">
-      {environments.map(env => {
-        const connected = !!status?.accounts?.[env.id]?.connected;
-        const needsReconnect = !!status?.accounts?.[env.id]?.needsReconnect;
-        const current = login?.environmentId === env.id ? login : null;
-        const working = current && active;
-        return <li key={env.id} className="row-card">
-          <div className="row-head">
-            <span className={`credential-dot ${connected ? 'ok' : 'missing'}`} title={connected ? 'Signed in through Codex · model and speed access depend on your subscription' : needsReconnect ? 'Reconnect using Codex; the previous subscription-sharing grant cannot be reused' : 'Not signed in'} />
-            <div className="row-identity"><span className="row-name">{env.label}</span></div>
-            <div className="row-actions">
-              {working ? <><span className="button small" aria-live="polite"><Spinner size={13} /> {current.state === 'preparing' ? 'Preparing…' : current.state === 'saving' ? 'Connecting…' : 'Waiting for browser…'}</span>
-                <button className="button small" disabled={current.state === 'saving' || busy === env.id} onClick={() => run(env.id, 'cancelChatGPTLogin')}>Cancel</button></>
-                : <><button className="button small" disabled={!!active || busy === env.id || (env.kind === 'ssh' && !env.enabled)} onClick={() => { setCallback(''); run(env.id, 'signInChatGPT', env.id); }} title="Authorize this environment separately so it can refresh without this Mac">{connected || needsReconnect ? 'Reconnect' : 'Sign in with ChatGPT'}</button>
-                  {(connected || needsReconnect) && <button className="button small danger" disabled={busy === env.id} onClick={() => run(env.id, 'signOutChatGPT', env.id)} title="Remove this environment’s stored authorization; this does not cancel your subscription">Sign out</button>}</>}
-            </div>
-          </div>
-          {working && current.manual && <form className="editor" onSubmit={submit}>
-            <label className="field"><span className="field-label">Authorization callback</span>
-              <input type="password" value={callback} onChange={e => setCallback(e.target.value)} placeholder="Paste the final browser URL if automatic sign-in does not finish" autoComplete="off" spellCheck={false} /></label>
-            <div className="editor-actions">
-              <button type="button" className="button ghost" onClick={() => run(env.id, 'reopenChatGPTLogin')}>Open browser</button>
-              <button type="submit" className="button primary" disabled={!callback.trim() || busy === env.id}>Complete sign-in</button>
-            </div>
-          </form>}
-          {current?.error && <div className="form-error"><Icon name="alert" size={14} /> {current.error}</div>}
-        </li>;
-      })}
-    </ul>
-    {error && <div className="form-error"><Icon name="alert" size={14} /> {error}</div>}
-  </section>
-    <section className="section chatgpt-models">
-      <div className="section-head"><h2 className="section-title">Models</h2></div>
-      <div className="row-card"><div className="row-head"><span className="row-name">ChatGPT</span><div className="row-actions">
-        <button className="button small" onClick={() => setEditingModels(value => !value)}>Edit</button>
-      </div></div>{editingModels && <ChatGPTModelEditor onDone={() => setEditingModels(false)} />}</div>
-    </section>
-  </>;
 }
 
 // ---------------------------------------------------------------- connections
@@ -589,7 +502,6 @@ export function SettingsPage() {
   const tab = useStore(s => s.settingsTab);
   const pages = [
     { id: 'providers', label: 'Models', icon: 'sparkle', title: 'Models' },
-    { id: 'chatgpt', label: 'ChatGPT', icon: 'chat', title: 'ChatGPT' },
     { id: 'connections', label: 'Connections', icon: 'server', title: 'Connections' },
     { id: 'agents', label: 'Agents', icon: 'fork', title: 'Agents' },
     { id: 'usage', label: 'Usage', icon: 'gauge', title: 'Usage' },
@@ -608,7 +520,7 @@ export function SettingsPage() {
         <div className="settings-drag drag" />
         <div className="settings-content">
           <h1 className="settings-title">{page.title}</h1>
-          {page.id === 'providers' ? <ModelsPage /> : page.id === 'chatgpt' ? <ChatGPTPage /> : page.id === 'usage' ? <UsagePage /> : page.id === 'agents' ? <AgentsPage /> : <ConnectionsPage />}
+          {page.id === 'providers' ? <ModelsPage /> : page.id === 'usage' ? <UsagePage /> : page.id === 'agents' ? <AgentsPage /> : <ConnectionsPage />}
         </div>
       </main>
     </div>

@@ -33,8 +33,6 @@ import { createSubagentTool, isActiveAgent } from './pidesk-subagent.mjs';
 import { createSpeed } from './pidesk-speed.mjs';
 import { registerSessionTools } from './pidesk-session-tools.mjs';
 import { GEMINI_API, geminiAlias, geminiModel, geminiStream } from './pidesk-gemini.mjs';
-import { chatGPTProvider } from './pidesk-chatgpt.mjs';
-import { CHATGPT_PROVIDER } from './pidesk-chatgpt-vault.mjs';
 import { AWAY_ANSWER, createUltra, parseVerdict, reviewBrief } from './pidesk-ultra.mjs';
 
 function literalKey(key) {
@@ -353,15 +351,10 @@ export default function pideskBridge(pi) {
   }
   const boot = globalThis[BOOT] ?? {};
 
-  let subscriptionRegistered = false;
+  // Old subscription boot records must not register a removed provider or fall back to an API key.
   const register = providers => {
-    if (subscriptionRegistered && !providers?.some(p => p.id === CHATGPT_PROVIDER && p.kind === 'subscription')) {
-      pi.unregisterProvider(CHATGPT_PROVIDER); subscriptionRegistered = false;
-    }
     for (const provider of providers ?? []) {
-      if (provider.id === CHATGPT_PROVIDER && provider.kind === 'subscription') {
-        pi.registerProvider(chatGPTProvider(provider)); subscriptionRegistered = true; continue;
-      }
+      if (provider.id === 'pidesk-chatgpt') continue;
       const { id, apiKey, models, ...rest } = provider;
       const config = { ...rest };
       if (apiKey) config.apiKey = literalKey(apiKey);
@@ -419,14 +412,18 @@ export default function pideskBridge(pi) {
   pi.registerTool({
     name: 'report_progress',
     label: 'Report progress',
-    description: 'Ultra mode: record progress on the task after each meaningful step. The user sees it, and it is carried into later turns, also after the context is compacted.',
+    description: 'Ultra mode: share a concise milestone update in the user\'s language: concrete findings or completed work, the next step, and important assumptions. Shown inline in the conversation and retained across compaction. Do not repeat the same update as a separate message; continue working after reporting.',
     promptSnippet: 'Note what is done, what comes next and any assumption (Ultra mode)',
     parameters: Type.Object({
       done: Type.String({ description: 'What is done so far, briefly' }),
       next: Type.String({ description: 'The next step' }),
       assumptions: Type.Optional(Type.String({ description: 'Assumptions or decisions you made without the user' })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) { ultra.attach(ctx); return text(ultra.progress(params)); },
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      ultra.attach(ctx);
+      const outcome = ultra.progress(params);
+      return { ...text(outcome.text), ...(outcome.details ? { details: outcome.details } : {}) };
+    },
   });
   pi.registerTool({
     name: 'finish_task',

@@ -4,14 +4,14 @@ import { EventEmitter } from 'node:events';
 import { execFile } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { basename, join } from 'node:path';
 import { homedir } from 'node:os';
 import { PiSession } from '../../core/pi-session.mjs';
 import { closeSshMux, egressEnv, localRelayTransport, localTransport, relaySpawnSpec, shellQuote, sshRelayTransport } from '../../core/transports.mjs';
 import { startEgressProxy, hostPortOf } from '../../core/egress-proxy.mjs';
 import { listRelaySessions, prepareRemote, readInstallHint, runSsh, stopRelaySession } from './remote-setup.mjs';
 import { providerBaseUrl } from './custom-providers.mjs';
-import { CHATGPT_PROVIDER } from '../../agent/pidesk-chatgpt-vault.mjs';
+import { isRetiredProvider, RETIRED_PROVIDER_MESSAGE } from '../../core/retired-providers.mjs';
 import { SPEEDS, speedOptions } from '../../agent/pidesk-speed.mjs';
 import { readHistory } from '../../agent/pidesk-history.mjs';
 import { historyEvent } from '../../core/history-view.mjs';
@@ -143,18 +143,9 @@ export class SessionManager extends EventEmitter {
     return stopRelaySession(env, await this.prepare(env.id), id);
   }
 
-  async chatGPTTarget(environmentId) {
-    const env = this.env(environmentId);
-    if (env.kind === 'local') return { ...this.local, env, authPath: join(dirname(this.bridgePath), 'pidesk-chatgpt-auth.mjs') };
-    if (!env.enabled) throw new Error('Enable this SSH connection before signing in.');
-    const facts = await this.prepare(environmentId);
-    return { env, node: facts.node, piCli: facts.piCli, agentDir: facts.agentDir, runDir: facts.runDir,
-      authPath: join(dirname(facts.bridge), 'pidesk-chatgpt-auth.mjs') };
-  }
-
   // ---------------------------------------------------------------- providers and models
-  bootProviders(environmentId = 'local') {
-    const providers = this.store.settings.providers.flatMap(provider => {
+  bootProviders() {
+    return this.store.settings.providers.filter(provider => !isRetiredProvider(provider.id)).flatMap(provider => {
       const apiKey = this.store.getKey(provider.id);
       if (!apiKey && provider.kind === 'builtin') return [];
       const entry = { id: provider.id, apiKey: apiKey ?? undefined };
@@ -164,8 +155,6 @@ export class SessionManager extends EventEmitter {
       else if (provider.models?.length) entry.models = provider.models;
       return [entry];
     });
-    const subscription = this.chatgpt?.config(environmentId);
-    return subscription ? [...providers, subscription] : providers;
   }
 
   invalidateCatalog() { this.catalogCache = null; }
@@ -177,13 +166,7 @@ export class SessionManager extends EventEmitter {
     this.invalidateCatalog();
     this.prepared.clear();
     for (const key of [...this.spares.keys()]) this.#dropSpare(key);
-    for (const runtime of this.runtimes.values()) if (runtime.status === 'connected') {
-      this.#syncProviders(runtime).then(() => {
-        const record = this.#recordOf(runtime.session?.id);
-        if (record?.model?.provider === CHATGPT_PROVIDER) return this.#applyModel(record, runtime)
-          .then(() => this.emit('model-settings', { id: record.id }));
-      }).catch(() => {});
-    }
+    for (const runtime of this.runtimes.values()) if (runtime.status === 'connected') this.#syncProviders(runtime).catch(() => {});
   }
   // Desktop settings a Pi applies itself (Settings → Subagents, the conversation's speed): in its boot
   // record, then by command whenever they changed or the Pi started without them.
@@ -209,16 +192,8 @@ export class SessionManager extends EventEmitter {
     const run = async () => {
       if (runtime.session !== session) return;
       const want = record.model;
-      if (want?.provider === CHATGPT_PROVIDER) await this.#syncProviders(runtime);
+      if (isRetiredProvider(want?.provider)) throw new Error(RETIRED_PROVIDER_MESSAGE);
       let applied = runtime.applied ?? {};
-      if (want?.provider === CHATGPT_PROVIDER) {
-        if (!this.chatgpt?.catalog().some(m => m.id === want.id && m.environments.includes(record.environmentId))) throw new Error('Choose an enabled ChatGPT model for this environment in Settings.');
-        await this.chatgpt.ensure(record.environmentId);
-        if (runtime.chatgptSettingsReady === undefined) {
-          const available = await session.request('get_available_models');
-          runtime.chatgptSettingsReady = available.models?.some(m => m.provider === CHATGPT_PROVIDER && m.pideskChatGPTSettings === 2) ?? false;
-        }
-      }
       if (want?.provider && want.id && (applied.model?.provider !== want.provider || applied.model?.id !== want.id)) {
         await this.#syncProviders(runtime);
         await session.setModel(want.provider, want.id);
@@ -238,23 +213,15 @@ export class SessionManager extends EventEmitter {
   async #syncProviders(runtime) {
     const session = runtime?.session;
     if (!session) return;
-    const record = this.#recordOf(session.id);
-    // Do not feed a new Codex grant to an old, still-running Responses adapter. The selected
-    // idle session is upgraded by setModel/next prompt; unrelated remote tasks keep their owner.
-    if (record?.model?.provider === CHATGPT_PROVIDER &&
-        ((runtime.streaming && !runtime.chatgptSettingsReady) || this.chatgpt?.status?.().accounts?.[record.environmentId]?.needsReconnect)) return;
     while (runtime.session === session && runtime.providersVersion !== this.providersVersion) {
       // Settings updates and the first prompt can arrive together. Send one update at a time,
       // then re-check the version so an older acknowledgement cannot mark newer keys as synced.
       if (runtime.providerSync?.session === session) { await runtime.providerSync.promise; continue; }
       const version = this.providersVersion;
-      const payload = Buffer.from(JSON.stringify(this.bootProviders(this.#recordOf(session.id)?.environmentId ?? 'local'))).toString('base64');
+      const payload = Buffer.from(JSON.stringify(this.bootProviders())).toString('base64');
       const sync = { session };
       sync.promise = session.prompt(`/pidesk-providers ${payload}`).then(() => {
-        if (runtime.session === session) {
-          runtime.providersVersion = version;
-          if (this.#recordOf(session.id)?.model?.provider === CHATGPT_PROVIDER) runtime.applied = null;
-        }
+        if (runtime.session === session) runtime.providersVersion = version;
       }).finally(() => { if (runtime.providerSync === sync) runtime.providerSync = null; });
       runtime.providerSync = sync;
       await sync.promise;
@@ -265,16 +232,15 @@ export class SessionManager extends EventEmitter {
   async catalog() {
     if (this.catalogCache) return this.catalogCache;
     this.catalogCache = (async () => {
-      const configured = new Set(this.store.settings.providers.map(p => p.id));
-      const subscription = this.chatgpt?.catalog() ?? [];
-      if (!configured.size) return subscription.map(m => ({ ...m, speeds: speedOptions(m) }));
+      const configured = new Set(this.store.settings.providers.filter(p => !isRetiredProvider(p.id)).map(p => p.id));
+      if (!configured.size) return [];
       const session = new PiSession({ id: 'catalog', boot: { providers: this.bootProviders() }, transport: this.#localTransport({ cwd: this.local.agentDir }) });
       try {
         await session.start();
         const models = await session.request('get_available_models').then(d => d.models);
         // Built-in providers can be narrowed to the models the user picked in Settings.
         const enabled = Object.fromEntries(this.store.settings.providers.filter(p => p.enabledModels?.length).map(p => [p.id, new Set(p.enabledModels)]));
-        return [...models.filter(m => configured.has(m.provider) && (!enabled[m.provider] || enabled[m.provider].has(m.id))), ...subscription]
+        return models.filter(m => configured.has(m.provider) && (!enabled[m.provider] || enabled[m.provider].has(m.id)))
           .map(m => ({ provider: m.provider, id: m.id, name: m.name ?? m.id, reasoning: !!m.reasoning, thinkingLevelMap: m.thinkingLevelMap, contextWindow: m.contextWindow, maxTokens: m.maxTokens, baseUrl: m.baseUrl, input: m.input, speeds: speedOptions(m), ...(m.environments ? { environments: m.environments } : {}) }));
       } finally { await session.stop(); }
     })();
@@ -413,7 +379,7 @@ export class SessionManager extends EventEmitter {
   // spare runs in the root and moves into the conversation's own directory when the first message names it.
   spares = new Map(); // `${environmentId}\n${cwd}` (or projectlessSpareKey) -> { id, record, timer }
   async prewarm({ environmentId, cwd: chosen, model, thinkingLevel, speed, noFolder }) {
-    if (!environmentId) return false;
+    if (!environmentId || isRetiredProvider(model?.provider)) return false;
     const env = this.environments().find(e => e.id === environmentId);
     if (!env || (env.kind === 'ssh' && !env.enabled)) return false;
     const cwd = chosen || await this.projectlessRoot(environmentId).catch(() => null);
@@ -505,6 +471,7 @@ export class SessionManager extends EventEmitter {
   }
 
   async create({ environmentId, cwd: chosen, model, thinkingLevel, speed, ultra, prompt }) {
+    if (isRetiredProvider(model?.provider)) throw new Error(RETIRED_PROVIDER_MESSAGE);
     const env = this.env(environmentId);
     const noFolder = !chosen;
     const cwd = noFolder ? await this.#projectlessDir(env, prompt) : chosen;
@@ -569,6 +536,7 @@ export class SessionManager extends EventEmitter {
   // Connect (or reconnect) a session. SSH sessions live in the host's relay, so a dropped connection is
   // retried with backoff and resumes from the last event seen; Pi keeps working in the meantime.
   ensureStarted(id, recordOverride) {
+    if (isRetiredProvider((recordOverride ?? this.#recordOf(id))?.model?.provider)) return Promise.reject(new Error(RETIRED_PROVIDER_MESSAGE));
     let runtime = this.runtimes.get(id);
     if (runtime?.status === 'connected') return Promise.resolve(runtime.session);
     if (runtime?.starting) return runtime.starting;
@@ -614,7 +582,7 @@ export class SessionManager extends EventEmitter {
   async #start(record, runtime) {
     const env = this.env(record.environmentId);
     const bootVersion = this.providersVersion;
-    const boot = { providers: this.bootProviders(record.environmentId), config: this.bootConfig(record) };
+    const boot = { providers: this.bootProviders(), config: this.bootConfig(record) };
     const piArgs = record.piSessionFile ? ['--session', record.piSessionFile] : [];
     let session;
     if (env.kind === 'local') {
@@ -793,10 +761,6 @@ export class SessionManager extends EventEmitter {
     const record = this.record(id);
     let session = await this.ensureStarted(id);
     let runtime = this.runtimes.get(id);
-    if (record.model?.provider === CHATGPT_PROVIDER && !runtime?.chatgptSettingsReady && !runtime?.streaming) {
-      await this.setModel(id, record.model.provider, record.model.id);
-      session = await this.ensureStarted(id); runtime = this.runtimes.get(id);
-    }
     let interrupted = false;
     // While an Ultra task runs, a message joins it (Pi steers it in before the next model call); an
     // interruption would read as Stop and pause the task.
@@ -807,7 +771,7 @@ export class SessionManager extends EventEmitter {
     await this.#syncProviders(this.runtimes.get(id));
     await this.#syncConfig(this.runtimes.get(id), record).catch(() => {});
     await this.#applyModel(record, this.runtimes.get(id)).catch(error => {
-      if (record.model?.provider === CHATGPT_PROVIDER) throw error;
+      if (isRetiredProvider(record.model?.provider)) throw error;
       this.emit('notice', { id, level: 'warning', message: error.message });
     });
     // The first message names the conversation at once (its first line), and the model then suggests a
@@ -928,28 +892,12 @@ export class SessionManager extends EventEmitter {
   }
 
   async setModel(id, provider, modelId) {
+    if (isRetiredProvider(provider)) throw new Error(RETIRED_PROVIDER_MESSAGE);
     const record = this.record(id);
     let runtime = this.runtimes.get(id);
     // A host that can't reach this model's endpoint needs its traffic relayed through this Mac, which is
     // wired up when Pi starts. A session started without it is restarted (same session file, history kept).
     const env = this.env(record.environmentId);
-    if (provider === CHATGPT_PROVIDER) {
-      if (!this.chatgpt) throw new Error('Sign in to ChatGPT in Settings first.');
-      if (!this.chatgpt.catalog().some(m => m.id === modelId && m.environments.includes(record.environmentId))) throw new Error('This ChatGPT model is not configured for this environment.');
-      await this.chatgpt.ensure(record.environmentId);
-      // An older relay Pi has cached the previous bridge factory. Restart only the chosen idle
-      // session if it cannot register the new subscription provider; its JSONL remains untouched.
-      if (runtime?.status === 'connected') {
-        await this.#syncProviders(runtime);
-        const available = await runtime.session.request('get_available_models');
-        runtime.chatgptSettingsReady = available.models?.some(m => m.provider === provider && m.id === modelId && m.pideskChatGPTSettings === 2) ?? false;
-        if (!runtime.chatgptSettingsReady) {
-          if (runtime.streaming) throw new Error('Wait for the current reply to finish, then switch models.');
-          this.#save(record, { model: { provider, id: modelId } });
-          await this.close(id); await this.stopRelay(env, id); await this.ensureStarted(id); return;
-        }
-      }
-    }
     if (env.kind === 'ssh' && runtime?.session && !record.egressPort) {
       const baseUrl = (await this.catalog().catch(() => [])).find(m => m.provider === provider && m.id === modelId)?.baseUrl;
       const facts = baseUrl?.startsWith('https://') ? await this.prepare(env.id) : null;
@@ -996,9 +944,6 @@ export class SessionManager extends EventEmitter {
   async setSpeed(id, speed) {
     if (!SPEEDS.includes(speed)) throw new Error(`Unknown speed: ${speed}`);
     const record = this.record(id);
-    if (record.model?.provider === CHATGPT_PROVIDER && this.runtimes.get(id)?.status === 'connected' && !this.runtimes.get(id).chatgptSettingsReady) {
-      await this.setModel(id, record.model.provider, record.model.id);
-    }
     if (speed === 'standard') delete record.speed;
     this.#save(record, speedField(speed));
     const runtime = this.runtimes.get(id);
