@@ -41,6 +41,11 @@ export async function checkBackgroundJobs({ page, send, check, shot, remote = fa
   const count = remote ? 8 : 1;
   await page.waitForFunction(n => document.querySelectorAll('.right-panel .job-stop').length === n, count, { timeout: 20000 });
   check('all concurrent background tasks have reachable Stop buttons', await jobs().locator('.job-stop').count() === count);
+  check('background tasks appear before the potentially long subagent list', await page.evaluate(() => {
+    const taskCard = document.querySelector('.right-panel .jobs').closest('section');
+    const subagents = document.querySelector('.right-panel .subagent-list');
+    return !!(taskCard.compareDocumentPosition(subagents) & Node.DOCUMENT_POSITION_FOLLOWING);
+  }));
   await shot(remote ? '08g-background-tasks-running' : '05g-background-tasks-running');
   if (remote) await jobs().getByRole('button', { name: /earlier tasks/ }).click();
   await idle();
