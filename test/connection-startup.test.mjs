@@ -253,7 +253,7 @@ test('same-process reconnect skips provider/model/thinking mutations but refresh
   assert.equal(calls.length, 0, 'matching initial thinking level needs no config RPC');
   runtime.status = 'reconnecting';
   await manager.ensureStarted(record.id);
-  assert.deepEqual(calls.map(call => [call.type, call.message]), [['prompt', '/goal']]);
+  assert.deepEqual(calls.map(call => [call.type, call.message]), [['prompt', '/goal'], ['prompt', '/pidesk-agents background-sync']]);
   assert.ok(statuses.some(status => status.phase === 'starting'));
   assert.ok(statuses.some(status => status.phase === 'configuring'));
   assert.equal(statuses.at(-1).phase, null);
@@ -264,6 +264,37 @@ test('same-process reconnect skips provider/model/thinking mutations but refresh
   assert.equal(replacedCalls.filter(call => call.message?.startsWith('/pidesk-providers ')).length, 1);
   assert.equal(runtime.providerProcess, '123:999');
   assert.equal(runtime.providersVersion, manager.providersVersion);
+});
+
+test('background jobs resync on reconnect, reject stale state and protect exact executions', async t => {
+  const { manager, dir } = managerFixture(t);
+  const calls = fakeSessions(t);
+  const record = { id: 'jobs', environmentId: 'local', cwd: dir };
+  manager.store.sessions.push(record);
+  await manager.ensureStarted(record.id);
+  const runtime = manager.runtimes.get(record.id);
+  const status = (revision, jobs) => runtime.session.emit('ui', { method: 'setStatus', statusKey: 'pidesk-background',
+    statusText: JSON.stringify({ generation: 'one', revision, jobs }) });
+  const job = { id: 'bg-01', startedAt: 10, status: 'running', elapsedMs: 5000 };
+  status(2, [job]);
+  const initial = manager.jobs(record.id);
+  status(1, []);
+  assert.equal(manager.jobs(record.id), initial);
+  await assert.rejects(manager.stopBackgroundJob(record.id, job.id, 9), /no longer running/);
+  await manager.stopBackgroundJob(record.id, job.id, 10);
+  assert.equal(calls.at(-1).message, '/pidesk-agents background-stop bg-01 10');
+  runtime.lastUsed = 0;
+  await manager.sweep(Date.now() + 24 * 3600e3);
+  assert.equal(runtime.status, 'connected', 'a running command prevents idle cleanup');
+  runtime.status = 'reconnecting';
+  await manager.ensureStarted(record.id);
+  assert.ok(calls.some(c => c.message === '/pidesk-agents background-sync'));
+  assert.equal(manager.jobs(record.id), initial, 'same-process reattach retains the last known snapshot');
+  status(3, [{ ...job, status: 'exited', exitCode: 0 }]);
+  assert.ok(manager.jobs(record.id).version > initial.version);
+  runtime.session.emit('attached', { created: true, pid: 999, startedAt: 1000 });
+  assert.deepEqual(manager.jobs(record.id).jobs, [], 'another Pi cannot inherit old job ids');
+  await assert.rejects(manager.stopBackgroundJob(record.id, job.id, 10), /no longer running/);
 });
 
 test('a speed chosen while the desktop was away reaches the Pi that kept running, when it re-attaches', async t => {

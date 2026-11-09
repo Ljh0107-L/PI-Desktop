@@ -611,7 +611,14 @@ export class SessionManager extends EventEmitter {
     runtime.questions.clear();
     const current = () => this.#current(record, runtime) && runtime.session === session;
     session.on('attached', info => {
-      if (current()) this.#status(record, runtime, { status: runtime.status, phase: info.created ? 'starting' : 'connecting' });
+      if (!current()) return;
+      const key = `${info.pid}:${info.startedAt}`;
+      if (runtime.jobsProcess !== key) {
+        runtime.jobsProcess = key;
+        runtime.jobsSource = null;
+        this.#publishJobs(record, runtime, []);
+      }
+      this.#status(record, runtime, { status: runtime.status, phase: info.created ? 'starting' : 'connecting' });
     });
     session.on('event', event => { if (current()) { runtime.lastSeq = session.lastSeq; this.#onEvent(record, runtime, event); } });
     session.on('ui', request => { if (current()) this.#onUi(record, runtime, request); });
@@ -678,6 +685,9 @@ export class SessionManager extends EventEmitter {
     }
     // Also a Pi that kept running while the model or effort was changed here: it still has the old ones.
     await this.#applyModel(record, runtime).catch(error => { if (!record.spare && this.#current(record, runtime)) this.emit('notice', { id: record.id, level: 'warning', message: error.message }); });
+    // This existing bridge command is safe even on older Pis: they resync subagents instead.
+    // Explicitly resend jobs because an idle Pi may have finished while this desktop was away.
+    if (!created) await session.prompt('/pidesk-agents background-sync').catch(() => {});
     this.#assertCurrent(record, runtime);
     this.#save(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId });
     return session;
@@ -753,10 +763,13 @@ export class SessionManager extends EventEmitter {
     }
     // Live state of this Pi's background jobs (the card shows the newest full list; nothing to merge).
     if (request.method === 'setStatus' && request.statusKey === 'pidesk-background' && request.statusText) {
-      let jobs = [];
-      try { jobs = JSON.parse(request.statusText).jobs ?? []; } catch { return; }
-      runtime.jobs = jobs;
-      this.emit('jobs', { id: record.id, jobs });
+      let payload;
+      try { payload = JSON.parse(request.statusText); } catch { return; }
+      if (!Array.isArray(payload.jobs)) return;
+      const known = runtime.jobsSource;
+      if (known?.generation === payload.generation && known.revision >= payload.revision) return;
+      runtime.jobsSource = { generation: payload.generation, revision: payload.revision };
+      this.#publishJobs(record, runtime, payload.jobs);
     }
   }
 
@@ -1057,7 +1070,8 @@ export class SessionManager extends EventEmitter {
   }
   #idle(runtime) {
     return runtime.status === 'connected' && !runtime.streaming && !runtime.starting && !runtime.questions.size && runtime.goal?.status !== 'active' && runtime.ultra?.task?.status !== 'active'
-      && ![...(runtime.agents?.values() ?? [])].some(agent => ACTIVE_AGENT.has(agent.status)); // background agents keep it busy
+      && ![...(runtime.agents?.values() ?? [])].some(agent => ACTIVE_AGENT.has(agent.status))
+      && !(runtime.jobs?.jobs ?? []).some(job => job.status === 'running'); // background work keeps it busy
   }
   // Stop Pis that are idle and either unused for IDLE_STOP_MS or beyond MAX_IDLE_PER_ENV on their machine.
   // A stopped session restarts on its next use; its history stays readable from the session file.
@@ -1208,12 +1222,19 @@ export class SessionManager extends EventEmitter {
 
   goal(id) { return this.runtimes.get(id)?.goal ?? null; }
   agents(id) { return [...(this.runtimes.get(id)?.agents?.values() ?? [])]; }
-  jobs(id) { return [...(this.runtimes.get(id)?.jobs ?? [])]; }
-  // The card's stop button, handled by the bridge's /pidesk-agents command (not recorded in history).
-  async stopBackgroundJob(id, jobId) {
+  #publishJobs(record, runtime, jobs) {
+    this.jobVersion = (this.jobVersion ?? 0) + 1;
+    runtime.jobs = { version: this.jobVersion, at: Date.now(), jobs };
+    this.emit('jobs', { id: record.id, ...runtime.jobs });
+  }
+  jobs(id) { return this.runtimes.get(id)?.jobs ?? { version: 0, jobs: [] }; }
+  // Stop only the exact execution shown in the card, never a reused id after a Pi restart.
+  async stopBackgroundJob(id, jobId, startedAt) {
     const runtime = this.runtimes.get(id);
-    if (runtime?.status !== 'connected' || !runtime.jobs?.some(job => job.id === jobId)) throw new Error('This job is no longer running in this session.');
-    await runtime.session.prompt(`/pidesk-agents background-stop ${jobId}`);
+    const job = runtime?.jobs?.jobs.find(job => job.id === jobId && job.startedAt === startedAt);
+    if (runtime?.status !== 'connected' || !job || job.status !== 'running' || !/^bg-\d+$/.test(jobId) || !Number.isFinite(startedAt))
+      throw new Error('This job is no longer running in this session.');
+    await runtime.session.prompt(`/pidesk-agents background-stop ${jobId} ${startedAt}`);
   }
   // The inspector's controls, handled by the bridge's /pidesk-agents command (not recorded in history).
   async stopAgent(id, agentId) {

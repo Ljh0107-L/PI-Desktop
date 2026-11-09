@@ -1,154 +1,137 @@
-// Background jobs: the model offloads long commands to the background and keeps working. A job is a
-// shell child of this Pi (on an SSH host: of the host's Pi), so it carries on while the model does
-// other work and while the desktop is disconnected. Completion — or the 30-minute escalation —
-// reaches the model as an automated message on the same channel subagent reports use: injected into
-// the current step while a turn runs, or delivered as a follow-up that starts a new turn when idle.
-// Jobs are tracked in memory: they are killed when the session shuts down, and a Pi restart drops
-// the tracking (a finished job's message is then lost).
+// Commands run beside the session's Pi, including while the desktop is disconnected.
+// Only completion and the one-time escalation notify the model; UI updates are throttled status
+// events. Tracking is process-local and bounded. Session shutdown stops the tracked process groups.
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
 
-export const BACKGROUND_LIMIT = 8; // concurrent running jobs
-const TAIL_BYTES = 64 * 1024;      // of output retained per job
-const MESSAGE_TAIL_LINES = 40;
+export const BACKGROUND_LIMIT = 8;
+export const FINISHED_LIMIT = 32;
+const TAIL_BYTES = 64 * 1024;
 const ESCALATE_MS = 30 * 60 * 1000;
-
-const humanMs = ms => {
-  const s = Math.max(0, Math.round(ms / 1000));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  return m < 60 ? `${m}m${s % 60 ? ` ${s % 60}s` : ''}`.trim() : `${Math.floor(m / 60)}h ${m % 60}m`;
-};
-const tailLines = (job, max = MESSAGE_TAIL_LINES) =>
-  job.tail.split('\n').slice(-max).join('\n').replace(/\n*$/, '');
+const humanMs = ms => `${Math.max(0, Math.round(ms / 1000))}s`;
+const tailLines = (job, max = 40) => job.tail.split('\n').slice(-max).join('\n').replace(/\n*$/, '');
 
 export function createBackground({ notify, isIdle, signal, publish, escalateMs = ESCALATE_MS }) {
   const jobs = new Map();
-  let seq = 0;
-
+  const generation = randomUUID();
+  let seq = 0, revision = 0, publishTimer = null, closed = false;
   const snapshot = job => ({
     id: job.id, command: job.command, description: job.description, cwd: job.cwd,
-    status: job.status, exitCode: job.exitCode, exitSignal: job.exitSignal,
-    pid: job.pid, startedAt: job.startedAt,
-    elapsedMs: job.status === 'running' ? Date.now() - job.startedAt : job.endedAt - job.startedAt,
-    escalated: job.escalated, error: job.error ?? null,
-    tail: job.tail.split('\n').slice(-10).join('\n').replace(/\n*$/, '').slice(-2048),
+    status: job.status, stopping: job.stopped && job.status === 'running',
+    exitCode: job.exitCode, exitSignal: job.exitSignal, pid: job.pid,
+    startedAt: job.startedAt, endedAt: job.endedAt,
+    elapsedMs: (job.endedAt ?? Date.now()) - job.startedAt,
+    escalated: job.escalated, error: job.error ?? null, tail: tailLines(job, 10).slice(-2048),
   });
-
-  // Live state for the desktop's right-panel card: the full job list, newest state included.
-  // Published on every transition and, while any job runs, once a second (so the output tail and
-  // elapsed time stay current). The whole list is replayed each time, so a reconnect sees the truth.
-  let ticker = null;
-  function publishNow() {
-    try { publish?.({ jobs: [...jobs.values()].map(snapshot) }); } catch { /* ui gone */ }
+  function trimFinished() {
+    const finished = [...jobs.values()].filter(j => j.status !== 'running');
+    for (const job of finished.slice(0, Math.max(0, finished.length - FINISHED_LIMIT))) jobs.delete(job.id);
   }
-  function syncTicker() {
-    const running = [...jobs.values()].some(j => j.status === 'running');
-    if (running && !ticker) { ticker = setInterval(publishNow, 1000); ticker.unref?.(); }
-    else if (!running && ticker) { clearInterval(ticker); ticker = null; }
+  function sync() {
+    clearTimeout(publishTimer); publishTimer = null;
+    if (closed) return;
+    trimFinished();
+    try { publish?.({ generation, revision: ++revision, jobs: [...jobs.values()].map(snapshot) }); } catch { /* next resync catches up */ }
   }
-
-  // Same delivery rules as subagent reports: steer the running turn, or start one when idle.
+  function outputChanged() {
+    if (closed || !publish || publishTimer) return;
+    publishTimer = setTimeout(sync, 1000);
+    publishTimer.unref?.();
+  }
   function announce(job, text) {
-    if (signal?.aborted) return;
-    const busy = isIdle?.() === false;
-    const options = busy ? { triggerTurn: true, deliverAs: 'steer' } : { triggerTurn: true, deliverAs: 'followUp' };
-    try { notify({ customType: 'pidesk-background', content: text, display: true,
-      details: { kind: 'pidesk-background', key: `${job.id}:${job.status}`, job: snapshot(job) } }, options); }
+    if (closed || signal?.aborted) return;
+    const options = { triggerTurn: true, deliverAs: isIdle?.() === false ? 'steer' : 'followUp' };
+    try { notify?.({ customType: 'pidesk-background', content: text, display: true,
+      details: { kind: 'pidesk-background', key: `${generation}:${job.id}:${job.status}`, job: snapshot(job) } }, options); }
     catch { /* session gone */ }
-    publishNow();
   }
-
   function start(command, { cwd = process.cwd(), description = '' } = {}) {
+    if (closed || signal?.aborted) throw new Error('This session has shut down');
     if (typeof command !== 'string' || !command.trim()) throw new Error('A shell command is required');
-    const running = [...jobs.values()].filter(j => j.status === 'running').length;
-    if (running >= BACKGROUND_LIMIT)
+    if ([...jobs.values()].filter(j => j.status === 'running').length >= BACKGROUND_LIMIT)
       throw new Error(`Too many concurrent background jobs (${BACKGROUND_LIMIT}). Stop one with background_stop first.`);
     const job = {
       id: `bg-${String(++seq).padStart(2, '0')}`, command, description, cwd,
       startedAt: Date.now(), endedAt: null, status: 'running', pid: null,
-      exitCode: null, exitSignal: null, escalated: false, stopped: false, error: null, tail: '', timer: null, child: null,
+      exitCode: null, exitSignal: null, escalated: false, stopped: false, error: null,
+      tail: '', timer: null, force: null, child: null,
     };
     jobs.set(job.id, job);
-    let child;
+    const prefix = `Automated message from Pi Desktop, not from the user: background job ${job.id}${description ? ` (${description})` : ''}`;
+    const finish = (code, exitSignal, error) => {
+      if (job.status !== 'running') return; // spawn error is followed by close
+      job.endedAt = Date.now();
+      clearTimeout(job.timer); clearTimeout(job.force);
+      job.exitCode = code; job.exitSignal = exitSignal; job.error = error?.message ?? null;
+      job.status = job.stopped ? 'stopped' : error ? 'failed' : 'exited';
+      sync();
+      if (job.stopped) return;
+      const outcome = error ? `failed to run: ${error.message}` : code === 0 ? 'finished successfully' : code === null ? `ended with signal ${exitSignal}` : `finished with exit code ${code}`;
+      const tail = tailLines(job);
+      announce(job, `${prefix} ${outcome} after ${humanMs(job.endedAt - job.startedAt)}.${tail ? `\nOutput tail:\n${tail}` : ''}`);
+    };
     try {
-      child = spawn('sh', ['-c', command], { cwd, stdio: ['ignore', 'pipe', 'pipe'] });
+      // A process group lets Stop terminate pipelines and their children, not just the shell.
+      job.child = spawn('sh', ['-c', command], { cwd, detached: process.platform !== 'win32', stdio: ['ignore', 'pipe', 'pipe'] });
     } catch (error) {
-      job.status = 'failed'; job.endedAt = Date.now(); job.error = error.message;
+      finish(null, null, error);
       throw new Error(`Could not start the background job: ${error.message}`);
     }
-    job.child = child; job.pid = child.pid;
-    syncTicker();
-    publishNow();
-    const onData = chunk => {
-      job.tail += chunk.toString('utf8');
-      if (Buffer.byteLength(job.tail, 'utf8') > TAIL_BYTES) job.tail = job.tail.slice(-TAIL_BYTES / 2);
-    };
-    child.stdout.on('data', onData);
-    child.stderr.on('data', onData);
+    job.pid = job.child.pid;
+    for (const stream of [job.child.stdout, job.child.stderr]) {
+      const decoder = new StringDecoder('utf8');
+      const append = text => {
+        job.tail += text;
+        if (Buffer.byteLength(job.tail, 'utf8') > TAIL_BYTES) job.tail = Buffer.from(job.tail).subarray(-TAIL_BYTES + 4).toString('utf8');
+        outputChanged();
+      };
+      stream.on('data', chunk => append(decoder.write(chunk)));
+      stream.on('end', () => append(decoder.end()));
+    }
     job.timer = setTimeout(() => {
-      if (job.status !== 'running' || job.escalated) return;
+      if (closed || job.status !== 'running' || job.stopped || job.escalated) return;
       job.escalated = true;
-      announce(job, `Automated message from Pi Desktop, not from the user: background job ${job.id}` +
-        `${description ? ` (${description})` : ''} is still running after ${humanMs(Date.now() - job.startedAt)}; it was started with: ${command}. Check it with background_status, or stop it with background_stop if it is stuck.`);
+      sync();
+      announce(job, `${prefix} is still running after ${humanMs(Date.now() - job.startedAt)}; it was started with: ${command}. Check it with background_status, or stop it with background_stop if it is stuck.`);
     }, escalateMs);
     job.timer.unref?.();
-    child.on('close', (code, signal) => {
-      if (job.status !== 'running') return; // spawn failed: the error handler already reported it
-      job.endedAt = Date.now();
-      clearTimeout(job.timer);
-      job.exitCode = code; job.exitSignal = signal;
-      if (job.stopped) { job.status = 'stopped'; syncTicker(); publishNow(); return; }
-      job.status = 'exited';
-      syncTicker();
-      const outcome = code === 0 ? 'finished successfully' : code === null ? `ended with signal ${signal}` : `finished with exit code ${code}`;
-      const tail = tailLines(job);
-      announce(job, `Automated message from Pi Desktop, not from the user: background job ${job.id}` +
-        `${description ? ` (${description})` : ''} ${outcome} after ${humanMs(Date.now() - job.startedAt)}.` +
-        (tail ? `\nOutput tail:\n${tail}` : ''));
-    });
-    child.on('error', error => {
-      job.endedAt = Date.now();
-      clearTimeout(job.timer);
-      job.status = 'failed'; job.error = error.message;
-      syncTicker();
-      announce(job, `Automated message from Pi Desktop, not from the user: background job ${job.id}` +
-        `${description ? ` (${description})` : ''} failed to run: ${error.message}`);
-    });
+    job.child.on('close', (code, exitSignal) => finish(code, exitSignal));
+    job.child.on('error', error => finish(null, null, error));
+    sync();
     return snapshot(job);
   }
-
   function get(id) {
     const job = jobs.get(String(id ?? ''));
     if (!job) throw new Error(`Unknown background job: ${id}`);
     return job;
   }
-
+  function kill(job, how) {
+    if (!job.pid) return;
+    try {
+      if (process.platform !== 'win32') process.kill(-job.pid, how);
+      else job.child.kill(how);
+    } catch (error) { if (error.code !== 'ESRCH') throw error; }
+  }
   function stop(id) {
     const job = get(id);
-    if (job.status !== 'running') return snapshot(job);
+    if (job.status !== 'running' || job.stopped) return snapshot(job);
     job.stopped = true;
-    job.child.kill('SIGTERM');
-    const force = setTimeout(() => { if (job.status === 'running') job.child.kill('SIGKILL'); }, 3000);
-    force.unref?.();
-    return job; // status flips to 'stopped' on close
+    clearTimeout(job.timer);
+    kill(job, 'SIGTERM');
+    job.force = setTimeout(() => { if (job.status === 'running') kill(job, 'SIGKILL'); }, 3000);
+    job.force.unref?.();
+    sync();
+    return snapshot(job);
   }
-
-  function list(filter) {
-    const all = [...jobs.values()];
-    return (filter ? all.filter(j => j.id === String(filter)) : all).map(snapshot);
-  }
-
-  // Kill every tracked job and forget the timers; the bridge aborts the signal so no
-  // completion message is delivered to a session that is shutting down.
+  function list(filter) { return [...jobs.values()].filter(j => !filter || j.id === String(filter)).map(snapshot); }
   function shutdown() {
-    for (const job of jobs.values()) {
-      if (job.status !== 'running') continue;
-      job.stopped = true;
-      job.child.kill('SIGTERM');
-      const force = setTimeout(() => job.child.kill('SIGKILL'), 3000);
-      force.unref?.();
-    }
+    if (closed) return;
+    closed = true;
+    clearTimeout(publishTimer); publishTimer = null;
+    for (const job of jobs.values()) if (job.status === 'running') stop(job.id);
+    signal?.removeEventListener('abort', shutdown);
   }
-
-  return { start, stop, list, get, shutdown, limit: BACKGROUND_LIMIT };
+  signal?.addEventListener('abort', shutdown, { once: true });
+  return { start, stop, list, get, sync, shutdown, limit: BACKGROUND_LIMIT };
 }

@@ -185,9 +185,12 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
       return;
     }
     // [[background-job]]: the model offloads a long command to a background job.
-    if (userText.includes('[[background-job]]') && last.role !== 'tool') {
+    const backgroundMatch = /\[\[background-job(?:-(fail|stop|many))?\]\]/.exec(userText);
+    if (backgroundMatch && last.role !== 'tool') {
+      const mode = backgroundMatch[1];
+      const command = mode === 'fail' ? 'echo failed; exit 7' : mode ? 'echo ready; sleep 60' : 'echo started; sleep 4; echo job-done';
       send({ role: 'assistant', content: '' });
-      send({ tool_calls: [{ index: 0, id: 'call_bgjob' + requests.length, type: 'function', function: { name: 'run_in_background', arguments: JSON.stringify({ command: 'sh -c "sleep 2 && echo job-done"', description: 'Soak check' }) } }] });
+      send({ tool_calls: Array.from({ length: mode === 'many' ? 8 : 1 }, (_, index) => ({ index, id: `call_bgjob${requests.length}_${index}`, type: 'function', function: { name: 'run_in_background', arguments: JSON.stringify({ command, description: mode ? `${mode} check ${index + 1}` : 'Soak check' }) } })) });
       finish('tool_calls');
       return;
     }

@@ -4,7 +4,7 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 ## Unreleased
 
-- **Background jobs card.** The right panel now shows this session's background jobs live: state (running, done, exit code, stopped, failed), how long each has run, the tail of its output under a fold, and a Stop button while a job runs. The card refreshes as jobs run, and reconnecting re-fetches the current state from the session's Pi.
+- **Background tasks card.** The right panel shows running and recently finished commands, their elapsed time, exit code, command, working directory and output tail. All eight concurrent tasks remain accessible, with Stop buttons that terminate their process groups. Completed tasks survive renderer reloads and SSH reconnects while the host Pi stays alive; a new Pi clears obsolete job ids. Output updates are throttled, timers tick locally, and only completion or the one-time long-job reminder wakes the model. Running commands are protected from idle-session cleanup.
 
 ## 0.2.11 — Background jobs
 

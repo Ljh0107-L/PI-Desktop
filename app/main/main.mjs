@@ -215,8 +215,9 @@ const api = {
   ultra: id => manager.ultra(id),
   setUltra: (id, on) => manager.setUltra(id, on),
   agents: id => manager.agents(id),
+  jobs: id => manager.jobs(id),
   stopAgent: (id, agentId) => manager.stopAgent(id, agentId),
-  stopBackgroundJob: (id, jobId) => manager.stopBackgroundJob(id, jobId),
+  stopBackgroundJob: (id, jobId, startedAt) => manager.stopBackgroundJob(id, jobId, startedAt),
   messageAgent: (id, agentId, text) => manager.messageAgent(id, agentId, text),
   // Updates
   updateStatus: () => updater?.status ?? { state: 'idle' },

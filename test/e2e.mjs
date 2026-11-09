@@ -14,6 +14,7 @@ import './transcript.mjs';
 import './projectless.mjs';
 import { checkReading } from './reading.mjs';
 import { checkFilePreview } from './file-preview-ui.mjs';
+import { checkBackgroundJobs } from './background-jobs-ui.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -512,6 +513,8 @@ try {
   await S('05f-terminal');
   await page.click('.terminal-bar .tool-button');
 
+  await checkBackgroundJobs({ page, send, check, shot: S });
+
   // ---- remote session over SSH
   await page.click('.nav-item.new');
   await page.click('.env-trigger');
@@ -652,18 +655,7 @@ try {
   await S('08d-subagent-reconnected');
   await page.getByRole('button', { name: 'Back to subagents' }).click();
 
-  // ---- background jobs: the model offloads a long command; the card tracks it to completion
-  await send('[[background-job]]');
-  await page.locator('.right-panel .jobs .job').waitFor({ timeout: 20000 });
-  check('the card lists the running job with its state and a stop button',
-    (await page.locator('.right-panel .job', { hasText: 'bg-01' }).innerText()).includes('running') &&
-    await page.locator('.right-panel .job-stop').isVisible());
-  await page.locator('.right-panel .job-state.exited').waitFor({ timeout: 30000 });
-  check('the card shows the finished job, its result and the output tail',
-    (await page.locator('.right-panel .job', { hasText: 'bg-01' }).innerText()).includes('done') &&
-    (await page.locator('.right-panel .job-state.exited').innerText()) === 'done' &&
-    await page.locator('.right-panel .job-tail pre', { hasText: 'job-done' }).count() === 1);
-  await S('08g-background-jobs');
+  await checkBackgroundJobs({ page, send, check, shot: S, remote: true, dropSsh });
 
   // concurrent sessions: start a remote run, switch to local, run there, both complete
   await send('remote run ' + 'x'.repeat(300));

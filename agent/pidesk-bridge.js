@@ -524,6 +524,7 @@ export default function pideskBridge(pi) {
     applySubagentMode();
     try { ultra.restore(ctx.sessionManager.getBranch(), { reason: event?.reason, ui: ctx.ui }); } catch { /* best effort */ }
     agentUi = ctx.ui;
+    background.sync();
     // Agents that were still running when this session's previous Pi ended: record that they stopped.
     setTimeout(() => { try { subagents.restore(ctx.sessionManager.getBranch()); } catch { /* best effort */ } subagents.sync(); }, 0);
   });
@@ -544,7 +545,11 @@ export default function pideskBridge(pi) {
       try {
         if (verb === 'stop') subagents.stop(id, 'Stopped by the user');
         else if (verb === 'message') subagents.message(id, Buffer.from(payload ?? '', 'base64').toString('utf8'), { from: 'user' }).promise.catch(() => {});
-        else if (verb === 'background-stop') { const job = background.stop(id); ctx?.ui?.notify?.(`Background job ${id} ${job.status === 'running' ? 'is being stopped' : `was already ${job.status}`}`); }
+        else if (verb === 'background-sync') background.sync();
+        else if (verb === 'background-stop') {
+          if (background.get(id).startedAt !== Number(payload)) throw new Error('This job belongs to an earlier Pi process. Refresh its state before stopping it.');
+          background.stop(id);
+        }
         else subagents.sync();
       } catch (error) { ctx?.ui?.notify?.(error.message, 'error'); }
     },

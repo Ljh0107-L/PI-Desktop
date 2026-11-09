@@ -1,5 +1,6 @@
 // Client-side state for the renderer: one immutable snapshot, updated from IPC events.
 import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerDraft as takeDraft, restoreComposerDraft as restoreDraft, recoverComposerDraft as recoverDraft } from './composer-draft.js';
+import { backgroundSnapshot } from './background-jobs.js';
 import { relativeSessionPath } from './file-paths.js';
 import { isRetiredProvider, RETIRED_PROVIDER_MESSAGE } from '../../../core/retired-providers.mjs';
 import { modelForEnvironment, modelsForEnvironment } from './model-catalog.js';
@@ -34,7 +35,7 @@ let state = {
   goals: {},
   ultra: {},                                // session id -> { enabled, task } from its Pi (Ultra mode)
   agents: {},                               // session id -> { agent id -> live state from its Pi }
-  jobs: {},                                 // session id -> { job id -> live background job state from its Pi }
+  jobs: {},                                 // session id -> versioned background-job snapshot
   confirm: null,                            // { title, message, action, run }                                // session id -> { objective, status, turns } | null
   files: {},                                // session id -> { tabs: [path], active }
   filePaneOpen: false,
@@ -144,7 +145,7 @@ window.pidesk.subscribe(({ channel, payload }) => {
       set(s => ({ agents: { ...s.agents, [payload.id]: Object.fromEntries((payload.agents ?? []).map(agent => [agent.id, agent])) } }));
       break;
     case 'jobs':
-      set(s => ({ jobs: { ...s.jobs, [payload.id]: Object.fromEntries((payload.jobs ?? []).map(job => [job.id, job])) } }));
+      receiveJobs(payload.id, payload);
       break;
     case 'status':
       set(s => ({ sessions: s.sessions.map(x => x.id === payload.id ? { ...x, status: payload.status, phase: Object.hasOwn(payload, 'phase') ? payload.phase : x.phase, streaming: payload.streaming ?? (payload.status === 'connected' ? x.streaming : false), statusMessage: payload.message, compacting: payload.compacting ?? x.compacting } : x) }));
@@ -339,8 +340,15 @@ export function openSubagent(id, callId, taskIndex = null) {
 export function stopAgent(id, agentId) {
   return api('stopAgent', id, agentId).catch(error => notify(error.message, 'error'));
 }
-export function stopBackgroundJob(id, jobId) {
-  return api('stopBackgroundJob', id, jobId).catch(error => notify(error.message, 'error'));
+export function stopBackgroundJob(id, jobId, startedAt) {
+  return api('stopBackgroundJob', id, jobId, startedAt).catch(error => { notify(error.message, 'error'); throw error; });
+}
+function receiveJobs(id, payload) {
+  if (deleting.has(id) || !state.sessions.some(session => session.id === id)) return;
+  set(s => ({ jobs: { ...s.jobs, [id]: backgroundSnapshot(s.jobs[id], payload) } }));
+}
+function refreshJobs(id) {
+  api('jobs', id).then(payload => receiveJobs(id, payload)).catch(() => {});
 }
 export function messageAgent(id, agentId, text) {
   return api('messageAgent', id, agentId, text).catch(error => { notify(error.message, 'error'); throw error; });
@@ -412,6 +420,7 @@ export async function openSession(id, { record = true } = {}) {
   // Once it is open, keep a spare Pi in its folder so Fork (or a new session there) needn't start one.
   setTimeout(() => { if (state.activeId === id) api('warmFolder', id).catch(() => {}); }, 1500);
   const t = transcriptOf(id);
+  refreshJobs(id);
   if (t.loaded) { api('focusSession', id).catch(() => {}); prefetchHistory(id); return; } // the sweep never stops the open conversation
   try {
     await reloadTranscript(id);
@@ -419,7 +428,6 @@ export async function openSession(id, { record = true } = {}) {
     api('goal', id).then(goal => set(s => ({ goals: { ...s.goals, [id]: goal ?? s.goals[id] ?? null } }))).catch(() => {});
     api('ultra', id).then(ultra => set(s => ({ ultra: { ...s.ultra, [id]: ultra ?? s.ultra[id] ?? null } }))).catch(() => {});
     api('agents', id).then(list => { if (list?.length) set(s => ({ agents: { ...s.agents, [id]: { ...Object.fromEntries(list.map(agent => [agent.id, agent])), ...s.agents[id] } } })); }).catch(() => {});
-    api('jobs', id).then(list => { if (list?.length) set(s => ({ jobs: { ...s.jobs, [id]: Object.fromEntries(list.map(job => [job.id, job])) } })); }).catch(() => {});
   } catch (error) {
     setTranscript(id, { ...transcriptOf(id), loaded: true, error: error.message });
   }
