@@ -2,7 +2,7 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
-## Unreleased
+## 0.2.12 — Background task cards
 
 - **Background tasks card.** The right panel shows running and recently finished commands, their elapsed time, exit code, command, working directory and output tail. All eight concurrent tasks remain accessible, with Stop buttons that terminate their process groups. Completed tasks survive renderer reloads and SSH reconnects while the host Pi stays alive; a new Pi clears obsolete job ids. Output updates are throttled, timers tick locally, and only completion or the one-time long-job reminder wakes the model. Running commands are protected from idle-session cleanup.
 
