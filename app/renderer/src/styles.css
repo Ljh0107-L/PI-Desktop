@@ -1015,6 +1015,19 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 .subagent-clear:disabled { opacity: .35; cursor: default; }
 .subagent-summary-head:disabled { cursor: default; }
 .subagent-stop { flex-shrink: 0; font-size: 12px; color: #ff7b72; }
+.jobs { display: flex; flex-direction: column; gap: 4px; }
+.job-line { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.job-name { flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 6px; }
+.job-name b { font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.job-id { color: var(--muted); font-size: 11px; flex-shrink: 0; }
+.job-state { flex-shrink: 0; font-size: 11px; }
+.job-state.running { color: #ee7c58; }
+.job-state.exited { color: #56d364; }
+.job-state.stopped, .job-state.failed { color: #ff7b72; }
+.job-stop { flex-shrink: 0; height: 24px; margin: 0; padding: 0 8px; font-size: 12px; color: #ff7b72; }
+.job-tail { font-size: 11px; color: var(--muted); }
+.job-tail summary { cursor: pointer; padding: 2px 0; }
+.job-tail pre { margin: 4px 0 0; padding: 8px; border: 1px solid var(--hairline); border-radius: 8px; background: var(--surface); font-size: 11px; max-height: 140px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .subagent-inspector-worktree { display: flex; align-items: center; gap: 6px; padding: 0 8px 8px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
 .subagent-message { display: flex; align-items: flex-end; gap: 6px; padding: 8px 4px 12px; border-top: 1px solid var(--hairline); }
 .subagent-message textarea { flex: 1; min-height: 38px; max-height: 140px; resize: vertical; padding: 8px 10px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: inherit; font: inherit; font-size: 13px; }

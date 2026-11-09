@@ -398,6 +398,7 @@ export default function pideskBridge(pi) {
     notify: (message, options) => pi.sendMessage(message, options),
     isIdle: () => !parentRunning,
     signal: backgroundSignal.signal,
+    publish: payload => agentUi?.setStatus('pidesk-background', payload),
   });
   const jobLine = job => `Job ${job.id} [${job.status}]${job.description ? ` — ${job.description}` : ''}: ${job.command} (elapsed ${Math.round(job.elapsedMs / 1000)}s)${job.exitCode !== null ? `, exit ${job.exitCode}` : ''}${job.exitSignal ? `, signal ${job.exitSignal}` : ''}`;
   pi.registerTool({
@@ -543,6 +544,7 @@ export default function pideskBridge(pi) {
       try {
         if (verb === 'stop') subagents.stop(id, 'Stopped by the user');
         else if (verb === 'message') subagents.message(id, Buffer.from(payload ?? '', 'base64').toString('utf8'), { from: 'user' }).promise.catch(() => {});
+        else if (verb === 'background-stop') { const job = background.stop(id); ctx?.ui?.notify?.(`Background job ${id} ${job.status === 'running' ? 'is being stopped' : `was already ${job.status}`}`); }
         else subagents.sync();
       } catch (error) { ctx?.ui?.notify?.(error.message, 'error'); }
     },

@@ -21,7 +21,7 @@ const humanMs = ms => {
 const tailLines = (job, max = MESSAGE_TAIL_LINES) =>
   job.tail.split('\n').slice(-max).join('\n').replace(/\n*$/, '');
 
-export function createBackground({ notify, isIdle, signal, escalateMs = ESCALATE_MS }) {
+export function createBackground({ notify, isIdle, signal, publish, escalateMs = ESCALATE_MS }) {
   const jobs = new Map();
   let seq = 0;
 
@@ -31,8 +31,21 @@ export function createBackground({ notify, isIdle, signal, escalateMs = ESCALATE
     pid: job.pid, startedAt: job.startedAt,
     elapsedMs: job.status === 'running' ? Date.now() - job.startedAt : job.endedAt - job.startedAt,
     escalated: job.escalated, error: job.error ?? null,
-    tail: job.tail.split('\n').slice(-10).join('\n').replace(/\n*$/, ''),
+    tail: job.tail.split('\n').slice(-10).join('\n').replace(/\n*$/, '').slice(-2048),
   });
+
+  // Live state for the desktop's right-panel card: the full job list, newest state included.
+  // Published on every transition and, while any job runs, once a second (so the output tail and
+  // elapsed time stay current). The whole list is replayed each time, so a reconnect sees the truth.
+  let ticker = null;
+  function publishNow() {
+    try { publish?.({ jobs: [...jobs.values()].map(snapshot) }); } catch { /* ui gone */ }
+  }
+  function syncTicker() {
+    const running = [...jobs.values()].some(j => j.status === 'running');
+    if (running && !ticker) { ticker = setInterval(publishNow, 1000); ticker.unref?.(); }
+    else if (!running && ticker) { clearInterval(ticker); ticker = null; }
+  }
 
   // Same delivery rules as subagent reports: steer the running turn, or start one when idle.
   function announce(job, text) {
@@ -42,6 +55,7 @@ export function createBackground({ notify, isIdle, signal, escalateMs = ESCALATE
     try { notify({ customType: 'pidesk-background', content: text, display: true,
       details: { kind: 'pidesk-background', key: `${job.id}:${job.status}`, job: snapshot(job) } }, options); }
     catch { /* session gone */ }
+    publishNow();
   }
 
   function start(command, { cwd = process.cwd(), description = '' } = {}) {
@@ -63,6 +77,8 @@ export function createBackground({ notify, isIdle, signal, escalateMs = ESCALATE
       throw new Error(`Could not start the background job: ${error.message}`);
     }
     job.child = child; job.pid = child.pid;
+    syncTicker();
+    publishNow();
     const onData = chunk => {
       job.tail += chunk.toString('utf8');
       if (Buffer.byteLength(job.tail, 'utf8') > TAIL_BYTES) job.tail = job.tail.slice(-TAIL_BYTES / 2);
@@ -81,8 +97,9 @@ export function createBackground({ notify, isIdle, signal, escalateMs = ESCALATE
       job.endedAt = Date.now();
       clearTimeout(job.timer);
       job.exitCode = code; job.exitSignal = signal;
-      if (job.stopped) { job.status = 'stopped'; return; }
+      if (job.stopped) { job.status = 'stopped'; syncTicker(); publishNow(); return; }
       job.status = 'exited';
+      syncTicker();
       const outcome = code === 0 ? 'finished successfully' : code === null ? `ended with signal ${signal}` : `finished with exit code ${code}`;
       const tail = tailLines(job);
       announce(job, `Automated message from Pi Desktop, not from the user: background job ${job.id}` +
@@ -93,6 +110,7 @@ export function createBackground({ notify, isIdle, signal, escalateMs = ESCALATE
       job.endedAt = Date.now();
       clearTimeout(job.timer);
       job.status = 'failed'; job.error = error.message;
+      syncTicker();
       announce(job, `Automated message from Pi Desktop, not from the user: background job ${job.id}` +
         `${description ? ` (${description})` : ''} failed to run: ${error.message}`);
     });

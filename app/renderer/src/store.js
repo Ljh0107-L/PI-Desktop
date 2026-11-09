@@ -34,6 +34,7 @@ let state = {
   goals: {},
   ultra: {},                                // session id -> { enabled, task } from its Pi (Ultra mode)
   agents: {},                               // session id -> { agent id -> live state from its Pi }
+  jobs: {},                                 // session id -> { job id -> live background job state from its Pi }
   confirm: null,                            // { title, message, action, run }                                // session id -> { objective, status, turns } | null
   files: {},                                // session id -> { tabs: [path], active }
   filePaneOpen: false,
@@ -141,6 +142,9 @@ window.pidesk.subscribe(({ channel, payload }) => {
       break;
     case 'agents':
       set(s => ({ agents: { ...s.agents, [payload.id]: Object.fromEntries((payload.agents ?? []).map(agent => [agent.id, agent])) } }));
+      break;
+    case 'jobs':
+      set(s => ({ jobs: { ...s.jobs, [payload.id]: Object.fromEntries((payload.jobs ?? []).map(job => [job.id, job])) } }));
       break;
     case 'status':
       set(s => ({ sessions: s.sessions.map(x => x.id === payload.id ? { ...x, status: payload.status, phase: Object.hasOwn(payload, 'phase') ? payload.phase : x.phase, streaming: payload.streaming ?? (payload.status === 'connected' ? x.streaming : false), statusMessage: payload.message, compacting: payload.compacting ?? x.compacting } : x) }));
@@ -335,6 +339,9 @@ export function openSubagent(id, callId, taskIndex = null) {
 export function stopAgent(id, agentId) {
   return api('stopAgent', id, agentId).catch(error => notify(error.message, 'error'));
 }
+export function stopBackgroundJob(id, jobId) {
+  return api('stopBackgroundJob', id, jobId).catch(error => notify(error.message, 'error'));
+}
 export function messageAgent(id, agentId, text) {
   return api('messageAgent', id, agentId, text).catch(error => { notify(error.message, 'error'); throw error; });
 }
@@ -412,6 +419,7 @@ export async function openSession(id, { record = true } = {}) {
     api('goal', id).then(goal => set(s => ({ goals: { ...s.goals, [id]: goal ?? s.goals[id] ?? null } }))).catch(() => {});
     api('ultra', id).then(ultra => set(s => ({ ultra: { ...s.ultra, [id]: ultra ?? s.ultra[id] ?? null } }))).catch(() => {});
     api('agents', id).then(list => { if (list?.length) set(s => ({ agents: { ...s.agents, [id]: { ...Object.fromEntries(list.map(agent => [agent.id, agent])), ...s.agents[id] } } })); }).catch(() => {});
+    api('jobs', id).then(list => { if (list?.length) set(s => ({ jobs: { ...s.jobs, [id]: Object.fromEntries(list.map(job => [job.id, job])) } })); }).catch(() => {});
   } catch (error) {
     setTranscript(id, { ...transcriptOf(id), loaded: true, error: error.message });
   }
@@ -512,7 +520,7 @@ export async function deleteSession(id) {
   try {
     await api('deleteSession', id);
     const without = object => Object.fromEntries(Object.entries(object).filter(([key]) => key !== id));
-    set(s => ({ composerDrafts: without(s.composerDrafts), transcripts: without(s.transcripts), questions: without(s.questions), stats: without(s.stats), files: without(s.files), subagentSelection: without(s.subagentSelection), agents: without(s.agents),
+    set(s => ({ composerDrafts: without(s.composerDrafts), transcripts: without(s.transcripts), questions: without(s.questions), stats: without(s.stats), files: without(s.files), subagentSelection: without(s.subagentSelection), agents: without(s.agents), jobs: without(s.jobs),
       history: s.history.filter(v => v.activeId !== id), future: s.future.filter(v => v.activeId !== id) }));
   } catch (error) {
     // Don't silently lose the conversation or navigate away from whatever the user opened meanwhile.

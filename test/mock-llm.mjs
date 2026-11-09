@@ -184,6 +184,13 @@ export function startMockLlm({ port = 0, chunkDelay = 15 } = {}) {
       finish('tool_calls');
       return;
     }
+    // [[background-job]]: the model offloads a long command to a background job.
+    if (userText.includes('[[background-job]]') && last.role !== 'tool') {
+      send({ role: 'assistant', content: '' });
+      send({ tool_calls: [{ index: 0, id: 'call_bgjob' + requests.length, type: 'function', function: { name: 'run_in_background', arguments: JSON.stringify({ command: 'sh -c "sleep 2 && echo job-done"', description: 'Soak check' }) } }] });
+      finish('tool_calls');
+      return;
+    }
     if (!subagent && /\[\[subagents(?:-slow|-background)?\]\]/.test(userText) && last.role !== 'tool') {
       send({ role: 'assistant', content: '' });
       const slow = userText.includes('[[subagents-slow]]'), background = userText.includes('[[subagents-background]]');

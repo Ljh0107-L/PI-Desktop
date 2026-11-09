@@ -1,8 +1,8 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { useResizable } from './ui.jsx';
 import { formatTokens, speedDisplay, speedReply, speedTier, usageOf } from './transcript.js';
-import { useStore } from './store.js';
+import { stopBackgroundJob, useStore } from './store.js';
 import { subagentBatches, visibleSubagentBatches } from './subagent-state.js';
 import { SubagentDetail, SubagentList } from './Subagents.jsx';
 
@@ -64,6 +64,52 @@ function UsageCard({ transcript }) {
   );
 }
 
+// Live background jobs from this session's Pi (started with run_in_background): running jobs first,
+// newest first. Each row shows its state, how long it has run (ticked locally while anything runs),
+// a Stop button while running, and the output tail under a fold.
+const jobMs = ms => {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m}m${s % 60 ? ` ${s % 60}s` : ''}`.trim() : `${Math.floor(m / 60)}h ${m % 60}m`;
+};
+function BackgroundJobs({ sessionId }) {
+  const jobs = useStore(s => s.jobs[sessionId]);
+  const list = Object.values(jobs ?? {});
+  const anyRunning = list.some(job => job.status === 'running');
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!anyRunning) return;
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, [anyRunning]);
+  if (!list.length) return null;
+  const sorted = [...list].sort((a, b) => a.status === 'running' ? -1 : b.status === 'running' ? 1 : b.startedAt - a.startedAt);
+  const visible = sorted.slice(0, 6);
+  return (
+    <Card title="Background jobs" aside={<span className="muted">{list.filter(j => j.status === 'running').length} running</span>}>
+      <div className="jobs">
+        {visible.map(job => {
+          const elapsed = job.status === 'running' ? now - job.startedAt : (job.endedAt ?? job.startedAt) - job.startedAt;
+          const state = job.status === 'exited' ? (job.exitCode === 0 ? 'done' : job.exitCode == null ? `signal ${job.exitSignal}` : `exit ${job.exitCode}`) : job.status;
+          return (
+            <div key={job.id} className={`job ${job.status}`} title={job.command}>
+              <div className="job-line">
+                <span className="job-name"><b>{job.description || job.command}</b><span className="job-id">{job.id}</span></span>
+                <span className={`job-state ${state === 'done' ? 'exited' : job.status}`}>{state}</span>
+                <span className="muted">{job.status === 'running' ? `for ${jobMs(elapsed)}` : `took ${jobMs(elapsed)}`}</span>
+                {job.status === 'running' && <button className="link-button job-stop" aria-label={`Stop job ${job.id}`} onClick={() => stopBackgroundJob(sessionId, job.id)}>Stop</button>}
+              </div>
+              {job.tail && <details className="job-tail"><summary className="muted">output</summary><pre>{job.tail}</pre></details>}
+            </div>
+          );
+        })}
+        {sorted.length > 6 && <div className="muted jobs-more">+{sorted.length - 6} earlier jobs</div>}
+      </div>
+    </Card>
+  );
+}
+
 export function RightPanel({ session }) {
   const transcript = useStore(s => s.transcripts[session.id]);
   const stats = useStore(s => s.stats[session.id]);
@@ -89,6 +135,7 @@ export function RightPanel({ session }) {
       </>} />
       <UsageCard transcript={transcript} />
       {session.engine !== 'cursor' && <SubagentList sessionId={session.id} batches={batches} selectedCallId={selection?.callId} />}
+      <BackgroundJobs sessionId={session.id} />
     </aside>
   );
 }

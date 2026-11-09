@@ -216,6 +216,7 @@ const api = {
   setUltra: (id, on) => manager.setUltra(id, on),
   agents: id => manager.agents(id),
   stopAgent: (id, agentId) => manager.stopAgent(id, agentId),
+  stopBackgroundJob: (id, jobId) => manager.stopBackgroundJob(id, jobId),
   messageAgent: (id, agentId, text) => manager.messageAgent(id, agentId, text),
   // Updates
   updateStatus: () => updater?.status ?? { state: 'idle' },
@@ -327,7 +328,7 @@ app.whenReady().then(async () => {
   usage = new UsageLedger({ path: join(app.getPath('userData'), 'usage.jsonl'), sessionsDir: join(app.getPath('userData'), 'agent', 'sessions') });
   manager.on('event', ({ event }) => { if (event.type === 'message_end') usage.record(event.message); });
   manager.on('environments-changed', () => send('environments', environments()));
-  for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'rewound', 'notice', 'environment', 'goal', 'agents', 'ultra']) manager.on(channel, payload => send(channel, payload));
+  for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'rewound', 'notice', 'environment', 'goal', 'agents', 'jobs', 'ultra']) manager.on(channel, payload => send(channel, payload));
   manager.on('ultra', ultraChanged);
   manager.on('status', ultraPiStatus);
   manager.on('sessions', () => send('sessions', manager.list()));

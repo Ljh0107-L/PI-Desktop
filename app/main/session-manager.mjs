@@ -751,6 +751,13 @@ export class SessionManager extends EventEmitter {
       }
       this.emit('agents', { id: record.id, agents: [...runtime.agents.values()] });
     }
+    // Live state of this Pi's background jobs (the card shows the newest full list; nothing to merge).
+    if (request.method === 'setStatus' && request.statusKey === 'pidesk-background' && request.statusText) {
+      let jobs = [];
+      try { jobs = JSON.parse(request.statusText).jobs ?? []; } catch { return; }
+      runtime.jobs = jobs;
+      this.emit('jobs', { id: record.id, jobs });
+    }
   }
 
 
@@ -1201,6 +1208,13 @@ export class SessionManager extends EventEmitter {
 
   goal(id) { return this.runtimes.get(id)?.goal ?? null; }
   agents(id) { return [...(this.runtimes.get(id)?.agents?.values() ?? [])]; }
+  jobs(id) { return [...(this.runtimes.get(id)?.jobs ?? [])]; }
+  // The card's stop button, handled by the bridge's /pidesk-agents command (not recorded in history).
+  async stopBackgroundJob(id, jobId) {
+    const runtime = this.runtimes.get(id);
+    if (runtime?.status !== 'connected' || !runtime.jobs?.some(job => job.id === jobId)) throw new Error('This job is no longer running in this session.');
+    await runtime.session.prompt(`/pidesk-agents background-stop ${jobId}`);
+  }
   // The inspector's controls, handled by the bridge's /pidesk-agents command (not recorded in history).
   async stopAgent(id, agentId) {
     const runtime = this.runtimes.get(id);
