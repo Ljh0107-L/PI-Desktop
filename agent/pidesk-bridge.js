@@ -22,6 +22,7 @@
 //    at "be concise") lack, such as answering a question instead of changing code and reporting failures.
 // 8. Gemini models behind custom endpoints whose id doesn't name the model (Volcengine Ark's ep-… ids)
 //    reach pi-ai's Gemini adapter as the model their name gives (pidesk-gemini.mjs).
+import { createBackground } from './pidesk-background.mjs';
 import { accessSync, constants, existsSync, lstatSync, mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { stat } from 'node:fs/promises';
@@ -147,6 +148,7 @@ export function workingNote({ unattended = false } = {}) {
       ? 'Look at what you are about to delete or overwrite before you do it.'
       : 'Before anything hard to undo or that reaches beyond this machine (deleting data, force-pushing, publishing, sending messages), confirm with the user unless they or the project\'s instructions already said to go ahead, and look at what you are about to delete or overwrite.',
     'Send tool calls that don\'t depend on each other together, in one step.',
+    'Offload long-running commands (builds, full test suites, training, downloads, waits) with run_in_background when you have other work to do; their result reaches you as a message, so never poll on a timer.',
   ].map(line => `- ${line}`).join('\n');
 }
 
@@ -387,6 +389,60 @@ export default function pideskBridge(pi) {
     },
   });
   for (const tool of [subagents.tool, subagents.messageTool, subagents.stopTool]) pi.registerTool(tool);
+  // ---------------------------------------------------------------- Background jobs
+  // Long commands the model offloads to the background (pidesk-background.mjs). Completion and the
+  // 30-minute escalation reach it as automated messages on the subagent-report channel: steered
+  // into the running turn while busy, or delivered as a follow-up that starts a turn when idle.
+  const backgroundSignal = new AbortController();
+  const background = createBackground({
+    notify: (message, options) => pi.sendMessage(message, options),
+    isIdle: () => !parentRunning,
+    signal: backgroundSignal.signal,
+  });
+  const jobLine = job => `Job ${job.id} [${job.status}]${job.description ? ` — ${job.description}` : ''}: ${job.command} (elapsed ${Math.round(job.elapsedMs / 1000)}s)${job.exitCode !== null ? `, exit ${job.exitCode}` : ''}${job.exitSignal ? `, signal ${job.exitSignal}` : ''}`;
+  pi.registerTool({
+    name: 'run_in_background',
+    label: 'Run in background',
+    description: 'Offload a long-running command to the background and keep working: the call returns at once with a job id, and when the command finishes an automated message with its result starts your next turn. Use it for work that takes more than a few seconds while you have other work to do (builds, full test suites, training, downloads, migrations, waiting for services) — not for quick commands, and never for interactive commands that need a terminal or a prompt. Do not poll on a timer; check background_status only when you need progress.',
+    promptSnippet: 'Offload a long command to the background and keep working',
+    parameters: Type.Object({
+      command: Type.String({ description: 'The shell command to run' }),
+      description: Type.String({ description: 'What this job is, in a few words; shown in its completion message' }),
+      cwd: Type.Optional(Type.String({ description: 'Working directory; default: the conversation directory' })),
+    }),
+    async execute(_id, params) {
+      const job = background.start(params.command, { cwd: params.cwd, description: params.description ?? '' });
+      return { content: [{ type: 'text', text: `Background job ${job.id} started (pid ${job.pid}). It runs while you continue; its result reaches you as a message when it finishes. Check it with background_status, stop it with background_stop.` }] };
+    },
+  });
+  pi.registerTool({
+    name: 'background_status',
+    label: 'Background status',
+    description: 'Check a background job: status, elapsed time, exit code and the tail of its output. Omit id for all jobs. Use it only when you need progress — completion arrives on its own.',
+    promptSnippet: 'Check a background job\'s progress',
+    parameters: Type.Object({
+      id: Type.Optional(Type.String({ description: 'Job id; omit for all jobs' })),
+    }),
+    async execute(_id, params) {
+      const jobs = background.list(params.id);
+      if (!jobs.length) return { content: [{ type: 'text', text: params.id ? `Unknown background job: ${params.id}` : 'No background jobs.' }] };
+      const tail = jobs.length === 1 && jobs[0].tail ? `\n\nTail of ${jobs[0].id}:\n${jobs[0].tail}` : '';
+      return { content: [{ type: 'text', text: jobs.map(jobLine).join('\n') + tail }] };
+    },
+  });
+  pi.registerTool({
+    name: 'background_stop',
+    label: 'Stop background job',
+    description: 'Stop a running background job (SIGTERM, then SIGKILL after 3s).',
+    promptSnippet: 'Stop a background job',
+    parameters: Type.Object({
+      id: Type.String({ description: 'Job id' }),
+    }),
+    async execute(_id, params) {
+      const job = background.stop(params.id);
+      return { content: [{ type: 'text', text: `Job ${job.id}: stop requested while it was ${job.status}; it becomes stopped when the process ends.` }] };
+    },
+  });
   // ---------------------------------------------------------------- Ultra
   // The conversation's Ultra mode (pidesk-ultra.mjs), switched by the desktop with /pidesk-config. Its
   // independent review is an agent that reads and runs checks but can't edit.
@@ -477,7 +533,7 @@ export default function pideskBridge(pi) {
     agentUi = ctx?.ui ?? agentUi;
     subagents.onSettled({ aborted: event.aborted, branch: ctx?.sessionManager?.getBranch?.() });
   });
-  pi.on('session_shutdown', () => { subagents.shutdown(); ultra.shutdown(); });
+  pi.on('session_shutdown', () => { subagents.shutdown(); ultra.shutdown(); background.shutdown(); backgroundSignal.abort(); });
   // The desktop's controls: stop an agent, send it a message from the user, resend live state.
   pi.registerCommand?.('pidesk-agents', {
     description: 'Pi Desktop: stop, message or resync agents',
