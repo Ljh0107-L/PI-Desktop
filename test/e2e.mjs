@@ -87,12 +87,22 @@ async function loadAllHistory() {
 }
 async function revealHistory(selector, text) {
   await loadAllHistory();
-  await mainTranscript().evaluate(el => { el.scrollTop = 0; });
+  // Mark this as browsing before a late layout/virtual-row measurement can follow the tail.
+  await mainTranscript().evaluate(el => {
+    el.dispatchEvent(new WheelEvent('wheel', { deltaY: -100, bubbles: true }));
+    el.scrollTop = 0;
+    el.dispatchEvent(new Event('scroll', { bubbles: true }));
+  });
   for (let i = 0; i < 80; i++) {
     await page.waitForTimeout(60);
     const match = page.locator(selector, { hasText: text }).last();
     if (await match.count()) { await match.scrollIntoViewIfNeeded(); return; }
-    const moved = await mainTranscript().evaluate(el => { const before = el.scrollTop; el.scrollTop += el.clientHeight * 0.7; return el.scrollTop !== before; });
+    const moved = await mainTranscript().evaluate(el => {
+      const before = el.scrollTop;
+      el.scrollTop += el.clientHeight * 0.7;
+      el.dispatchEvent(new Event('scroll', { bubbles: true }));
+      return el.scrollTop !== before;
+    });
     if (!moved) break;
   }
   throw new Error(`Historical content not found after paging: ${text}`);
@@ -916,6 +926,10 @@ try {
   await S('10c-subagent-cleared-files-preserved');
   await page.click('.fp-actions .tool-button[aria-label="Close files"]');
   await page.locator('.session-row', { hasText: 'hello from the desktop' }).click();
+  const restoredJsonl = readFileSync((await activeRecord()).piSessionFile, 'utf8');
+  check('original replies remain in the session file after renderer and app restarts',
+    restoredJsonl.includes('[mock-lab/alpha-1] echo: hello from the desktop') &&
+    restoredJsonl.includes('[mock-lab/beta-1] echo: after switching models'));
   await revealHistory('.session-main .markdown', '[mock-lab/alpha-1] echo: hello from the desktop');
   await revealHistory('.session-main .markdown', '[mock-lab/beta-1] echo: after switching models');
   check('history reloaded from the Pi session file', true);
