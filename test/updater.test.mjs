@@ -158,7 +158,7 @@ test('a flaky 504 on the ZIP is retried and the update completes', { skip: proce
   archive = readFileSync(zip);
   const status = await f.updater.check({ manual: true });
   assert.equal(status.state, 'ready');
-  assert.equal(f.calls.filter(c => c.url.includes('/download/')).length, 2);
+  assert.equal(f.calls.filter(c => c.url.includes('/download/v0.1.18/')).length, 2);
   assert.equal(readFileSync(join(status.path, 'Contents/version.txt'), 'utf8'), '0.1.18');
 });
 
