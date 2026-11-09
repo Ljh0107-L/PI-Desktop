@@ -2,6 +2,11 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.13 — A quieter background tasks card
+
+- **Consistent sidebar layout.** Background tasks now use the same spacing and visual hierarchy as Usage and Subagents. The running count sits below the header instead of crowding its right edge. Task names, elapsed time and Details / Stop controls have separate space; expanded commands and output share one bounded panel.
+- **Active tasks only.** Completed, failed and stopped tasks leave the card immediately, and the card disappears when nothing is running. Reloading does not bring finished rows back. Completion messages remain in the conversation; recent job records remain available through `background_status` while the host Pi stays alive. All eight concurrent tasks remain visible and individually stoppable.
+
 ## 0.2.12 — Background task cards
 
 - **Background tasks card.** The right panel shows running and recently finished commands, their elapsed time, exit code, command, working directory and output tail. All eight concurrent tasks remain accessible, with Stop buttons that terminate their process groups. Completed tasks survive renderer reloads and SSH reconnects while the host Pi stays alive; a new Pi clears obsolete job ids. Output updates are throttled, timers tick locally, and only completion or the one-time long-job reminder wakes the model. Running commands are protected from idle-session cleanup.
