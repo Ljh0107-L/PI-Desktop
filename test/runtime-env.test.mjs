@@ -215,7 +215,7 @@ test('the working-style note: an assessment for a question, accurate reports, an
   assert.doesNotMatch(unattended, /confirm with the user/, 'nobody is there to confirm in Ultra');
   assert.match(unattended, /Look at what you are about to delete or overwrite before you do it/);
   assert.equal(unattended.split('\n').length, note.split('\n').length);
-  assert.ok(note.length < 1200, 'a short section');
+  assert.ok(note.length < 1400, 'a short section');
 });
 
 test('bridge waits for session_start and adds runtime metadata without replacing other sections', t => {

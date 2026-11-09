@@ -103,8 +103,8 @@ test('shutdown kills running jobs and silences further messages', async t => {
   const job = bg.start('sleep 30', {});
   bg.shutdown();
   const t0 = Date.now();
-  while (job.status === 'running' && Date.now() - t0 < 5000) await wait(20);
-  assert.notEqual(job.status, 'running');
+  while (bg.get(job.id).status === 'running' && Date.now() - t0 < 5000) await wait(20);
+  assert.notEqual(bg.get(job.id).status, 'running');
   controller.abort();
   assert.equal(messages.length, 0);
 });
