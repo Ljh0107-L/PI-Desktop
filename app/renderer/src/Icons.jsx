@@ -10,7 +10,8 @@ import {
 const LUCIDE = {
   sun: Sun, moon: Moon, book: BookOpen, customize: BriefcaseBusiness,
   plus: Plus, search: Search, settings: Settings, terminal: SquareTerminal, laptop: Laptop, folder: Folder,
-  chevronDown: ChevronDown, chevronRight: ChevronRight, check: Check, arrowUp: ArrowUp, panel: PanelRight,
+  chevronDown: ChevronDown, chevronRight: ChevronRight, caretDown: ChevronDown, caretRight: ChevronRight,
+  check: Check, arrowUp: ArrowUp, panel: PanelRight,
   sidebar: PanelLeft, sidebarToggle: PanelLeft, sparkle: Sparkles, shield: ShieldCheck, shieldAlert: ShieldAlert,
   file: StickyNote, fileEdit: FilePen, x: X, alert: TriangleAlert, brain: Brain, refresh: RefreshCw, server: Server,
   key: KeyRound, trash: Trash2, edit: Pencil, globe: Globe, more: Ellipsis, archive: Archive, back: ChevronLeft,
@@ -19,8 +20,6 @@ const LUCIDE = {
 };
 
 const GLYPHS = {
-  caretRight: 'M9.5 7.5v9l6-4.5z',
-  caretDown: 'M7.5 9.5h9l-4.5 6z',
   stop: 'M9 7.5h6a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5H9A1.5 1.5 0 0 1 7.5 15V9A1.5 1.5 0 0 1 9 7.5z',
 };
 
@@ -32,22 +31,21 @@ export function Icon({ name, size = 16, stroke = 1.75, className, style }) {
   return <Component className={className} style={style} size={size} strokeWidth={stroke} absoluteStrokeWidth={false} aria-hidden="true" />;
 }
 
-// Pixel-art mascot: a little π creature (two legs, eyes in the bar), drawn on a 13×9 grid.
-const MASCOT = [
-  '..#########..',
-  '.###########.',
-  '.##.#####.##.',
-  '#############',
-  '...##...##...',
-  '...##...##...',
-  '...##...##...',
-  '..##.....##..',
-  '.##.......#..',
-];
-export function Mascot({ size = 6, className }) {
-  const cells = [];
-  MASCOT.forEach((row, y) => [...row].forEach((c, x) => { if (c === '#') cells.push(<rect key={`${x}-${y}`} x={x} y={y} width="1.02" height="1.02" />); }));
-  return <svg className={className} width={13 * size} height={9 * size} viewBox="0 0 13 9" fill="currentColor" shapeRendering="crispEdges" aria-hidden="true">{cells}</svg>;
+// Elegant editorial π emblem with subtle warm glow — fits Claude's refined minimalism.
+export function Mascot({ size = 7, className }) {
+  const px = size * 8;
+  return (
+    <svg className={className} width={px} height={px} viewBox="0 0 48 48" fill="none" aria-hidden="true">
+      <rect x="4" y="4" width="40" height="40" rx="13" fill="currentColor" fillOpacity="0.11" stroke="currentColor" strokeOpacity="0.24" strokeWidth="1" />
+      <path
+        d="M14.5 18.2C16.2 16.9 18.1 16.5 21 16.5H33.5M20.8 16.5C20.5 22.8 19.4 28.2 17.2 32.5M28.2 16.5V28.4C28.2 30.8 29.3 32.2 31.4 32.2C32.5 32.2 33.4 31.7 34 30.9"
+        stroke="currentColor"
+        strokeWidth="2.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
 }
 
 // Pi mark: a small "π" glyph used as the app's logo.

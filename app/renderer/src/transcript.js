@@ -410,7 +410,14 @@ export function displayBlocks(t) {
       }
       const text = recovered ? `Recovered automatically after: ${message.errorMessage}`
         : message.__retryOmitted ? `${t.retry ? 'Retrying model request' : 'Model request was retried'} after: ${message.errorMessage}` : failureText(message.errorMessage);
-      blocks.push({ kind: message.__retryOmitted ? 'notice' : 'error', key: `e${mk}`, text });
+      const kind = message.__retryOmitted ? 'notice' : 'error';
+      const prev = blocks.at(-1);
+      if (kind === 'notice' && prev?.kind === 'notice' && prev.baseText === text) {
+        prev.count = (prev.count ?? 1) + 1;
+        prev.text = `${text} (×${prev.count})`;
+      } else {
+        blocks.push({ kind, key: `e${mk}`, text, ...(kind === 'notice' ? { baseText: text } : {}) });
+      }
     }
     if (aborted) { flush(); blocks.push({ kind: 'notice', key: `a${mk}`, text: 'Interrupted' }); }
   });

@@ -265,7 +265,7 @@ const api = {
   appearance(theme) {
     if (!['light', 'dark'].includes(theme)) throw new Error('Unknown appearance');
     nativeTheme.themeSource = theme;
-    window?.setBackgroundColor(theme === 'dark' ? '#151515' : '#faf9f5');
+    window?.setBackgroundColor(theme === 'dark' ? '#181817' : '#f2f0ea');
   },
   compact: id => manager.compact(id),
   openExternal: url => /^https?:\/\//.test(url) ? shell.openExternal(url) : false,
@@ -287,9 +287,9 @@ function createWindow() {
   window = new BrowserWindow({
     width: 1440, height: 900, minWidth: 880, minHeight: 640,
     title: 'Pi Desktop',
-    backgroundColor: '#151515',
+    backgroundColor: '#181817',
     titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 10, y: 10 }, // aligned with the compact sidebar title row
+    trafficLightPosition: { x: 14, y: 15 }, // centered in the 48px sidebar top bar
     icon: join(root, 'build/icon.png'),
     webPreferences: { preload: join(root, 'app/main/preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, plugins: true },
   });

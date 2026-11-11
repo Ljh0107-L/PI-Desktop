@@ -586,10 +586,10 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
       }}>
       <div className="transcript-inner">
         {transcript.error && (isAbortText(transcript.error)
-          ? <div className="block-notice">Interrupted</div>
+          ? <div className="block-notice" title="Interrupted"><FadeText>Interrupted</FadeText></div>
           : <div className="block-error"><Icon name="alert" size={15} /> {transcript.error}</div>)}
         {transcript.history?.next && <div className="history-boundary" data-loading={!!transcript.history.loading} aria-busy={!!transcript.history.loading} />}
-        {transcript.history?.warning && <div className="block-notice">{transcript.history.warning}</div>}
+        {transcript.history?.warning && <div className="block-notice" title={transcript.history.warning}><FadeText>{transcript.history.warning}</FadeText></div>}
         <VirtualHistory items={blocks} scroller={scroller} onMeasure={retainPosition} renderItem={(block, active) => {
           const render = () => {
           switch (block.kind) {
@@ -611,7 +611,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             case 'ask': return transcript.tools[block.call.id]?.status === 'done' ? <AskBlock key={block.key} call={block.call} tool={transcript.tools[block.call.id]} /> : null;
             case 'bash': return <pre key={block.key} className="tool-output">$ {block.message.command}{'\n'}{block.message.output}</pre>;
             case 'error': return <div key={block.key} className="block-error"><Icon name="alert" size={15} /> {block.text}</div>;
-            case 'notice': return <div key={block.key} className="block-notice">{block.text}</div>;
+            case 'notice': return <div key={block.key} className="block-notice" title={block.text}><FadeText>{block.text}</FadeText></div>;
             default: return null;
           }
           };

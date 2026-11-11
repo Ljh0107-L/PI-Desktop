@@ -153,7 +153,7 @@ export function RightPanel({ session }) {
     <aside className="right-panel">
       <Card title="Context" aside={<>
         <span className="muted" title="Context usage reported by the agent">{contextLabel}</span>
-        {percent != null && <span className="meter" title={`${Math.round(percent)}% of the context window`}><span style={{ width: `${Math.max(0, Math.min(100, percent))}%` }} /></span>}
+        {percent != null && <span className={`meter ${percent > 100 ? 'over' : ''}`} title={`${Math.round(percent)}% of the context window`}><span style={{ width: `${Math.max(0, Math.min(100, percent))}%` }} /></span>}
       </>} />
       <UsageCard transcript={transcript} />
       <BackgroundJobs key={session.id} sessionId={session.id} />

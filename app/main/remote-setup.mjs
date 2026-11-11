@@ -127,11 +127,27 @@ async function installNode(env, host, root, cacheDir, onProgress) {
   onProgress('Installing Node.js…');
   const release = await nodeRelease(platform);
   const dest = `${root}/node`;
-  const extract = `rm -rf ${shellQuote(dest)}.tmp && mkdir -p ${shellQuote(dest)}.tmp && tar -xzf - -C ${shellQuote(dest)}.tmp --strip-components=1 && rm -rf ${shellQuote(dest)} && mv ${shellQuote(dest)}.tmp ${shellQuote(dest)}`;
+  // One statement per line, never an `&&` list: these scripts run under `set -e`, which ignores
+  // failures inside a list, and a half-extracted tarball must never pass for an installed Node.
+  const extract = source => [
+    `rm -rf ${shellQuote(dest)}.tmp`,
+    `mkdir -p ${shellQuote(dest)}.tmp`,
+    `tar -xzf ${source} -C ${shellQuote(dest)}.tmp --strip-components=1`,
+    `rm -rf ${shellQuote(dest)}`,
+    `mv ${shellQuote(dest)}.tmp ${shellQuote(dest)}`,
+  ].join('\n');
   if (host.curl && host.sha) {
     const sum = host.sha === 'shasum' ? 'shasum -a 256' : 'sha256sum';
     const tarball = `${root}/tmp/${release.file}`;
-    const remote = `set -e; mkdir -p ${shellQuote(root)}/tmp; curl -fsSL -m 300 ${shellQuote(release.url)} -o ${shellQuote(tarball)}; [ "$(${sum} ${shellQuote(tarball)} | cut -d' ' -f1)" = ${release.sha} ]; ${extract} < ${shellQuote(tarball)}; rm -f ${shellQuote(tarball)}`;
+    // tar reads the downloaded file itself; a trailing `< file` would only redirect the last command.
+    const remote = [
+      'set -e',
+      `mkdir -p ${shellQuote(root)}/tmp`,
+      `curl -fsSL -m 300 ${shellQuote(release.url)} -o ${shellQuote(tarball)}`,
+      `[ "$(${sum} ${shellQuote(tarball)} | cut -d' ' -f1)" = ${release.sha} ]`,
+      extract(shellQuote(tarball)),
+      `rm -f ${shellQuote(tarball)}`,
+    ].join('\n');
     try { await runSsh(env, remote, { timeout: 420000 }); return `${dest}/bin/node`; } catch { /* no internet on the host: upload instead */ }
   }
   mkdirSync(cacheDir, { recursive: true });
@@ -143,7 +159,7 @@ async function installNode(env, host, root, cacheDir, onProgress) {
     writeFileSync(local + '.part', body); renameSync(local + '.part', local);
   }
   onProgress('Uploading Node.js…');
-  await runSsh(env, `set -e; mkdir -p ${shellQuote(root)}; ${extract}`, { input: readFileSync(local), timeout: 600000 });
+  await runSsh(env, `set -e\nmkdir -p ${shellQuote(root)}\n${extract('-')}`, { input: readFileSync(local), timeout: 600000 });
   return `${dest}/bin/node`;
 }
 

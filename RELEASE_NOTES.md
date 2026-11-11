@@ -2,6 +2,13 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.15 — Typography, conversation rhythm and remote Node setup
+
+- **Typography and inline code.** Refined the sans-serif, display-heading and monospace type stack across English, CJK and code-heavy replies, with balanced letter spacing, clearer emphasis contrast and quiet borderless inline code and file references.
+- **Conversation rhythm and notices.** Replaced fixed flex gaps in virtualized history with block-aware spacing so folded work rows, replies and turn footers align cleanly without shifting scroll anchors. Consecutive identical retry notices coalesce and render as compact single-line status rows.
+- **Workspace polish.** Added a segmented Projects / Recents switch, aligned sidebar session indentation, compacted the header bar and composer padding, unified linear chevron carets and redrew the empty-state `π` emblem. Context meters highlight window overflow.
+- **Remote Node setup.** Fixed remote tarball extraction under `set -e` when installing a portable Node.js runtime on SSH hosts so failed extractions cannot leave partial directories behind.
+
 ## 0.2.14 — Workspace layout and Git review
 
 - **Workspace.** A clearer project sidebar, aligned conversation and composer, and light and dark appearances. The composer groups attachment, model, response options, and send controls at the bottom. SSH connections are managed in Settings, and Ultra, reasoning, and speed are available under Response options.
