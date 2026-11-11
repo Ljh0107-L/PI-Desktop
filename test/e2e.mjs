@@ -235,7 +235,6 @@ try {
   await send('hello from the desktop');
   await waitText('.markdown', '[mock-lab/alpha-1] echo: hello from the desktop');
   check('local session streamed a reply', true);
-  await page.getByRole('button', { name: 'Session details', exact: true }).click();
   await page.locator('.usage-table').waitFor({ timeout: 15000 });
   const rightTitles = await page.locator('.right-panel .panel-card-head').allInnerTexts();
   check('right panel retains Context/Usage without Environment or Outputs', rightTitles.some(t => t.includes('Context')) && rightTitles.some(t => t.includes('Usage')) && !rightTitles.some(t => /Environment|Outputs/.test(t)));

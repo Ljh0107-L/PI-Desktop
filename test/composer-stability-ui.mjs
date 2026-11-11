@@ -9,8 +9,12 @@ export async function checkComposerStability({ app, page, id }) {
   await input.fill(prefix);
   await input.focus();
   await page.waitForTimeout(100);
-  const dimensions = await input.evaluate(el => ({ height: el.clientHeight, content: el.scrollHeight }));
-  assert.ok(dimensions.height >= 76 && dimensions.content <= dimensions.height + 1, 'the three-line draft must remain fully visible');
+  const dimensions = await input.evaluate(el => ({
+    height: el.clientHeight,
+    content: el.scrollHeight,
+    lineHeight: Number.parseFloat(getComputedStyle(el).lineHeight),
+  }));
+  assert.ok(dimensions.height >= 3 * dimensions.lineHeight && dimensions.content <= dimensions.height + 1, 'the three-line draft must remain fully visible');
   await app.evaluate(({ BrowserWindow }, id) => {
     const send = (channel, payload) => BrowserWindow.getAllWindows()[0].webContents.send('pidesk:event', { channel, payload });
     send('status', { id, status: 'connected', streaming: true });

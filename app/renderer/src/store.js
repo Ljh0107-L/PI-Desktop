@@ -48,7 +48,7 @@ let state = {
   stats: {},                                // session id -> stats
   envStatus: {},                            // environment id -> { status, message }
   notices: [],
-  rightPanel: false,
+  rightPanel: true,
   subagentSelection: {},                    // session id -> { callId, taskIndex }; changes only on user navigation
   sidebar: true,
   settingsOpen: false, settingsTab: 'providers', addConnectionOpen: false,

@@ -156,6 +156,7 @@ try {
   await page.getByRole('heading', { name: 'Models', exact: true }).waitFor();
   await page.getByRole('button', { name: 'Back to app', exact: true }).click();
   await page.getByRole('button', { name: 'Build the alignment grid demo', exact: true }).click();
+  await page.getByRole('button', { name: 'Session details', exact: true, pressed: true }).click();
   await page.locator('.code-empty').waitFor();
   await page.locator('.workspace-chip', { hasText: 'main' }).waitFor();
   assert.equal(await page.locator('.workspace-chip').count(), 1, 'local sessions show branch without repeating folder and computer labels');
