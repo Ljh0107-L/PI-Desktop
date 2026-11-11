@@ -1,26 +1,34 @@
-// Icons: Lucide line icons (the same family Claude Desktop's icon set resembles), plus a few glyphs
-// Lucide has no equivalent for (filled carets, stop square).
+// Icons: Lucide line icons, plus custom glyphs for filled stop square and file-type badges.
 import {
-  Archive, ArrowLeft, ArrowUp, Brain, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, CornerDownLeft, Ellipsis, Sun, Moon, BookOpen, BriefcaseBusiness,
-  FilePen, FoldVertical, Folder, GitBranch, Globe, KeyRound, Laptop, ListChecks, PanelLeft, PanelRight, Pencil, Plus,
-  RefreshCw, Search, Server, Settings, ShieldAlert, ShieldCheck, Sparkles, SquareTerminal, StickyNote, Trash2,
-  TriangleAlert, Unplug, Wifi, X, MessageCircleQuestion, Gauge, Database, ArrowDown, Timer, FileText, FileCode, FileImage, ListTree, ExternalLink, Code, File, Maximize2, Minimize2, Paperclip, Target, GitFork, FileDiff, Download, MessageSquare, Terminal, Wrench, Zap, Infinity as InfinityIcon,
+  Activity, Archive, ArrowDown, ArrowLeft, ArrowUp, Atom, BookOpen, Braces, Brain, BriefcaseBusiness,
+  Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Clock, Code, Copy, CornerDownLeft, Database,
+  Download, Ellipsis, ExternalLink, File, FileCode, FileDiff, FileImage, FilePen, FileText, FoldVertical,
+  Folder, FolderOpen, GitBranch, GitFork, Globe, Gauge, KeyRound, Laptop, Layers, ListChecks, ListTree,
+  Maximize2, MessageCircleQuestion, MessageSquare, Minimize2, Moon, PanelLeft, PanelRight, Paperclip,
+  Pencil, Plus, RefreshCw, Search, Server, Settings, ShieldAlert, ShieldCheck, SlidersHorizontal, Sparkles,
+  SquareTerminal, StickyNote, Sun, Target, Terminal, Timer, Trash2, TriangleAlert, Unplug, Wifi, Wrench,
+  X, Zap, Infinity as InfinityIcon,
 } from 'lucide-react';
 
 const LUCIDE = {
   sun: Sun, moon: Moon, book: BookOpen, customize: BriefcaseBusiness,
-  plus: Plus, search: Search, settings: Settings, terminal: SquareTerminal, laptop: Laptop, folder: Folder,
-  chevronDown: ChevronDown, chevronRight: ChevronRight, caretDown: ChevronDown, caretRight: ChevronRight,
+  plus: Plus, search: Search, settings: Settings, terminal: SquareTerminal, laptop: Laptop, folder: Folder, folderOpen: FolderOpen,
+  chevronDown: ChevronDown, chevronRight: ChevronRight, chevronUp: ChevronUp, caretDown: ChevronDown, caretRight: ChevronRight,
   check: Check, arrowUp: ArrowUp, panel: PanelRight,
   sidebar: PanelLeft, sidebarToggle: PanelLeft, sparkle: Sparkles, shield: ShieldCheck, shieldAlert: ShieldAlert,
   file: StickyNote, fileEdit: FilePen, x: X, alert: TriangleAlert, brain: Brain, refresh: RefreshCw, server: Server,
   key: KeyRound, trash: Trash2, edit: Pencil, globe: Globe, more: Ellipsis, archive: Archive, back: ChevronLeft,
   forward: ChevronRight, branch: GitBranch, enter: CornerDownLeft, compact: FoldVertical, copy: Copy, list: ListChecks,
-  arrowLeft: ArrowLeft, unplug: Unplug, wifi: Wifi, question: MessageCircleQuestion, gauge: Gauge, database: Database, arrowDown: ArrowDown, timer: Timer, fileText: FileText, fileCode: FileCode, fileImage: FileImage, listTree: ListTree, externalLink: ExternalLink, code: Code, fileAny: File, maximize: Maximize2, minimize: Minimize2, paperclip: Paperclip, target: Target, fork: GitFork, fileDiff: FileDiff, terminalPanel: SquareTerminal, download: Download, chat: MessageSquare, console: Terminal, wrench: Wrench, bolt: Zap, infinity: InfinityIcon,
+  arrowLeft: ArrowLeft, unplug: Unplug, wifi: Wifi, question: MessageCircleQuestion, gauge: Gauge, database: Database,
+  arrowDown: ArrowDown, timer: Timer, fileText: FileText, fileCode: FileCode, fileImage: FileImage, listTree: ListTree,
+  externalLink: ExternalLink, code: Code, fileAny: File, maximize: Maximize2, minimize: Minimize2, paperclip: Paperclip,
+  target: Target, fork: GitFork, fileDiff: FileDiff, terminalPanel: SquareTerminal, download: Download, chat: MessageSquare,
+  console: Terminal, wrench: Wrench, bolt: Zap, infinity: InfinityIcon,
+  atom: Atom, braces: Braces, clock: Clock, activity: Activity, layers: Layers, sliders: SlidersHorizontal,
 };
 
 const GLYPHS = {
-  stop: 'M9 7.5h6a1.5 1.5 0 0 1 1.5 1.5v6a1.5 1.5 0 0 1-1.5 1.5H9A1.5 1.5 0 0 1 7.5 15V9A1.5 1.5 0 0 1 9 7.5z',
+  stop: 'M8.5 7.5h7a1 1 0 0 1 1 1v7a1 1 0 0 1-1 1h-7a1 1 0 0 1-1-1v-7a1 1 0 0 1 1-1z',
 };
 
 export function Icon({ name, size = 16, stroke = 1.75, className, style }) {
@@ -31,16 +39,22 @@ export function Icon({ name, size = 16, stroke = 1.75, className, style }) {
   return <Component className={className} style={style} size={size} strokeWidth={stroke} absoluteStrokeWidth={false} aria-hidden="true" />;
 }
 
-// Elegant editorial π emblem with subtle warm glow — fits Claude's refined minimalism.
+// Crisp architectural π emblem with subtle obsidian-glass gradient depth.
 export function Mascot({ size = 7, className }) {
-  const px = size * 8;
+  const px = size * 7;
   return (
     <svg className={className} width={px} height={px} viewBox="0 0 48 48" fill="none" aria-hidden="true">
-      <rect x="4" y="4" width="40" height="40" rx="13" fill="currentColor" fillOpacity="0.11" stroke="currentColor" strokeOpacity="0.24" strokeWidth="1" />
+      <defs>
+        <linearGradient id="pi-emblem-bg" x1="24" y1="4" x2="24" y2="44" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="currentColor" stopOpacity="0.14" />
+          <stop offset="100%" stopColor="currentColor" stopOpacity="0.03" />
+        </linearGradient>
+      </defs>
+      <rect x="4" y="4" width="40" height="40" rx="12" fill="url(#pi-emblem-bg)" stroke="currentColor" strokeOpacity="0.22" strokeWidth="1" />
       <path
-        d="M14.5 18.2C16.2 16.9 18.1 16.5 21 16.5H33.5M20.8 16.5C20.5 22.8 19.4 28.2 17.2 32.5M28.2 16.5V28.4C28.2 30.8 29.3 32.2 31.4 32.2C32.5 32.2 33.4 31.7 34 30.9"
+        d="M14.8 18.2C16.4 16.9 18.3 16.5 21.2 16.5H33.5M20.8 16.5C20.5 22.8 19.4 28.2 17.3 32.4M28.2 16.5V28.3C28.2 30.7 29.3 32.1 31.3 32.1C32.4 32.1 33.3 31.6 33.9 30.8"
         stroke="currentColor"
-        strokeWidth="2.4"
+        strokeWidth="2.35"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
@@ -52,8 +66,8 @@ export function Mascot({ size = 7, className }) {
 export function PiMark({ size = 28 }) {
   return (
     <svg width={size} height={size} viewBox="0 0 32 32" aria-hidden="true">
-      <rect x="1" y="1" width="30" height="30" rx="9" fill="#d97757" />
-      <path d="M8.5 11h15M12.5 11v11M19.5 11v8.5c0 1.6.8 2.5 2.4 2.5" stroke="#1c1c1c" strokeWidth="2.6" strokeLinecap="round" fill="none" />
+      <rect x="1" y="1" width="30" height="30" rx="8" fill="#27272a" stroke="rgba(255,255,255,0.14)" strokeWidth="1" />
+      <path d="M8.5 11h15M12.5 11v11M19.5 11v8.5c0 1.6.8 2.5 2.4 2.5" stroke="#f4f4f6" strokeWidth="2.4" strokeLinecap="round" fill="none" />
     </svg>
   );
 }

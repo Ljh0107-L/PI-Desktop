@@ -82,11 +82,12 @@ export function Trigger({ children, menu, width = 300, placement = 'top-end', cl
   </>;
 }
 
-// Reasoning effort under the composer. `levels`: [{ value, label }].
+// Reasoning effort in the composer toolbar. `levels`: [{ value, label }].
 export function EffortTrigger({ levels, value, onChange, disabled, title }) {
-  return <Trigger width={210} label="Effort" className="effort-trigger" disabled={disabled} title={title}
+  const current = levels.find(level => level.value === value)?.label ?? value ?? 'Default';
+  return <Trigger width={200} placement="top-start" label="Effort" className={`effort-trigger ${value && value !== 'off' ? 'active-effort' : ''}`} disabled={disabled} title={title}
     menu={close => <MenuSection title="Reasoning effort">{levels.map(level => <MenuItem key={String(level.value)} label={level.label} checked={value === level.value} onClick={() => { onChange(level.value); close(); }} />)}</MenuSection>}>
-    <span className="muted">{levels.find(level => level.value === value)?.label ?? value ?? 'Default'}</span>
+    <span>{current}</span><Icon name="chevronDown" size={11} />
   </Trigger>;
 }
 
@@ -127,11 +128,28 @@ renderer.code = ({ text, lang }) => {
   const body = known ? hljs.highlight(text, { language, ignoreIllegals: true }).value : escapeHtml(text);
   return `<div class="code-block"><div class="code-head"><span>${escapeHtml(language || 'text')}</span><button type="button" class="code-copy" data-copy="1">Copy</button></div><pre><code class="hljs">${body}</code></pre></div>`;
 };
-// Inline code that looks like a file path (`src/app.ts`, `README.md`) opens in the file preview, like Claude.
+// Inline code that looks like a file path (`src/app.ts`, `README.md`) opens in the file preview, with a subtle file-type glyph.
 const FILE_EXT = /\.(md|mdx|txt|rst|py|js|mjs|cjs|jsx|ts|tsx|json|ya?ml|toml|ini|cfg|sh|bash|zsh|c|h|cc|cpp|hpp|cu|cuh|rs|go|java|kt|swift|rb|php|css|scss|html|xml|sql|lua|r|pl|diff|patch|cmake|f90|f|png|jpe?g|gif|svg|webp|csv|tsv|pdf|log|lock|env)$/i;
+export function fileBadgeKind(path = '') {
+  const clean = String(path).replace(/\/$/, '');
+  if (String(path).endsWith('/')) return 'folder';
+  const ext = (clean.split('/').pop() ?? '').split('.').pop()?.toLowerCase() ?? '';
+  if (['jsx', 'tsx'].includes(ext)) return 'jsx';
+  if (['css', 'scss', 'less', 'json', 'yaml', 'yml', 'toml'].includes(ext)) return 'braces';
+  if (['md', 'mdx', 'txt', 'rst', 'pdf'].includes(ext)) return 'doc';
+  if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp'].includes(ext)) return 'image';
+  return 'code';
+}
 export const looksLikePath = text => text.length < 240 && !/\s/.test(text) && !/^[a-z]+:\/\//i.test(text) && !text.startsWith('-')
   && /^(~|\.{1,2})?\/?[\w.@+-]+(\/[\w.@+-]+)*\/?$/.test(text) && (text.includes('/') ? /[\w-]/.test(text.split('/').pop() || 'x') : FILE_EXT.test(text) || /^(Makefile|Dockerfile|LICENSE|CMakeLists\.txt)$/.test(text));
-renderer.codespan = ({ text }) => looksLikePath(text.replace(/&amp;/g, '&')) ? `<code class="file-ref" data-path="${text.replace(/"/g, '&quot;')}">${text}</code>` : `<code>${text}</code>`;
+renderer.codespan = ({ text }) => {
+  const raw = text.replace(/&amp;/g, '&');
+  if (!looksLikePath(raw)) return `<code>${text}</code>`;
+  const parts = raw.split('/').filter(Boolean);
+  const label = parts.length >= 3 && !raw.endsWith('/') ? escapeHtml(parts.at(-1)) : text;
+  const escaped = text.replace(/"/g, '&quot;');
+  return `<code class="file-ref" data-kind="${fileBadgeKind(raw)}" data-path="${escaped}" title="${escaped}">${label}</code>`;
+};
 marked.setOptions({ gfm: true, breaks: false, renderer });
 marked.use(mathExtension);
 DOMPurify.addHook('afterSanitizeAttributes', node => { if (node.tagName === 'A') { node.setAttribute('target', '_blank'); node.setAttribute('rel', 'noreferrer'); } });

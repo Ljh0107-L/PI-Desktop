@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
-import { EffortTrigger, MenuItem, MenuSection, Modal, Spinner, Trigger, baseName, envIcon, shortPath } from './ui.jsx';
+import { EffortTrigger, MenuItem, MenuSection, Modal, SpeedTrigger, Spinner, Trigger, baseName, envIcon, fileBadgeKind, shortPath } from './ui.jsx';
 import { effectiveSpeed } from '../../../agent/pidesk-speed.mjs';
 import { api, captureComposerDraft, clearQueued, defaultFolder, getState, notify, openSettings, recoverComposerDraft, restoreComposerDraft, setComposerDraft, setDraft, setEnvironments, set as setStore, takeComposerDraft, useStore } from './store.js';
 import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerDraft as takeDraft, restoreComposerDraft as restoreDraft, recoverComposerDraft as recoverDraft } from './composer-draft.js';
@@ -257,20 +257,72 @@ function SlashMenu({ items, index, onPick }) {
   const ref = useRef(null);
   useEffect(() => { ref.current?.querySelector('.slash-item.on')?.scrollIntoView({ block: 'nearest' }); }, [index]);
   return (
-    <div className="slash-menu" ref={ref} role="listbox">
-      {items.map((c, i) => (
-        <button key={c.name} type="button" role="option" aria-selected={i === index} className={`slash-item ${i === index ? 'on' : ''}`} title={c.description || undefined} onMouseDown={e => { e.preventDefault(); onPick(c); }}>
-          <span className="slash-name">/{c.name}</span>
-        </button>
-      ))}
+    <div className="slash-menu" ref={ref} role="listbox" aria-label="Slash commands">
+      <div className="slash-menu-list">
+        {items.map((c, i) => (
+          <button key={c.name} type="button" role="option" aria-selected={i === index} className={`slash-item ${i === index ? 'on' : ''}`} title={c.description || undefined} onMouseDown={e => { e.preventDefault(); onPick(c); }}>
+            <span className="slash-name">/{c.name}</span>
+            {c.description && <span className="slash-desc">{c.description}</span>}
+            {i === index && <Icon name="enter" size={13} className="slash-enter" />}
+          </button>
+        ))}
+      </div>
+      <div className="menu-kbd-foot" aria-hidden="true"><span><kbd>↑↓</kbd> navigate</span><span><kbd>↵</kbd> select</span><span><kbd>esc</kbd> dismiss</span></div>
     </div>
   );
 }
+
+const mentionIconName = item => {
+  if (item.dir) return 'folder';
+  const kind = fileBadgeKind(item.path);
+  return kind === 'jsx' ? 'atom' : kind === 'braces' ? 'braces' : kind === 'doc' ? 'fileText' : kind === 'image' ? 'fileImage' : 'fileCode';
+};
+
+// Detect `@query` immediately before the caret (at start of text or after whitespace).
+export function activeMentionAt(text, caret) {
+  if (caret == null || caret < 1) return null;
+  const before = text.slice(0, caret);
+  const m = /(?:^|\s)@([^\s@]*)$/.exec(before);
+  if (!m) return null;
+  const query = m[1];
+  const start = caret - query.length - 1; // index of '@'
+  return { start, end: caret, query };
+}
+
+function MentionMenu({ items, index, loading, onPick }) {
+  const ref = useRef(null);
+  useEffect(() => { ref.current?.querySelector('.mention-item.on')?.scrollIntoView({ block: 'nearest' }); }, [index]);
+  return (
+    <div className="slash-menu mention-menu" ref={ref} role="listbox" aria-label="File mentions">
+      <div className="slash-menu-list">
+        {loading && !items.length && <div className="mention-empty"><Spinner size={12} /> Searching workspace…</div>}
+        {items.map((item, i) => {
+          const clean = item.path.replace(/\/$/, '');
+          const slash = clean.lastIndexOf('/');
+          const dirPart = slash > 0 ? clean.slice(0, slash) : '';
+          return (
+            <button key={item.path} type="button" role="option" aria-selected={i === index} className={`slash-item mention-item ${i === index ? 'on' : ''}`}
+              title={item.path} onMouseDown={e => { e.preventDefault(); onPick(item); }}>
+              <Icon name={mentionIconName(item)} size={14} className={`mention-icon ${fileBadgeKind(item.path)}`} />
+              <span className="mention-name">{item.dir ? `${item.name}/` : item.name}</span>
+              {dirPart && <span className="mention-dir">{dirPart}</span>}
+              {i === index && <Icon name="enter" size={13} className="slash-enter" />}
+            </button>
+          );
+        })}
+      </div>
+      {items.length > 0 && <div className="menu-kbd-foot" aria-hidden="true"><span><kbd>↑↓</kbd> navigate</span><span><kbd>↵</kbd> mention</span><span><kbd>esc</kbd> dismiss</span></div>}
+    </div>
+  );
+}
+
+const mentionCache = new Map();
 
 export function Composer({ session, onSubmit, autoFocus, placeholder, initialText = '', onCancel, compact, footer }) {
   // History editors are ephemeral; the main composer survives remounts/settings/navigation.
   const draftKey = session?.id ?? 'new';
   const savedDraft = useStore(s => s.composerDrafts[draftKey]);
+  const draftTarget = useStore(s => s.draft);
   const [editor, setEditor] = useState(() => createComposerDraft(initialText));
   const editorRef = useRef(editor);
   const changeEditor = transform => {
@@ -287,6 +339,11 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   const [dragging, setDragging] = useState(false);
   const [slashIndex, setSlashIndex] = useState(0);
   const [pi, setPi] = useState([]);
+  const [caretPos, setCaretPos] = useState(null);
+  const [dismissedMention, setDismissedMention] = useState(null);
+  const [mentionFiles, setMentionFiles] = useState([]);
+  const [mentionLoading, setMentionLoading] = useState(false);
+  const [mentionIndex, setMentionIndex] = useState(0);
   const ref = useRef(null);
   const fileInput = useRef(null);
   const streaming = session?.streaming;
@@ -305,9 +362,60 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   // Slash commands: shown while the message is a single "/word" being typed.
   const slashQuery = /^\/[\w:.-]*$/.test(text) ? text.slice(1).toLowerCase() : null;
   useEffect(() => { if (slashQuery !== null && session?.id) api('commands', session.id).then(setPi).catch(() => {}); }, [slashQuery !== null, session?.id]);
-  const commands = slashQuery === null ? [] : [...BUILTIN_COMMANDS.filter(c => session || c.name === 'goal'), ...pi].filter(c => c.name.toLowerCase().includes(slashQuery)).slice(0, 12);
+  const mergedCommands = useMemo(() => {
+    const byName = new Map(BUILTIN_COMMANDS.filter(c => session || c.name === 'goal').map(c => [c.name, c]));
+    for (const c of pi) byName.set(c.name, { ...byName.get(c.name), ...c });
+    return [...byName.values()];
+  }, [Boolean(session), pi]);
+  const commands = slashQuery === null ? [] : mergedCommands.filter(c => c.name.toLowerCase().includes(slashQuery)).slice(0, 12);
   useEffect(() => setSlashIndex(0), [slashQuery]);
   const pickCommand = c => { setText(`/${c.name} `); ref.current?.focus(); };
+
+  // @file mentions: workspace search on local Mac or remote SSH host.
+  const targetCwd = session ? session.cwd : draftTarget?.cwd;
+  const targetEnv = session ? session.environmentId : draftTarget?.environmentId;
+  const rawMention = !commands.length && targetCwd ? activeMentionAt(text, caretPos ?? text.length) : null;
+  const mentionKey = rawMention ? `${rawMention.start}:${rawMention.query}` : null;
+  const mention = rawMention && dismissedMention !== mentionKey ? rawMention : null;
+  useEffect(() => {
+    if (!mention || !targetCwd) { setMentionFiles([]); setMentionLoading(false); return; }
+    const cacheKey = `${session?.id ?? `${targetEnv}:${targetCwd}`}\n${mention.query.toLowerCase()}`;
+    const cached = mentionCache.get(cacheKey);
+    if (cached) { setMentionFiles(cached); setMentionLoading(false); return; }
+    let alive = true;
+    setMentionLoading(true);
+    const timer = setTimeout(() => {
+      const target = session?.id ?? { environmentId: targetEnv, cwd: targetCwd };
+      api('searchFiles', target, mention.query).then(res => {
+        if (!alive) return;
+        const list = Array.isArray(res?.files) ? res.files : [];
+        mentionCache.set(cacheKey, list);
+        if (mentionCache.size > 120) mentionCache.delete(mentionCache.keys().next().value);
+        setMentionFiles(list);
+      }).catch(() => { if (alive) setMentionFiles([]); }).finally(() => { if (alive) setMentionLoading(false); });
+    }, mention.query ? 45 : 0);
+    return () => { alive = false; clearTimeout(timer); };
+  }, [mention?.query, Boolean(mention), session?.id, targetEnv, targetCwd]);
+  useEffect(() => setMentionIndex(0), [mention?.query]);
+
+  // Where the caret goes after a list edit or @mention insertion: set right after React writes the new text.
+  const pendingCaret = useRef(null);
+  const placeCaret = pos => { pendingCaret.current = pos; setCaretPos(pos); };
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (el && pendingCaret.current != null) { el.selectionStart = el.selectionEnd = pendingCaret.current; pendingCaret.current = null; }
+  }, [text]);
+
+  const pickMention = item => {
+    if (!mention) return;
+    const inserted = item.dir ? `@${item.path}` : `@${item.path} `;
+    const nextText = text.slice(0, mention.start) + inserted + text.slice(mention.end);
+    const nextCaret = mention.start + inserted.length;
+    setText(nextText);
+    placeCaret(nextCaret);
+    if (!item.dir) setDismissedMention(null);
+    ref.current?.focus();
+  };
 
   const add = async files => {
     // Capture once for the whole batch, before any read. Navigation preserves this
@@ -335,17 +443,15 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
     }
   };
   const canSend = !!(text.trim() || attachments.length);
-  // Where the caret goes after a list edit: set right after React writes the new text, before the next key.
-  const pendingCaret = useRef(null);
-  const placeCaret = pos => { pendingCaret.current = pos; };
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (el && pendingCaret.current != null) { el.selectionStart = el.selectionEnd = pendingCaret.current; pendingCaret.current = null; }
-  }, [text]);
-  const attachmentControl = <button type="button" className="composer-plus" aria-label="Add attachment" title="Add files or images" onClick={() => fileInput.current?.click()}><Icon name="plus" size={20} /></button>;
-  const sendControl = streaming && !canSend && !onCancel
-    ? <button className="send-button stop" onClick={() => { clearQueued(session.id); api('abort', session.id); }} aria-label="Stop" title="Stop"><Icon name="stop" size={22} /></button>
-    : <button className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={submit} aria-label="Send" title="Send (Enter)"><Icon name="arrowUp" size={17} stroke={2.4} /></button>;
+  const attachmentControl = <button type="button" className="composer-plus" aria-label="Add attachment" title="Add files or images" onClick={() => fileInput.current?.click()}><Icon name="plus" size={17} /></button>;
+  const stopButton = streaming && !onCancel
+    ? <button type="button" className="send-button stop" onClick={() => { clearQueued(session.id); api('abort', session.id); }} aria-label="Stop" title="Stop generation"><Icon name="stop" size={16} /></button>
+    : null;
+  const sendButton = (!streaming || canSend || onCancel)
+    ? <button type="button" className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={submit} aria-label="Send" title={streaming ? 'Send to interrupt (Enter)' : 'Send (Enter)'}><Icon name="arrowUp" size={15} stroke={2.4} /></button>
+    : null;
+  const sendControl = <div className="composer-actions">{sendButton}{stopButton}</div>;
+  const showMentionMenu = !!mention && (mentionLoading || mentionFiles.length > 0);
   return (
     <div className={`composer ${footer ? 'with-toolbar' : ''} ${dragging ? 'dragging' : ''} ${attachments.length ? 'has-attachments' : ''} ${compact ? 'compact' : ''}`}
       onClick={e => { if (e.target === e.currentTarget) ref.current?.focus(); }}
@@ -358,6 +464,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
         Recover saved message ({currentDraft.recoveries.length})
       </button>}
       {commands.length > 0 && <SlashMenu items={commands} index={slashIndex} onPick={pickCommand} />}
+      {showMentionMenu && <MentionMenu items={mentionFiles} index={mentionIndex} loading={mentionLoading} onPick={pickMention} />}
       {attachments.length > 0 && (
         <div className="attachments">
           {attachments.map(a => (
@@ -372,8 +479,12 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
         <input ref={fileInput} type="file" multiple hidden aria-label="Attach files" onChange={e => { add([...e.target.files]); e.target.value = ''; }} />
         {!footer && attachmentControl}
         <textarea ref={ref} rows={1} value={text} placeholder={placeholder} aria-label="Message"
+          onSelect={e => setCaretPos(e.currentTarget.selectionStart)}
           onChange={e => {
-            const indented = autoIndent(text, e.target.value, e.target.selectionStart);
+            const sel = e.target.selectionStart;
+            setCaretPos(sel);
+            setDismissedMention(null);
+            const indented = autoIndent(text, e.target.value, sel);
             if (indented) { setText(indented.text); placeCaret(indented.caret); } else setText(e.target.value);
           }}
           onPaste={e => { const files = [...e.clipboardData.files]; if (files.length) { e.preventDefault(); add(files); } }}
@@ -385,6 +496,15 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
                 const c = commands[slashIndex];
                 if (c && (e.key === 'Tab' || c.args || text.slice(1) !== c.name)) { e.preventDefault(); pickCommand(c); return; }
               }
+            }
+            if (showMentionMenu && mentionFiles.length) {
+              if (e.key === 'ArrowDown') { e.preventDefault(); setMentionIndex(i => (i + 1) % mentionFiles.length); return; }
+              if (e.key === 'ArrowUp') { e.preventDefault(); setMentionIndex(i => (i - 1 + mentionFiles.length) % mentionFiles.length); return; }
+              if ((e.key === 'Tab' || e.key === 'Enter') && !e.nativeEvent.isComposing) {
+                const chosen = mentionFiles[mentionIndex];
+                if (chosen) { e.preventDefault(); pickMention(chosen); return; }
+              }
+              if (e.key === 'Escape') { e.preventDefault(); setDismissedMention(mentionKey); return; }
             }
             if (e.key === 'Escape' && onCancel) { e.preventDefault(); onCancel(); return; }
             const collapsed = e.target.selectionStart === e.target.selectionEnd && !e.nativeEvent.isComposing;
@@ -408,16 +528,16 @@ const shortError = (message = '', label) => /disk .* is full/i.test(message) ? `
 // Faster processing where the model's provider sells it (agent/pidesk-speed.mjs), priced per reply.
 const SPEED_LABELS = { standard: 'Standard', fast: 'Fast', ultrafast: 'Ultrafast' };
 
-// The row under the composer: environment + folder on the left (new sessions), model / speed / effort on the right.
-export function ComposerBar({ session, contextOnly = false }) {
+// Antigravity-style composer toolbar: model + effort + workspace context on the left; mode toggles on the right.
+export function ComposerBar({ session }) {
   const [branch, setBranch] = useState('');
   useEffect(() => {
-    if (!contextOnly || !session?.id) return;
+    if (!session?.id) { setBranch(''); return; }
     let alive = true;
     const refresh = () => api('gitBranch', session.id).then(value => { if (alive) setBranch(value || ''); }).catch(() => {});
     refresh(); window.addEventListener('focus', refresh);
     return () => { alive = false; window.removeEventListener('focus', refresh); };
-  }, [contextOnly, session?.id, session?.cwd]);
+  }, [session?.id, session?.cwd]);
   const draft = useStore(s => s.draft);
   const catalog = useStore(s => s.catalog);
   const environments = useStore(s => s.environments);
@@ -428,7 +548,7 @@ export function ComposerBar({ session, contextOnly = false }) {
   const environmentId = isNew ? draft.environmentId : session.environmentId;
   const env = environments.find(e => e.id === environmentId) ?? { id: environmentId, label: session?.environmentLabel ?? 'This computer', kind: environmentId?.startsWith('ssh:') ? 'ssh' : 'local' };
   const model = isNew ? draft.model : session.model;
-  const effort = isNew ? draft.thinkingLevel : session.thinkingLevel;
+  const effort = (isNew ? draft.thinkingLevel : session.thinkingLevel) ?? 'medium';
   const speed = (isNew ? draft.speed : session.speed) ?? 'standard';
   const cwd = isNew ? draft.cwd : session.cwd;
   const modelInfo = catalog.find(m => m.provider === model?.provider && m.id === model?.id);
@@ -446,44 +566,37 @@ export function ComposerBar({ session, contextOnly = false }) {
   const toggleUltra = () => isNew ? setDraft({ ultra: !ultraOn }) : api('setUltra', session.id, !ultraOn).catch(e => notify(e.message, 'error'));
   const speeds = modelInfo?.speeds ?? [];
 
-  if (contextOnly) return <div className="workspace-context">
-        {isNew && <>
+  return (
+    <div className="composer-bar">
+      <div className="composer-bar-left">
+        {catalog.length || model
+          ? <Trigger width={320} placement="top-start" label="Model" title={modelTitle} className="model-trigger" menu={close => <ModelMenu value={model} environmentId={environmentId} onChange={changeModel} close={close} />}>
+              <span className="strong">{modelLabel(model, catalog)}</span>{modelInfo?.reasoning === false && <Icon name="chevronDown" size={11} />}
+            </Trigger>
+          : <button type="button" className="trigger attention" onClick={() => openSettings(true, 'providers')}><Icon name="key" size={14} /><span>Add a model</span></button>}
+        {modelInfo?.reasoning !== false && <EffortTrigger levels={effortsFor(modelInfo).map(level => ({ value: level, label: effortLabel(level) }))} value={effort} onChange={changeEffort} title={`Reasoning effort: ${effortLabel(effort)}`} />}
+        {isNew ? <>
+          <span className="bar-divider" aria-hidden="true" />
           <Trigger className="env-trigger" title={env.label} width={330} placement="top-start" label="Environment" menu={close => <EnvironmentMenu value={environmentId} onChange={changeEnv} close={close} />}>
-            <Icon name={envIcon(env)} size={16} /><span>{env.kind === 'local' ? 'Local' : env.label}</span>
+            <Icon name={envIcon(env)} size={13} /><span>{env.kind === 'local' ? 'Local' : env.label}</span>
           </Trigger>
           <Trigger className="folder-trigger" width={300} placement="top-start" label="Folder" title={cwd ? shortPath(cwd, home) : 'No folder'}
             menu={close => <FolderMenu environmentId={environmentId} value={cwd} onChange={path => setDraft({ cwd: path })} close={close} onBrowse={() => setBrowsing(true)} />}>
-            <Icon name={cwd ? 'folder' : 'chat'} size={16} /><span>{cwd ? baseName(cwd) : 'No folder'}</span>
+            <Icon name={cwd ? 'folder' : 'chat'} size={13} /><span>{cwd ? baseName(cwd) : 'No folder'}</span>
           </Trigger>
           {prep?.status === 'preparing' && <span className="bar-status"><Spinner size={12} /> {prep.message}</span>}
           {prep?.status === 'error' && <button type="button" className="bar-status error" title={prep.message} onClick={() => api('prepareEnvironment', environmentId, true)}>
             <Icon name="alert" size={14} /> <span>{shortError(prep.message, env.label)}</span> <span className="bar-retry">Retry</span></button>}
+        </> : <>
+          {branch && <button type="button" className="trigger workspace-chip" onClick={() => setStore({ gitReviewOpen: true, filePaneOpen: false })} title="Review repository changes"><Icon name="branch" size={12.5} /><span>{branch}</span></button>}
         </>}
-    {!isNew && <>
-      {env.kind !== 'local' && <span className="workspace-chip" title={env.label}><Icon name={envIcon(env)} size={13} />{env.label}</span>}
-      {branch && <button className="workspace-chip" onClick={() => setStore({ gitReviewOpen: true, filePaneOpen: false })} title="Review repository changes"><Icon name="branch" size={13} />{branch}</button>}
-    </>}
-    {browsing && <RemoteBrowser environmentId={environmentId} start={cwd ?? undefined} onPick={path => setDraft({ cwd: path })} onClose={() => setBrowsing(false)} />}
-  </div>;
-
-  return (
-    <div className="composer-bar">
+      </div>
       <div className="composer-bar-right">
-        {catalog.length || model
-          ? <Trigger width={320} label="Model" title={modelTitle} className="model-trigger" menu={close => <ModelMenu value={model} environmentId={environmentId} onChange={changeModel} close={close} />}>
-              <span className="strong">{modelLabel(model, catalog)}</span>
-            </Trigger>
-          : <button type="button" className="trigger attention" onClick={() => openSettings(true, 'providers')}><Icon name="key" size={15} /><span>Add a model</span></button>}
-        <Trigger label="Response options" title="Response options" width={280} className="response-options-trigger" menu={() => <div className="response-options">
-          {modelInfo?.reasoning !== false && <div className="response-option"><span>Reasoning</span><EffortTrigger levels={effortsFor(modelInfo).map(level => ({ value: level, label: effortLabel(level) }))} value={effort} onChange={changeEffort} /></div>}
-          {speeds.length > 1 && <div className="response-option"><span>Speed</span><Trigger label="Speed" width={200} menu={close => <MenuSection title="Speed">{speeds.map(value => <MenuItem key={value} label={SPEED_LABELS[value]} checked={effectiveSpeed(speed, speeds) === value} onClick={() => { changeSpeed(value); close(); }} />)}</MenuSection>}><span>{SPEED_LABELS[effectiveSpeed(speed, speeds)]}</span><Icon name="chevronDown" size={13} /></Trigger></div>}
-          <button type="button" className={`response-option ultra-trigger ${ultraOn ? 'on' : ''}`} aria-label="Ultra mode" aria-pressed={ultraOn} onClick={toggleUltra} title="Keep working until the task is done"><span><Icon name="infinity" size={15} /> Ultra mode</span><span className={`switch ${ultraOn ? 'on' : ''}`} aria-hidden="true"><span /></span></button>
-        </div>}>
-          {ultraOn && <span className="option-active">Ultra</span>}
-          {modelInfo?.reasoning !== false && effort && effort !== 'medium' && <span>{effortLabel(effort)}</span>}
-          {speeds.length > 1 && effectiveSpeed(speed, speeds) !== 'standard' && <span>{SPEED_LABELS[effectiveSpeed(speed, speeds)]}</span>}
-          <Icon name="settings" size={14} />
-        </Trigger>
+        <button type="button" className={`trigger ultra-trigger ${ultraOn ? 'on' : ''}`} aria-label="Ultra mode" aria-pressed={ultraOn} onClick={toggleUltra}
+          title={ultraOn ? 'Ultra is on: Pi works on each request on its own until it is done' : 'Ultra mode: keep working autonomously until the task is done'}>
+          <Icon name={ultraOn ? 'shield' : 'infinity'} size={13.5} /><span>Ultra</span>
+        </button>
+        {speeds.length > 1 && <SpeedTrigger speeds={speeds.map(value => ({ value, label: SPEED_LABELS[value] }))} value={effectiveSpeed(speed, speeds)} onChange={changeSpeed} />}
       </div>
       {browsing && <RemoteBrowser environmentId={environmentId} start={cwd ?? undefined} onPick={path => setDraft({ cwd: path })} onClose={() => setBrowsing(false)} />}
     </div>

@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, extname } from 'node:path';
 import { chromium } from 'playwright-core';
 import { gitReview } from '../app/main/git-review.mjs';
+import { filePreview } from '../app/main/file-preview.mjs';
 
 const profile = await mkdtemp(join(tmpdir(), 'pi-review-ui-'));
 const cwd = join(profile, 'repo'); await mkdir(cwd);
@@ -65,7 +66,9 @@ try {
     if (method === 'historyPage') return { next: null, messages: [{ role: 'user', content: [{ type: 'text', text: 'Review the repository changes and explain what needs attention.' }] }, { role: 'assistant', content: [{ type: 'text', text: 'The changes are ready for review. The implementation is small, and there is one behavior worth checking before committing.\n\n### What changed\n\nThe default answer in `example.js` now returns **42**. The new `notes.txt` documents the expected behavior.\n\n- Confirm that existing callers expect the updated value.\n- Add a regression case for the previous boundary condition.\n- Keep the documentation with the implementation in the same commit.\n\nOpen **Review** to inspect the actual diff. You can select a line to add feedback to your next message.' }], stopReason: 'stop' }] };
     if (method === 'gitReview') return gitReview(cwd, args[1]);
     if (method === 'gitBranch') return 'main';
-    if (method === 'agents' || method === 'commands') return [];
+    if (method === 'searchFiles') return filePreview('search', cwd, args[1]);
+    if (method === 'commands') return [{ name: 'goal', description: 'Work autonomously toward a clear objective' }, { name: 'compact', description: 'Compact conversation context' }];
+    if (method === 'agents') return [];
     if (method === 'updateStatus') return { state: 'idle' };
     if (method === 'prompt') {
       const verb = args[1]?.match(/^\/pidesk-ultra (resume|pause|dismiss)$/)?.[1];
@@ -100,26 +103,23 @@ try {
   assert.ok(composerBounds.width < 620, 'narrow composer keeps side gutters');
   await page.screenshot({ path: join(screenshots, 'workspace-welcome.png') });
   await writeFile(join(screenshots, 'welcome-metrics.json'), JSON.stringify(await page.evaluate(() => {
-    const selectors = ['.sidebar', '.sidebar-nav', '.nav-item.new', '.code-empty svg', '.main-head', '.workspace-context', '.composer-row', '.composer textarea', '.composer-toolbar'];
+    const selectors = ['.sidebar', '.sidebar-nav', '.nav-item.new', '.code-empty svg', '.main-head', '.composer-shell', '.composer-row', '.composer textarea', '.composer-toolbar'];
     return Object.fromEntries(selectors.map(selector => {
       const element = document.querySelector(selector), rect = element.getBoundingClientRect(), css = getComputedStyle(element);
       return [selector, { x: rect.x, y: rect.y, width: rect.width, height: rect.height, font: css.font, letterSpacing: css.letterSpacing, color: css.color, background: css.background, border: css.border, borderRadius: css.borderRadius, boxShadow: css.boxShadow }];
     }));
   }), null, 2));
-  assert.equal(await page.getByRole('button', { name: 'Ultra mode', exact: true }).count(), 0, 'inactive options stay out of the composer');
   assert.doesNotMatch(await page.locator('.composer-toolbar').innerText(), /Default|Standard/);
-  await page.getByRole('button', { name: 'Response options', exact: true }).click();
   await page.getByRole('button', { name: 'Effort', exact: true }).click();
   await page.getByRole('button', { name: 'High', exact: true }).click();
   assert.equal(await page.evaluate(() => window.__pideskState().draft.thinkingLevel), 'high');
-  assert.match(await page.locator('.response-options-trigger').innerText(), /High/);
+  assert.match(await page.locator('.effort-trigger').innerText(), /High/);
   await page.getByRole('button', { name: 'Speed', exact: true }).click();
   await page.getByRole('button', { name: 'Fast', exact: true }).click();
   assert.equal(await page.evaluate(() => window.__pideskState().draft.speed), 'fast');
-  assert.match(await page.locator('.response-options-trigger').innerText(), /Fast/);
+  assert.match(await page.locator('.speed-trigger').innerText(), /Fast/);
   await page.getByRole('button', { name: 'Ultra mode', exact: true }).click();
   assert.equal(await page.getByRole('button', { name: 'Ultra mode', exact: true }).getAttribute('aria-pressed'), 'true');
-  assert.match(await page.locator('.response-options-trigger').innerText(), /Ultra/);
   await page.screenshot({ path: join(screenshots, 'response-options.png') });
   await page.getByRole('button', { name: 'Ultra mode', exact: true }).click();
   assert.equal(await page.getByRole('button', { name: 'Ultra mode', exact: true }).getAttribute('aria-pressed'), 'false');
@@ -127,9 +127,7 @@ try {
   await page.getByRole('button', { name: 'Medium', exact: true }).click();
   await page.getByRole('button', { name: 'Speed', exact: true }).click();
   await page.getByRole('button', { name: 'Standard', exact: true }).click();
-  await page.keyboard.press('Escape');
-  assert.equal(await page.locator('.response-options').count(), 0);
-  assert.equal(await page.locator('.response-options-trigger').innerText(), '', 'default options have no redundant label');
+  assert.doesNotMatch(await page.locator('.composer-toolbar').innerText(), /Standard/);
   await page.getByRole('button', { name: 'Show recent conversations', exact: true }).click();
   assert.equal(await page.locator('.group-head').count(), 0);
   await page.reload();
@@ -156,7 +154,7 @@ try {
   await page.getByRole('heading', { name: 'Models', exact: true }).waitFor();
   await page.getByRole('button', { name: 'Back to app', exact: true }).click();
   await page.getByRole('button', { name: 'Build the alignment grid demo', exact: true }).click();
-  await page.getByRole('button', { name: 'Session details', exact: true, pressed: true }).click();
+  assert.equal(await page.locator('.right-panel').count(), 0, 'right panel stays closed by default for a calm two-column workspace');
   await page.locator('.code-empty').waitFor();
   await page.locator('.workspace-chip', { hasText: 'main' }).waitFor();
   assert.equal(await page.locator('.workspace-chip').count(), 1, 'local sessions show branch without repeating folder and computer labels');
@@ -180,11 +178,25 @@ try {
   await page.getByText('What changed', { exact: true }).waitFor();
   const aligned = await page.evaluate(() => {
     const box = selector => { const { x, width } = document.querySelector(selector).getBoundingClientRect(); return { x, width }; };
-    return { composer: box('.composer'), transcript: box('.transcript-inner'), context: box('.workspace-context') };
+    return { composer: box('.composer'), transcript: box('.transcript-inner'), shell: box('.composer-shell') };
   });
-  assert.ok(aligned.composer.width <= 760, 'wide windows keep a bounded composer');
+  assert.ok(aligned.composer.width <= 764, 'wide windows keep a bounded composer');
   assert.ok(Math.abs(aligned.composer.x - aligned.transcript.x) < 1 && Math.abs(aligned.composer.width - aligned.transcript.width) < 1, `composer and conversation share one reading column: ${JSON.stringify(aligned)}`);
-  assert.ok(Math.abs(aligned.context.x - aligned.composer.x) < 1, 'context chips align with the input');
+  assert.ok(Math.abs(aligned.shell.x - aligned.composer.x) < 1, 'composer shell aligns with the input');
+  // Verify `/` slash menu descriptions, `@` file mentions, and persistent Stop button while typing.
+  const msgInput = page.getByRole('textbox', { name: 'Message', exact: true });
+  await msgInput.fill('/');
+  await page.locator('.slash-menu .slash-desc', { hasText: 'Work autonomously' }).waitFor();
+  await msgInput.fill('Check @exa');
+  await page.locator('.mention-menu .mention-item', { hasText: 'example.js' }).waitFor();
+  await msgInput.press('Enter');
+  assert.equal(await msgInput.inputValue(), 'Check @example.js ');
+  await page.evaluate(() => window.fixtureEvent({ channel: 'status', payload: { id: 'review-ui', status: 'connected', streaming: true } }));
+  await page.locator('.send-button.stop').waitFor();
+  assert.equal(await page.locator('.send-button.ready').count(), 1, 'Send stays available to interrupt while Stop remains visible');
+  assert.equal(await page.locator('.send-button.stop').count(), 1, 'Stop remains visible while typing during streaming');
+  await page.evaluate(() => window.fixtureEvent({ channel: 'status', payload: { id: 'review-ui', status: 'connected', streaming: false } }));
+  await msgInput.fill('');
   await page.screenshot({ path: join(screenshots, 'workspace-conversation.png') });
   await page.getByRole('button', { name: 'Review Git changes' }).click();
   const pane = page.getByRole('complementary', { name: 'Git review' });
@@ -264,13 +276,11 @@ try {
   await page.locator('.ultra-banner').waitFor({ state: 'detached' });
   assert.ok(ipcCalls.some(c => c.method === 'abort' && c.args[0] === session.id));
   for (const verb of ['resume', 'pause', 'dismiss']) assert.ok(ipcCalls.some(c => c.method === 'prompt' && c.args[0] === session.id && c.args[1] === `/pidesk-ultra ${verb}`));
-  await page.getByRole('button', { name: 'Response options', exact: true }).click();
   await page.getByRole('button', { name: 'Ultra mode', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('.ultra-trigger')?.getAttribute('aria-pressed') === 'true');
   await page.getByRole('button', { name: 'Ultra mode', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('.ultra-trigger')?.getAttribute('aria-pressed') === 'false');
   assert.deepEqual(ipcCalls.filter(c => c.method === 'setUltra').map(c => c.args), [[session.id, true], [session.id, false]]);
-  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Model', exact: true }).click();
   await page.getByRole('button', { name: 'Alternate fixture', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('.model-trigger')?.textContent === 'Alternate fixture');

@@ -48,7 +48,7 @@ let state = {
   stats: {},                                // session id -> stats
   envStatus: {},                            // environment id -> { status, message }
   notices: [],
-  rightPanel: true,
+  rightPanel: (() => { try { return localStorage.getItem('pidesk.rightPanel') === 'true'; } catch { return false; } })(),
   subagentSelection: {},                    // session id -> { callId, taskIndex }; changes only on user navigation
   sidebar: true,
   settingsOpen: false, settingsTab: 'providers', addConnectionOpen: false,
@@ -396,7 +396,11 @@ export function clearSubagentRecords(id, onlyIds) {
     },
   });
 }
-export const toggleRightPanel = () => set(s => ({ rightPanel: !s.rightPanel }));
+export const toggleRightPanel = () => set(s => {
+  const rightPanel = !s.rightPanel;
+  try { localStorage.setItem('pidesk.rightPanel', String(rightPanel)); } catch {}
+  return { rightPanel };
+});
 export const openSettings = (open, tab, { addConnection = false } = {}) => set(s => ({ settingsOpen: open, settingsTab: tab ?? s.settingsTab, addConnectionOpen: addConnection, paletteOpen: false }));
 export const setAddConnectionOpen = open => set({ addConnectionOpen: open });
 export const openPalette = (open, tab = 'All') => set({ paletteOpen: open, paletteTab: tab });

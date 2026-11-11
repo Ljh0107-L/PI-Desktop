@@ -43,15 +43,20 @@ const migrateConnections = () => { for (const v of Object.values(store?.settings
 const environments = () => (migrateConnections(), listEnvironments({ sshConfig: process.env.PIDESK_SSH_CONFIG, customHosts: store?.settings.customHosts ?? [], state: store?.settings.environments ?? {} }));
 
 // Resolve and inspect paths on the session's own machine, including remote ~/ paths.
-async function sessionFilePreview(id, operation, rel = '') {
-  const record = manager.record(id);
-  const env = manager.env(record.environmentId);
-  if (env.kind === 'local') return filePreview(operation, record.cwd, rel);
+async function targetFilePreview(environmentId, cwd, operation, rel = '') {
+  if (!cwd) return operation === 'search' ? { path: '', files: [] } : { path: '', entries: [] };
+  const env = manager.env(environmentId);
+  if (env.kind === 'local') return filePreview(operation, cwd, rel);
   // Sessions already prepare Node on the host; reuse that runtime instead of parsing
   // ls output or relying on platform-specific shell utilities for binary-safe reads.
-  const { node } = await manager.prepare(record.environmentId);
-  const output = await runSsh(env, remoteFilePreviewScript(node, operation, record.cwd, rel), { timeout: operation === 'read' ? 60000 : 30000 });
+  const { node } = await manager.prepare(environmentId);
+  const output = await runSsh(env, remoteFilePreviewScript(node, operation, cwd, rel), { timeout: operation === 'read' ? 60000 : 30000 });
   return decodeRemoteFilePreview(output);
+}
+
+async function sessionFilePreview(id, operation, rel = '') {
+  const record = manager.record(id);
+  return targetFilePreview(record.environmentId, record.cwd, operation, rel);
 }
 
 // Save a file from the session's machine to this Mac, through a save dialog that starts in Downloads.
@@ -265,13 +270,16 @@ const api = {
   appearance(theme) {
     if (!['light', 'dark'].includes(theme)) throw new Error('Unknown appearance');
     nativeTheme.themeSource = theme;
-    window?.setBackgroundColor(theme === 'dark' ? '#181817' : '#f2f0ea');
+    window?.setBackgroundColor(theme === 'dark' ? '#121116' : '#f4f4f7');
   },
   compact: id => manager.compact(id),
   openExternal: url => /^https?:\/\//.test(url) ? shell.openExternal(url) : false,
   openPath: path => shell.openPath(path),
   // File preview (Claude-style): browse and read files in a session's folder, local or over SSH.
   listFiles: (id, rel = '') => sessionFilePreview(id, 'list', rel),
+  searchFiles: (target, query = '') => typeof target === 'string'
+    ? sessionFilePreview(target, 'search', query)
+    : targetFilePreview(target?.environmentId ?? 'local', target?.cwd ?? '', 'search', query),
   readFile: (id, rel) => sessionFilePreview(id, 'read', rel),
   downloadFile: (id, rel) => downloadSessionFile(id, rel),
   showInFolder: path => shell.showItemInFolder(path),
@@ -287,9 +295,9 @@ function createWindow() {
   window = new BrowserWindow({
     width: 1440, height: 900, minWidth: 880, minHeight: 640,
     title: 'Pi Desktop',
-    backgroundColor: '#181817',
+    backgroundColor: '#121116',
     titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 14, y: 15 }, // centered in the 48px sidebar top bar
+    trafficLightPosition: { x: 15, y: 16 }, // centered in the 48px header/sidebar top bar
     icon: join(root, 'build/icon.png'),
     webPreferences: { preload: join(root, 'app/main/preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, plugins: true },
   });

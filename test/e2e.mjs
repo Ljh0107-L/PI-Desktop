@@ -235,6 +235,7 @@ try {
   await send('hello from the desktop');
   await waitText('.markdown', '[mock-lab/alpha-1] echo: hello from the desktop');
   check('local session streamed a reply', true);
+  await page.getByRole('button', { name: 'Session details', exact: true }).click();
   await page.locator('.usage-table').waitFor({ timeout: 15000 });
   const rightTitles = await page.locator('.right-panel .panel-card-head').allInnerTexts();
   check('right panel retains Context/Usage without Environment or Outputs', rightTitles.some(t => t.includes('Context')) && rightTitles.some(t => t.includes('Usage')) && !rightTitles.some(t => /Environment|Outputs/.test(t)));
@@ -477,10 +478,8 @@ try {
 
   // ---- Ultra: Pi works on its own after the message; replies with no progress end as stalled
   try {
-    await page.getByRole('button', { name: 'Response options', exact: true }).click();
     await page.click('.ultra-trigger');
     await page.locator('.ultra-trigger.on').waitFor({ timeout: 10000 });
-    await page.keyboard.press('Escape');
     const before = await page.locator('.markdown', { hasText: 'Ultra mode: continue the task' }).count();
     await send('ultra demo task [[ultra-progress]]');
     await page.locator('.ultra-progress').filter({ hasText: '检查完成：fixture-check-ok' }).waitFor({ timeout: 20000 });
@@ -494,10 +493,8 @@ try {
     const label = await page.locator('.ultra-banner .goal-state').innerText();
     check('Ultra continues on its own and stops as stalled after turns without progress', continued >= 4 && /Stalled/.test(label), `${continued} continuations · ${label}`);
     await S('05f-ultra');
-    await page.getByRole('button', { name: 'Response options', exact: true }).click();
     await page.click('.ultra-trigger');
     await page.locator('.ultra-trigger.on').waitFor({ state: 'detached', timeout: 10000 });
-    await page.keyboard.press('Escape');
     await page.click('.ultra-banner .goal-close');
     await page.locator('.ultra-banner').waitFor({ state: 'detached', timeout: 15000 });
     const progressSession = await page.evaluate(async () => (await window.pidesk.invoke('listSessions')).find(s => s.id === window.__pideskState().activeId));

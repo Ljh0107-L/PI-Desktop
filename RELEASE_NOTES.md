@@ -2,6 +2,13 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.16 — Antigravity workspace craft, @file mentions and live controls
+
+- **Native macOS typography and Strong Contrast surfaces.** Restored macOS CoreText stem darkening (`-webkit-font-smoothing: auto`) with zero CJK letter-spacing squeeze across `SF Pro Text`, `PingFang SC` and `SF Mono`, paired with borderless inline code and file pills (`JSX/TSX`, `CSS/JSON`, code and folder icons). Unified the sidebar and top header into a seamless L-frame (`#121116` dark / `#f4f4f7` light) cradling a rounded inset conversation canvas (`#050507` dark / `#ffffff` light) and a recessed double-bezel composer tray.
+- **Workspace `@file` autocomplete and compact slash menu.** Typing `@` searches local and remote SSH project trees in real time with keyboard navigation and click-to-preview `@file` pills in user messages. Typing `/` opens a floating command popover with merged skill/template descriptions and keyboard hints.
+- **Simultaneous Send and Stop while streaming.** Typing a follow-up while Pi is generating keeps both the primary Send button (interrupt and steer) and the red Stop button visible side by side without shifting toolbar height.
+- **One-click file opening, structured Ultra milestones and in-session Find (`⌘F`).** Tool rows open referenced files and `+N -M` diffs directly in one click. Ultra progress updates render as structured `Progress` / `Next` / `Scope` milestone cards. Session details start collapsed by default with live background-job and context-ring telemetry in the header, and `⌘F` searches within the active conversation.
+
 ## 0.2.15 — Typography, conversation rhythm and remote Node setup
 
 - **Typography and inline code.** Refined the sans-serif, display-heading and monospace type stack across English, CJK and code-heavy replies, with balanced letter spacing, clearer emphasis contrast and quiet borderless inline code and file references.

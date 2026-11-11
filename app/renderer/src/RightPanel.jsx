@@ -24,7 +24,7 @@ function Card({ title, children, open: initial = true, aside }) {
 // Speed and token usage per turn, where a turn is one model call (one assistant message): the last turn's
 // speed with a trend of recent turns, and input / cached / output tokens for the last turn and the session.
 // Figures update as each turn finishes.
-function UsageCard({ transcript }) {
+export function UsageMetrics({ transcript }) {
   const messages = (transcript?.messages ?? []).filter(m => m.role === 'assistant' && m.usage && !['error', 'aborted', 'pending', 'deferred'].includes(m.stopReason));
   if (!messages.length) return null;
   const lastMessage = messages.at(-1);
@@ -46,23 +46,27 @@ function UsageCard({ transcript }) {
     ...(total.reasoningReported ? [['Reasoning', last.reasoningReported ? last.reasoning : null, total.reasoning]] : []),
   ];
   return (
-    <Card title="Usage">
-      <div className="usage">
-        <div className="usage-speed">
-          <div className="usage-speed-metric" title={speed.title}>
-            <div className="usage-speed-value"><b>{speed.value}</b><span>tok/s</span></div>
-            <span className="usage-speed-kind">{speed.label}{tier && <span className={`usage-speed-tier ${tier.slower ? 'slower' : ''}`} title={tier.title}>{tier.label}</span>}</span>
-          </div>
-          <div className="spark" aria-hidden="true">{recent.map((v, i) => <span key={i} style={{ height: `${Math.max(8, v / peak * 100)}%` }} />)}</div>
+    <div className="usage">
+      <div className="usage-speed">
+        <div className="usage-speed-metric" title={speed.title}>
+          <div className="usage-speed-value"><b>{speed.value}</b><span>tok/s</span></div>
+          <span className="usage-speed-kind">{speed.label}{tier && <span className={`usage-speed-tier ${tier.slower ? 'slower' : ''}`} title={tier.title}>{tier.label}</span>}</span>
         </div>
-        <div className="usage-table" title="Provider-reported counts; ~ marks bridge estimates. Missing cache measurements show —, not a fabricated cache hit. Reasoning is already included in output.">
-          <span /><span className="th">Last turn</span><span className="th">Session</span>
-          {rows.flatMap(([label, a, b]) => [<span key={label} className="td-label">{label}</span>, <span key={label + 'a'}>{label === 'Cached' && last.cacheUnknown ? '—' : `${last.usageEstimated && a != null ? '~' : ''}${formatTokens(a)}`}</span>, <span key={label + 'b'}>{label === 'Cached' && total.cacheUnknown ? '—' : `${total.usageEstimated && b != null ? '~' : ''}${formatTokens(b)}`}</span>])}
-          <span className="td-label">Cache hit</span><span>{last.cacheHit == null ? '—' : `${Math.round(last.cacheHit * 100)}%`}</span><span>{total.cacheHit == null ? '—' : `${Math.round(total.cacheHit * 100)}%`}</span>
-        </div>
+        <div className="spark" aria-hidden="true">{recent.map((v, i) => <span key={i} style={{ height: `${Math.max(8, v / peak * 100)}%` }} />)}</div>
       </div>
-    </Card>
+      <div className="usage-table" title="Provider-reported counts; ~ marks bridge estimates. Missing cache measurements show —, not a fabricated cache hit. Reasoning is already included in output.">
+        <span /><span className="th">Last turn</span><span className="th">Session</span>
+        {rows.flatMap(([label, a, b]) => [<span key={label} className="td-label">{label}</span>, <span key={label + 'a'}>{label === 'Cached' && last.cacheUnknown ? '—' : `${last.usageEstimated && a != null ? '~' : ''}${formatTokens(a)}`}</span>, <span key={label + 'b'}>{label === 'Cached' && total.cacheUnknown ? '—' : `${total.usageEstimated && b != null ? '~' : ''}${formatTokens(b)}`}</span>])}
+        <span className="td-label">Cache hit</span><span>{last.cacheHit == null ? '—' : `${Math.round(last.cacheHit * 100)}%`}</span><span>{total.cacheHit == null ? '—' : `${Math.round(total.cacheHit * 100)}%`}</span>
+      </div>
+    </div>
   );
+}
+
+function UsageCard({ transcript }) {
+  const body = UsageMetrics({ transcript });
+  if (!body) return null;
+  return <Card title="Usage">{body}</Card>;
 }
 
 // Only active jobs stay in the card. Completion messages and host-side records are unchanged.

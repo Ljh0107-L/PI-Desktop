@@ -28,6 +28,49 @@ export async function filePreview(operation, cwd, rel = '', { fs, home } = {}) {
     entries.sort((a, b) => (b.dir - a.dir) || a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: 'base' }));
     return { path, entries };
   }
+  if (operation === 'search') {
+    const root = resolve(expand(cwd));
+    const query = String(rel ?? '').trim().toLowerCase().replace(/^\.\//, '');
+    const skip = new Set(['.git', 'node_modules', 'dist', 'build', 'release', 'out', '.next', '.turbo', '.venv', 'venv', '__pycache__', '.pytest_cache', '.mypy_cache', 'target', 'coverage', '.cache', '.DS_Store']);
+    const queue = [''];
+    const candidates = [];
+    let visited = 0;
+    while (queue.length && visited < 5000) {
+      const dirRel = queue.shift();
+      const depth = dirRel ? dirRel.split('/').length : 0;
+      let list;
+      try { list = await fs.readdir(dirRel ? join(root, dirRel) : root, { withFileTypes: true }); }
+      catch { continue; }
+      for (const entry of list) {
+        if (skip.has(entry.name)) continue;
+        visited++;
+        if (visited > 5000) break;
+        const entryRel = dirRel ? `${dirRel}/${entry.name}` : entry.name;
+        let isDir = entry.isDirectory();
+        if (entry.isSymbolicLink()) {
+          try { isDir = (await fs.stat(join(root, entryRel))).isDirectory(); }
+          catch { isDir = false; }
+        }
+        if (isDir) {
+          if (depth < 5) queue.push(entryRel);
+          if (query && entryRel.toLowerCase().includes(query)) candidates.push({ path: `${entryRel}/`, name: entry.name, dir: true, depth });
+        } else {
+          const lowerName = entry.name.toLowerCase();
+          const lowerRel = entryRel.toLowerCase();
+          if (!query || lowerRel.includes(query)) {
+            const rank = !query ? depth * 10
+              : lowerName === query ? 0
+              : lowerName.startsWith(query) ? 1
+              : lowerRel.startsWith(query) ? 2
+              : lowerName.includes(query) ? 3 : 4;
+            candidates.push({ path: entryRel, name: entry.name, dir: false, depth, rank });
+          }
+        }
+      }
+    }
+    candidates.sort((a, b) => (a.dir - b.dir) || ((a.rank ?? 5) - (b.rank ?? 5)) || (a.depth - b.depth) || a.path.localeCompare(b.path, undefined, { numeric: true, sensitivity: 'base' }));
+    return { path: root, files: candidates.slice(0, 32).map(({ path: p, name, dir }) => ({ path: p, name, dir })) };
+  }
   if (operation !== 'read') throw new Error('Unknown file preview operation');
 
   const imageTypes = { png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif', webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', ico: 'image/x-icon' };

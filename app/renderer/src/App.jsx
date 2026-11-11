@@ -1,18 +1,19 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Icon, Mascot } from './Icons.jsx';
 import { Sidebar, SessionMenuItems } from './Sidebar.jsx';
 import { Composer, ComposerBar } from './Composer.jsx';
 import { Transcript } from './Conversation.jsx';
 import { AgentReports, SubagentSummary } from './Subagents.jsx';
-import { RightPanel } from './RightPanel.jsx';
+import { RightPanel, UsageMetrics } from './RightPanel.jsx';
 import { SettingsPage } from './Settings.jsx';
 import { FilePane } from './FilePane.jsx';
 import { GitReview } from './GitReview.jsx';
 import { TerminalPanel } from './TerminalPanel.jsx';
 import { Palette } from './Palette.jsx';
-import { MenuItem, Modal, Popover, Spinner } from './ui.jsx';
-import { emptyTranscript } from './transcript.js';
-import { api, bootstrap, closeConfirm, dismissNotice, set as setStore, getState, isPendingSession, newSession, notify, openFile, openPalette, openSettings, sendPrompt, setDraft, setFilePaneOpen, startSession, toggleRightPanel, toggleSidebar, useStore } from './store.js';
+import { Modal, Popover, Spinner, Trigger } from './ui.jsx';
+import { emptyTranscript, formatTokens } from './transcript.js';
+import { sortedBackgroundJobs } from './background-jobs.js';
+import { api, bootstrap, closeConfirm, dismissNotice, set as setStore, getState, isPendingSession, newSession, notify, openFile, openPalette, openSettings, sendPrompt, setFilePaneOpen, startSession, toggleRightPanel, toggleSidebar, useStore } from './store.js';
 
 // The session's goal (/goal): objective, state, and pause / resume / clear.
 function GoalBanner({ session }) {
@@ -83,10 +84,16 @@ function NewSessionView() {
   }, [draft.environmentId, draft.cwd, draft.model?.provider, draft.model?.id]);
   return (
     <div className="new-session">
-      <div className="code-empty" aria-label="Ready to code"><Mascot size={7} /></div>
-      <div className="dock new-session-dock">
-        <ComposerBar contextOnly />
-        <Composer autoFocus placeholder="Describe a task or ask about your code…" onSubmit={startSession} footer={<ComposerBar />} />
+      <div className="welcome-stage">
+        <div className="code-empty" aria-label="Ready to code">
+          <Mascot size={7} />
+          <h1 className="welcome-heading">What can we build today?</h1>
+        </div>
+        <div className="dock new-session-dock">
+          <div className="composer-shell">
+            <Composer autoFocus placeholder="Ask anything, @ to mention, / for actions" onSubmit={startSession} footer={<ComposerBar />} />
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -103,6 +110,49 @@ function ConnectionBanner({ session }) {
   return null;
 }
 
+function SessionFindBar({ onClose }) {
+  const [query, setQuery] = useState('');
+  const [index, setIndex] = useState(0);
+  const [count, setCount] = useState(0);
+  const inputRef = useRef(null);
+  useEffect(() => { inputRef.current?.focus(); }, []);
+  const collect = q => {
+    const clean = q.trim().toLowerCase();
+    if (!clean) return [];
+    const root = document.querySelector('.session-main .transcript-inner');
+    if (!root) return [];
+    return [...root.querySelectorAll('.markdown, .user-bubble, .ultra-progress, .tool-group-head, .step-head')]
+      .filter(el => el.textContent?.toLowerCase().includes(clean));
+  };
+  const jump = (q, nextIdx) => {
+    const hits = collect(q);
+    setCount(hits.length);
+    document.querySelectorAll('.find-active-block').forEach(el => el.classList.remove('find-active-block'));
+    if (!hits.length) { setIndex(0); return; }
+    const wrapped = ((nextIdx % hits.length) + hits.length) % hits.length;
+    setIndex(wrapped);
+    const target = hits[wrapped];
+    target.classList.add('find-active-block');
+    target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  };
+  useEffect(() => () => { document.querySelectorAll('.find-active-block').forEach(el => el.classList.remove('find-active-block')); }, []);
+  return (
+    <div className="session-find-bar" role="search" aria-label="Find in conversation">
+      <Icon name="search" size={14} className="find-icon" />
+      <input ref={inputRef} value={query} placeholder="Find in conversation…" aria-label="Find in conversation"
+        onChange={e => { const v = e.target.value; setQuery(v); jump(v, 0); }}
+        onKeyDown={e => {
+          if (e.key === 'Escape') { e.preventDefault(); onClose(); }
+          else if (e.key === 'Enter') { e.preventDefault(); jump(query, index + (e.shiftKey ? -1 : 1)); }
+        }} />
+      {query.trim() && <span className="find-count">{count ? `${index + 1} / ${count}` : '0 results'}</span>}
+      <button type="button" className="icon-button" disabled={!count} onClick={() => jump(query, index - 1)} aria-label="Previous match" title="Previous (⇧↵)"><Icon name="chevronUp" size={14} /></button>
+      <button type="button" className="icon-button" disabled={!count} onClick={() => jump(query, index + 1)} aria-label="Next match" title="Next (↵)"><Icon name="chevronDown" size={14} /></button>
+      <button type="button" className="icon-button" onClick={onClose} aria-label="Close find" title="Close (Esc)"><Icon name="x" size={14} /></button>
+    </div>
+  );
+}
+
 function SessionView({ session }) {
   const gitReviewOpen = useStore(s => s.gitReviewOpen);
   const transcript = useStore(s => s.transcripts[session.id]) ?? emptyTranscript();
@@ -112,8 +162,12 @@ function SessionView({ session }) {
   const filePaneOpen = useStore(s => s.filePaneOpen);
   const terminalOpen = useStore(s => s.terminalOpen);
   const filePaneMax = useStore(s => s.filePaneMax) && filePaneOpen;
+  const [findOpen, setFindOpen] = useState(false);
   useEffect(() => {
-    const onKey = e => { if (e.ctrlKey && e.key === '`') { e.preventDefault(); setStore(st => ({ terminalOpen: !st.terminalOpen })); } };
+    const onKey = e => {
+      if (e.ctrlKey && e.key === '`') { e.preventDefault(); setStore(st => ({ terminalOpen: !st.terminalOpen })); }
+      else if (e.metaKey && !e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') { e.preventDefault(); setFindOpen(true); }
+    };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
@@ -123,9 +177,15 @@ function SessionView({ session }) {
     window.addEventListener('pidesk:open-file', onOpen);
     return () => window.removeEventListener('pidesk:open-file', onOpen);
   }, [session.id]);
+  const placeholder = questions.length
+    ? 'Answer the agent’s question…'
+    : ultraWorking
+      ? 'Add to the task, @ to mention, / for actions'
+      : 'Ask anything, @ to mention, / for actions';
   return (
     <div className={`session-view ${filePaneMax ? 'files-max' : ''}`}>
       <div className="session-main">
+        {findOpen && <SessionFindBar onClose={() => setFindOpen(false)} />}
         {!transcript.messages.length && !transcript.live && !session.streaming && session.status === 'connected' && !questions.length ? <div className="code-empty" aria-label="Ready to code"><Mascot size={7} /></div> : <Transcript session={session} transcript={transcript} questions={questions}
           renderSubagents={block => <SubagentSummary key={block.key} sessionId={session.id} call={block.call} tool={transcript.tools[block.call.id]} />}
           renderAgentReport={block => <AgentReports key={block.key} sessionId={session.id} agents={block.agents} />} />}
@@ -133,13 +193,12 @@ function SessionView({ session }) {
           {session.engine === 'cursor'
             // Cursor CLI was removed: its old conversations can still be read, copied and deleted.
             ? <div className="conn-banner"><Icon name="alert" size={15} /> <span className="conn-text">Cursor CLI was removed from Pi Desktop. This conversation is read-only.</span></div>
-            : <>
-              <ConnectionBanner session={session} />
-              <GoalBanner session={session} />
-              <UltraBanner session={session} />
-              <ComposerBar session={session} contextOnly />
-              <Composer session={session} autoFocus placeholder={questions.length ? 'Answer the agent’s question…' : ultraWorking ? 'Add to the task…' : session.streaming ? 'Send to interrupt…' : 'Reply to Pi…'} onSubmit={(text, attachments) => sendPrompt(session.id, text, attachments)} footer={<ComposerBar session={session} />} />
-            </>}
+            : <div className="composer-shell">
+                <ConnectionBanner session={session} />
+                <GoalBanner session={session} />
+                <UltraBanner session={session} />
+                <Composer session={session} autoFocus placeholder={placeholder} onSubmit={(text, attachments) => sendPrompt(session.id, text, attachments)} footer={<ComposerBar session={session} />} />
+              </div>}
         </div>
         {terminalOpen && <TerminalPanel session={session} />}
       </div>
@@ -148,8 +207,54 @@ function SessionView({ session }) {
   );
 }
 
+function HeaderTelemetry({ session }) {
+  const stats = useStore(s => s.stats[session.id]);
+  const transcript = useStore(s => s.transcripts[session.id]);
+  const jobsSnapshot = useStore(s => s.jobs[session.id]);
+  const rightPanel = useStore(s => s.rightPanel);
+  const filePaneOpen = useStore(s => s.filePaneOpen);
+  const gitReviewOpen = useStore(s => s.gitReviewOpen);
+  const runningJobs = useMemo(() => sortedBackgroundJobs(jobsSnapshot?.jobs).filter(j => j.status === 'running').length, [jobsSnapshot]);
+  const context = stats?.contextUsage;
+  const percent = Number.isFinite(context?.percent) ? Math.round(context.percent) : null;
+  const contextLabel = Number.isFinite(context?.tokens)
+    ? `${formatTokens(context.tokens)} / ${Number.isFinite(context?.contextWindow) ? formatTokens(context.contextWindow) : '—'}`
+    : percent != null ? `${percent}%` : null;
+  const hasUsage = (transcript?.messages ?? []).some(m => m.role === 'assistant' && m.usage);
+  const inspectorVisible = rightPanel && !filePaneOpen && !gitReviewOpen;
+  return <>
+    {runningJobs > 0 && !inspectorVisible && (
+      <button type="button" className="header-pill live" onClick={() => setStore({ filePaneOpen: false, gitReviewOpen: false, rightPanel: true })} title="View running background tasks">
+        <Spinner size={11} /><span>{runningJobs} running</span>
+      </button>
+    )}
+    {!inspectorVisible && (contextLabel || hasUsage) && (
+      <Trigger width={264} placement="bottom-end" label="Context and token usage" className="header-pill context-pill"
+        title={contextLabel ? `Context: ${contextLabel}` : 'Token usage'}
+        menu={() => (
+          <div className="telemetry-popover">
+            {contextLabel && (
+              <div className="telemetry-context">
+                <span>Context</span>
+                <span className="telemetry-context-val">
+                  {contextLabel}
+                  {percent != null && <span className={`meter ${percent > 100 ? 'over' : ''}`}><span style={{ width: `${Math.max(0, Math.min(100, percent))}%` }} /></span>}
+                </span>
+              </div>
+            )}
+            <UsageMetrics transcript={transcript} />
+          </div>
+        )}>
+        {percent != null ? <>
+          <span className={`context-ring ${percent > 85 ? 'high' : ''}`} style={{ '--pct': `${Math.max(4, Math.min(100, percent))}%` }} />
+          <span>{percent}%</span>
+        </> : <Icon name="activity" size={13} />}
+      </Trigger>
+    )}
+  </>;
+}
+
 function Header({ session, view }) {
-  const draft = useStore(s => s.draft);
   const gitReviewOpen = useStore(s => s.gitReviewOpen);
   const rightPanel = useStore(s => s.rightPanel);
   const filePaneOpen = useStore(s => s.filePaneOpen);
@@ -160,36 +265,38 @@ function Header({ session, view }) {
   const [renaming, setRenaming] = useState(false);
   const [title, setTitle] = useState('');
   const local = session?.environmentId === 'local';
+  const activeSession = view === 'session' && session && !isPendingSession(session.id);
   return (
-    <header className={`main-head drag ${view === 'new' ? 'welcome-head' : ''} ${sidebar ? '' : 'no-sidebar'}`}>
-      {!sidebar && <div className="window-tools no-drag"><button className="tool-button" onClick={toggleSidebar} aria-label="Show sidebar"><Icon name="sidebarToggle" size={19} /></button></div>}
-      {view === 'session' && session && !isPendingSession(session.id) ? <>
+    <header className={`main-head drag ${activeSession ? '' : 'welcome-head'} ${sidebar ? '' : 'no-sidebar'}`}>
+      {!sidebar && <div className="window-tools no-drag"><button className="tool-button" onClick={toggleSidebar} aria-label="Show sidebar"><Icon name="sidebarToggle" size={17} /></button></div>}
+      {activeSession ? <>
         {renaming
           ? <input className="title-input no-drag" autoFocus value={title} onChange={e => setTitle(e.target.value)} onBlur={() => { setRenaming(false); if (title.trim()) api('rename', session.id, title.trim()); }} onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); if (e.key === 'Escape') setRenaming(false); }} />
           : <div className="header-context">
+              {session.project && <>
+                <span className="header-crumb" title={session.cwd}>
+                  {session.project}{!local && session.environmentLabel ? ` · ${session.environmentLabel}` : ''}
+                </span>
+                <span className="header-crumb-sep" aria-hidden="true">/</span>
+              </>}
               <button ref={anchor} className="title-button no-drag" onClick={() => setMenu(m => !m)} aria-expanded={menu} title={session.title}>
                 <span>{session.title}</span><Icon name="chevronDown" size={12} />
               </button>
-              <div className="header-location" title={session.cwd}>
-                <Icon name={local ? 'folder' : 'terminal'} size={12} />
-                <span>{session.project || 'No folder'}</span>
-              </div>
+              {!session.project && !local && session.environmentLabel && (
+                <span className="header-env-badge" title={session.cwd}><Icon name="terminal" size={11} />{session.environmentLabel}</span>
+              )}
             </div>}
         <Popover anchor={anchor} open={menu} onClose={() => setMenu(false)} width={220} placement="bottom-start">
           <SessionMenuItems session={session} close={() => setMenu(false)} onRename={() => { setTitle(session.title); setRenaming(true); }} />
         </Popover>
         <div className="main-tools no-drag">
-          <button className={`tool-button git-review-toggle ${gitReviewOpen ? 'on' : ''}`} onClick={() => setStore({ gitReviewOpen: !gitReviewOpen, filePaneOpen: false, filePaneMax: false })} aria-label="Review Git changes" aria-pressed={gitReviewOpen} title="Review repository changes"><Icon name="fileDiff" size={18} /><span>Review</span></button>
-          <button className={`tool-button ${terminalOpen ? 'on' : ''}`} onClick={() => setStore({ terminalOpen: !terminalOpen })} aria-label="Terminal" aria-pressed={terminalOpen} title="Terminal (⌃`)"><Icon name="terminalPanel" size={18} /></button>
-          <button className={`tool-button ${filePaneOpen ? 'on' : ''}`} onClick={() => setFilePaneOpen(!filePaneOpen)} aria-label="Files" aria-pressed={filePaneOpen} title="Files"><Icon name="folder" size={18} /></button>
-          <button className={`tool-button ${rightPanel && !filePaneOpen && !gitReviewOpen ? 'on' : ''}`} onClick={() => { if (filePaneOpen || gitReviewOpen) { setStore({ filePaneOpen: false, gitReviewOpen: false, rightPanel: true }); } else toggleRightPanel(); }} aria-label="Session details" aria-pressed={rightPanel && !filePaneOpen && !gitReviewOpen} title="Session details"><Icon name="panel" size={18} /></button>
+          <HeaderTelemetry session={session} />
+          <button className={`tool-button git-review-toggle ${gitReviewOpen ? 'on' : ''}`} onClick={() => setStore({ gitReviewOpen: !gitReviewOpen, filePaneOpen: false, filePaneMax: false })} aria-label="Review Git changes" aria-pressed={gitReviewOpen} title="Review repository changes"><Icon name="fileDiff" size={15} /><span>Review</span></button>
+          <button className={`tool-button ${terminalOpen ? 'on' : ''}`} onClick={() => setStore({ terminalOpen: !terminalOpen })} aria-label="Terminal" aria-pressed={terminalOpen} title="Terminal (⌃`)"><Icon name="terminalPanel" size={16} /></button>
+          <button className={`tool-button ${filePaneOpen ? 'on' : ''}`} onClick={() => setFilePaneOpen(!filePaneOpen)} aria-label="Files" aria-pressed={filePaneOpen} title="Files"><Icon name="folder" size={16} /></button>
+          <button className={`tool-button ${rightPanel && !filePaneOpen && !gitReviewOpen ? 'on' : ''}`} onClick={() => { if (filePaneOpen || gitReviewOpen) { setStore({ filePaneOpen: false, gitReviewOpen: false, rightPanel: true }); } else toggleRightPanel(); }} aria-label="Session details" aria-pressed={rightPanel && !filePaneOpen && !gitReviewOpen} title="Session details"><Icon name="panel" size={16} /></button>
         </div>
-      </> : <div className="header-context">
-        <strong className="header-new">New session</strong>
-        <div className="header-location" title={draft.cwd}>
-          <Icon name="folder" size={12} /><span>{draft.cwd?.split('/').filter(Boolean).at(-1) || 'Pi Desktop'}</span>
-        </div>
-      </div>}
+      </> : null}
     </header>
   );
 }

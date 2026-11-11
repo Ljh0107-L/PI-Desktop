@@ -225,3 +225,24 @@ test('remote responses reject malformed or empty transport output', () => {
     assert.throws(() => decodeRemoteFilePreview(output), /Invalid file preview response/);
   }
 });
+
+test('workspace search ranks matching files locally and over SSH while skipping ignored directories', async t => {
+  const root = await fixture(t);
+  await mkdir(join(root, 'src', 'components'), { recursive: true });
+  await mkdir(join(root, 'node_modules', 'pkg'), { recursive: true });
+  await mkdir(join(root, '.git'), { recursive: true });
+  await writeFile(join(root, 'src', 'Composer.jsx'), 'export function Composer() {}');
+  await writeFile(join(root, 'src', 'components', 'ComposerBar.jsx'), 'export function ComposerBar() {}');
+  await writeFile(join(root, 'README.md'), '# Project');
+  await writeFile(join(root, 'node_modules', 'pkg', 'Composer.js'), 'ignored');
+  await writeFile(join(root, '.git', 'HEAD'), 'ref: refs/heads/main');
+
+  const local = await filePreview('search', root, 'comp');
+  const remote = await shellPreview('search', root, 'comp');
+  assert.deepEqual(remote, local);
+  const paths = local.files.map(item => item.path);
+  assert.ok(paths.includes('src/Composer.jsx'));
+  assert.ok(paths.includes('src/components/ComposerBar.jsx'));
+  assert.ok(!paths.some(p => p.includes('node_modules') || p.includes('.git')));
+  assert.equal(local.files[0].path, 'src/Composer.jsx', 'shorter basename prefix match ranks first');
+});

@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
-import { Markdown, Spinner } from './ui.jsx';
+import { Markdown, Spinner, fileBadgeKind, looksLikePath } from './ui.jsx';
 import { changesOf, displayBlocks, formatTokens, isAbortText, retainWorkKeys, toolSummary, ultraProgress } from './transcript.js';
 import { api, editMessage, isPendingSession, loadEarlierHistory, loadHistoryEntry, notify, openChanges, openFile } from './store.js';
 import { VirtualHistory } from './VirtualHistory.jsx';
@@ -110,13 +110,20 @@ function ToolCall({ call, tool }) {
   const filePath = call.__historyTruncated ? null : trace?.path ?? (['read', 'edit', 'write', 'cursor_edit'].includes(call.name) && !failed ? (call.arguments?.path ?? call.arguments?.file_path) : null);
   const hunks = trace || call.__historyTruncated ? [] : call.name === 'edit' ? editHunks(call.arguments) : call.name === 'write' ? [{ oldText: null, newText: String(call.arguments?.content ?? '') }] : [];
   const stats = hunks.length && status !== 'error' ? changeStats({ hunks }) : null;
+  const openTarget = path => onOpenFile ? onOpenFile(path) : window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: path }));
   return (
     <div className={`step tool-call ${status} ${open ? 'open' : ''}`} data-tool-id={call.id}>
       <div className="step-head tool-call-head" role="button" tabIndex={0} aria-expanded={open} onClick={() => setOpen(o => !o)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
         {status === 'running' && <Spinner size={12} />}
         <FadeText className="step-text" title={title ?? filePath ?? undefined}>
           {verb && <span className="step-verb">{verb}</span>}
-          <span className={`step-subject ${mono ? 'mono' : ''}`}>{subject}</span>
+          {filePath ? (
+            <span className="step-subject file-ref-inline" data-kind={fileBadgeKind(filePath)}
+              onClick={e => { e.stopPropagation(); openTarget(filePath); }}
+              title={`Open ${filePath}`}>{subject}</span>
+          ) : (
+            <span className={`step-subject ${mono ? 'mono' : ''}`}>{subject}</span>
+          )}
           {detail && <span className="step-dir">{detail}</span>}
         </FadeText>
         {stats && <span className="step-stats">{stats.added > 0 && <span className="plus">+{stats.added}</span>}{stats.removed > 0 && <span className="minus">−{stats.removed}</span>}</span>}
@@ -144,7 +151,7 @@ function ToolCall({ call, tool }) {
                 {output && call.name !== 'write' && (call.name !== 'edit' || status === 'error') && <pre className={`tool-output boxed ${status === 'error' ? 'error' : ''}`}>{shownOutput}</pre>}
                 {!output && status === 'running' && <div className="tool-running">Running…</div>}
               </>}
-          {filePath && <button className="step-open" onClick={() => onOpenFile ? onOpenFile(filePath) : window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: filePath }))}>Open {baseOf(filePath)}</button>}
+          {filePath && <button className="step-open" onClick={() => openTarget(filePath)}>Open {baseOf(filePath)}</button>}
           </>}
         </div>
       )}
@@ -174,10 +181,18 @@ function ProgressReport({ call, tool, sessionId, live }) {
   const report = ultraProgress(call, tool);
   if (detailState.pending && !report) return <HistoryLoading {...detailState} />;
   if (!report) return <ToolGroup calls={[call]} tools={{ [call.id]: tool }} live={live} />;
-  const text = [report.done, report.next && `**Next:** ${report.next}`, report.notes && `**Assumptions:** ${report.notes}`].filter(Boolean).join('\n\n');
-  return <div className="ultra-progress" data-tool-id={call.id} role="group" aria-label="Progress update" title="Progress reported by the agent">
-    <Markdown text={text} sessionId={sessionId} documentPath="" />
-  </div>;
+  return (
+    <div className="ultra-progress" data-tool-id={call.id} role="group" aria-label="Progress update" title="Progress reported by the agent">
+      <div className="ultra-progress-head"><span className="ultra-progress-dot" /><span>Progress</span></div>
+      {report.done && <div className="ultra-progress-done"><Markdown text={report.done} sessionId={sessionId} documentPath="" /></div>}
+      {(report.next || report.notes) && (
+        <div className="ultra-progress-meta">
+          {report.next && <div className="ultra-progress-row"><span className="ultra-progress-tag next">Next</span><div className="ultra-progress-cell"><Markdown text={report.next} sessionId={sessionId} documentPath="" /></div></div>}
+          {report.notes && <div className="ultra-progress-row"><span className="ultra-progress-tag note">Scope</span><div className="ultra-progress-cell"><Markdown text={report.notes} sessionId={sessionId} documentPath="" /></div></div>}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // One reasoning step inside a folded group: its first line, opening to the full text.
@@ -204,23 +219,43 @@ function WorkNote({ item }) {
 // with one row per step.
 function WorkGroup({ items, tools, live }) {
   const [open, setOpen] = useDisclosure(groupIds(items));
+  const { onOpenFile, sessionId } = useContext(DisclosureContext);
   const calls = items.flatMap(i => i.kind === 'tools' ? i.calls : []);
   const running = items.some(i => i.streaming) || calls.some(c => tools[c.id]?.status === 'running' || (!tools[c.id] && live));
   const failed = calls.filter(c => tools[c.id]?.status === 'error').length;
   const thinkMs = items.reduce((n, i) => n + (i.kind === 'thinking' ? i.durationMs ?? 0 : 0), 0);
-  const edits = changesOf([{ role: 'assistant', content: calls }], tools).map(changeStats).reduce((t, c) => ({ added: t.added + c.added, removed: t.removed + c.removed }), { added: 0, removed: 0 });
+  const groupChanges = useMemo(() => changesOf([{ role: 'assistant', content: calls }], tools), [calls, tools]);
+  const edits = useMemo(() => groupChanges.map(changeStats).reduce((t, c) => ({ added: t.added + c.added, removed: t.removed + c.removed }), { added: 0, removed: 0 }), [groupChanges]);
   const only = calls.length === 1 ? describeCall(calls[0]) : null;
+  const onlyCall = calls.length === 1 ? calls[0] : null;
+  const onlyFile = onlyCall && !onlyCall.__historyTruncated && ['read', 'edit', 'write', 'cursor_edit'].includes(onlyCall.name) && tools[onlyCall.id]?.status !== 'error'
+    ? (onlyCall.__trace?.path ?? onlyCall.arguments?.path ?? onlyCall.arguments?.file_path) : null;
   const summary = (only && !only.mono && !only.raw ? [only.verb, only.subject].filter(Boolean).join(' ') : toolSummary(calls)) || (running ? '' : thoughtLabel(thinkMs));
   const latest = items.at(-1);
   const thinkingNow = running && latest?.kind === 'thinking' && latest.streaming;
+  const openTarget = path => onOpenFile ? onOpenFile(path) : window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: path }));
   return (
     <div className={`tool-group work ${open ? 'open' : ''}`}>
       <div className="tool-group-head" role="button" tabIndex={0} aria-expanded={open} onClick={() => setOpen(o => !o)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
         {running && <Spinner size={12} />}
-        <FadeText className={`group-summary ${thinkingNow ? 'shimmer' : ''}`}>{thinkingNow ? firstLine(latest.text) || 'Thinking' : summary || 'Working'}</FadeText>
+        <FadeText className={`group-summary ${thinkingNow ? 'shimmer' : ''}`}>
+          {thinkingNow ? (firstLine(latest.text) || 'Thinking')
+            : onlyFile && only?.verb ? <>
+                <span>{only.verb} </span>
+                <span className="file-ref-inline" data-kind={fileBadgeKind(onlyFile)} title={`Open ${onlyFile}`}
+                  onClick={e => { e.stopPropagation(); openTarget(onlyFile); }}>{only.subject}</span>
+              </>
+            : (summary || 'Working')}
+        </FadeText>
         {failed > 0 && <span className="group-failed">({failed} failed)</span>}
-        {edits.added > 0 && <span className="plus">+{edits.added}</span>}
-        {edits.removed > 0 && <span className="minus">−{edits.removed}</span>}
+        {(edits.added > 0 || edits.removed > 0) && (
+          <span className={`group-diff-stats ${sessionId && groupChanges.length ? 'clickable' : ''}`}
+            title={sessionId && groupChanges.length ? 'View changes' : undefined}
+            onClick={sessionId && groupChanges.length ? e => { e.stopPropagation(); openChanges(sessionId, groupChanges); } : undefined}>
+            {edits.added > 0 && <span className="plus">+{edits.added}</span>}
+            {edits.removed > 0 && <span className="minus">−{edits.removed}</span>}
+          </span>
+        )}
         <Caret open={open} />
       </div>
       {open && <div className="work-body">
@@ -311,19 +346,43 @@ function GoalMarker({ objective }) {
   return <div className="goal-marker"><Icon name="target" size={15} /><span className="goal-marker-label">Goal</span><span className="goal-marker-text">{objective}</span></div>;
 }
 
-// Your text as typed, with list items ("1. …", "- …") given a hanging indent per nesting level.
+// Your text as typed, with list items ("1. …", "- …") given a hanging indent and @file mentions clickable.
 const LIST_ITEM = /^(\s*)(\d+[.)]|[-*\u2022])\s+(.*)$/;
+const MENTION_TOKEN = /(^|\s)@([\w./-]+(?:\/[\w./-]*)?)/g;
+function renderInlineMentions(str) {
+  if (!str || !str.includes('@')) return str;
+  const parts = [];
+  let last = 0, match;
+  MENTION_TOKEN.lastIndex = 0;
+  while ((match = MENTION_TOKEN.exec(str)) !== null) {
+    const [, lead, candidate] = match;
+    const tokenStart = match.index + lead.length;
+    if (looksLikePath(candidate)) {
+      if (tokenStart > last) parts.push(str.slice(last, tokenStart));
+      const partsOfPath = candidate.split('/').filter(Boolean);
+      const shortLabel = partsOfPath.length >= 2 && !candidate.endsWith('/') ? partsOfPath.at(-1) : candidate;
+      parts.push(
+        <span key={tokenStart} className="user-mention" data-kind={fileBadgeKind(candidate)} title={`Open ${candidate}`}
+          onClick={() => window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: candidate }))}>@{shortLabel}</span>
+      );
+      last = tokenStart + 1 + candidate.length;
+    }
+  }
+  if (!parts.length) return str;
+  if (last < str.length) parts.push(str.slice(last));
+  return parts;
+}
 function UserText({ text }) {
   const lines = text.split('\n');
   const width = m => m[1].replace(/\t/g, '   ').length;
   const items = lines.map(l => LIST_ITEM.exec(l));
-  if (!items.some(Boolean)) return text;
+  if (!items.some(Boolean)) return renderInlineMentions(text);
   const base = Math.min(...items.filter(Boolean).map(width)); // the shallowest item is the top level
   return lines.map((line, i) => {
     const m = items[i];
-    if (!m) return <div key={i} className="ub-line">{line || '\u00a0'}</div>;
+    if (!m) return <div key={i} className="ub-line">{line ? renderInlineMentions(line) : '\u00a0'}</div>;
     const depth = Math.floor((width(m) - base) / 3);
-    return <div key={i} className="ub-li" style={{ '--depth': depth }}><span className="ub-marker">{/\d/.test(m[2]) ? m[2] : '•'}</span>{m[3]}</div>;
+    return <div key={i} className="ub-li" style={{ '--depth': depth }}><span className="ub-marker">{/\d/.test(m[2]) ? m[2] : '•'}</span>{renderInlineMentions(m[3])}</div>;
   });
 }
 
