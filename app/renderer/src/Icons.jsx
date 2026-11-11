@@ -1,13 +1,14 @@
 // Icons: Lucide line icons (the same family Claude Desktop's icon set resembles), plus a few glyphs
 // Lucide has no equivalent for (filled carets, stop square).
 import {
-  Archive, ArrowLeft, ArrowUp, Brain, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, CornerDownLeft, Ellipsis,
+  Archive, ArrowLeft, ArrowUp, Brain, Check, ChevronDown, ChevronLeft, ChevronRight, Copy, CornerDownLeft, Ellipsis, Sun, Moon, BookOpen, BriefcaseBusiness,
   FilePen, FoldVertical, Folder, GitBranch, Globe, KeyRound, Laptop, ListChecks, PanelLeft, PanelRight, Pencil, Plus,
   RefreshCw, Search, Server, Settings, ShieldAlert, ShieldCheck, Sparkles, SquareTerminal, StickyNote, Trash2,
   TriangleAlert, Unplug, Wifi, X, MessageCircleQuestion, Gauge, Database, ArrowDown, Timer, FileText, FileCode, FileImage, ListTree, ExternalLink, Code, File, Maximize2, Minimize2, Paperclip, Target, GitFork, FileDiff, Download, MessageSquare, Terminal, Wrench, Zap, Infinity as InfinityIcon,
 } from 'lucide-react';
 
 const LUCIDE = {
+  sun: Sun, moon: Moon, book: BookOpen, customize: BriefcaseBusiness,
   plus: Plus, search: Search, settings: Settings, terminal: SquareTerminal, laptop: Laptop, folder: Folder,
   chevronDown: ChevronDown, chevronRight: ChevronRight, check: Check, arrowUp: ArrowUp, panel: PanelRight,
   sidebar: PanelLeft, sidebarToggle: PanelLeft, sparkle: Sparkles, shield: ShieldCheck, shieldAlert: ShieldAlert,
@@ -46,7 +47,7 @@ const MASCOT = [
 export function Mascot({ size = 6, className }) {
   const cells = [];
   MASCOT.forEach((row, y) => [...row].forEach((c, x) => { if (c === '#') cells.push(<rect key={`${x}-${y}`} x={x} y={y} width="1.02" height="1.02" />); }));
-  return <svg className={className} width={13 * size} height={9 * size} viewBox="0 0 13 9" fill="#d97757" shapeRendering="crispEdges" aria-hidden="true">{cells}</svg>;
+  return <svg className={className} width={13 * size} height={9 * size} viewBox="0 0 13 9" fill="currentColor" shapeRendering="crispEdges" aria-hidden="true">{cells}</svg>;
 }
 
 // Pi mark: a small "π" glyph used as the app's logo.

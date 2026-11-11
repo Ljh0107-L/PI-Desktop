@@ -7,6 +7,7 @@ import { listEnvironments } from './environments.mjs';
 import { listRemoteDir, runSsh } from './remote-setup.mjs';
 import { decodeRemoteFilePreview, filePreview, remoteFilePreviewScript } from './file-preview.mjs';
 import { downloadLocal, downloadRemote } from './file-download.mjs';
+import { gitReview, remoteGitReviewScript, decodeGitReview } from './git-review.mjs';
 import { execFile } from 'node:child_process';
 import { shellQuote } from '../../core/transports.mjs';
 import { SessionManager } from './session-manager.mjs';
@@ -255,6 +256,17 @@ const api = {
     if (env.kind === 'ssh') return runSsh(env, `git -C ${shellQuote(record.cwd)} rev-parse --abbrev-ref HEAD 2>/dev/null || true`, { timeout: 15000 }).then(s => s.trim()).catch(() => '');
     return new Promise(resolve => execFile('git', ['-C', record.cwd, 'rev-parse', '--abbrev-ref', 'HEAD'], (error, stdout) => resolve(error ? '' : stdout.trim())));
   },
+  async gitReview(id, request = {}) {
+    const record = manager.record(id), env = manager.env(record.environmentId);
+    if (env.kind === 'local') return gitReview(record.cwd, request);
+    const { node } = await manager.prepare(record.environmentId);
+    return decodeGitReview(await runSsh(env, remoteGitReviewScript(node, record.cwd, request), { timeout: 120000 }));
+  },
+  appearance(theme) {
+    if (!['light', 'dark'].includes(theme)) throw new Error('Unknown appearance');
+    nativeTheme.themeSource = theme;
+    window?.setBackgroundColor(theme === 'dark' ? '#151515' : '#faf9f5');
+  },
   compact: id => manager.compact(id),
   openExternal: url => /^https?:\/\//.test(url) ? shell.openExternal(url) : false,
   openPath: path => shell.openPath(path),
@@ -273,11 +285,11 @@ ipcMain.handle('pidesk:invoke', async (_event, method, ...args) => {
 
 function createWindow() {
   window = new BrowserWindow({
-    width: 1440, height: 900, minWidth: 980, minHeight: 640,
+    width: 1440, height: 900, minWidth: 880, minHeight: 640,
     title: 'Pi Desktop',
-    backgroundColor: '#181818',
+    backgroundColor: '#151515',
     titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 18, y: 18 }, // vertically centred in the 50px title row
+    trafficLightPosition: { x: 10, y: 10 }, // aligned with the compact sidebar title row
     icon: join(root, 'build/icon.png'),
     webPreferences: { preload: join(root, 'app/main/preload.cjs'), contextIsolation: true, nodeIntegration: false, sandbox: true, plugins: true },
   });
@@ -288,7 +300,7 @@ function createWindow() {
 }
 
 app.whenReady().then(async () => {
-  nativeTheme.themeSource = 'dark'; // the UI is dark; keep native vibrancy and menus dark too
+  nativeTheme.themeSource = 'dark'; // The renderer restores the saved appearance before rendering.
   updater = new Updater({ app, net, cacheDir: join(app.getPath('userData'), 'updates'), send });
   Menu.setApplicationMenu(Menu.buildFromTemplate([
     { label: app.name, submenu: [
@@ -352,8 +364,8 @@ function ultraPiStatus({ id, status }) { if (!['connected', 'connecting', 'recon
 function ultraChanged({ id, ultra, ended, title, local }) {
   if (local && ultra?.task?.status === 'active') ultraLocal.set(id, true); else ultraLocal.delete(id);
   keepAwake();
-  if (ended && ['complete', 'stalled'].includes(ended) && Notification.isSupported()) {
-    const note = new Notification({ title: ended === 'complete' ? 'Ultra finished' : 'Ultra stopped: no progress', body: title || 'Conversation' });
+  if (ended && ['complete', 'stalled', 'needs_attention'].includes(ended) && Notification.isSupported()) {
+    const note = new Notification({ title: ended === 'complete' ? 'Ultra finished' : ended === 'needs_attention' ? 'Ultra needs attention: review not passed' : 'Ultra stopped: no progress', body: title || 'Conversation' });
     note.on('click', () => { if (window && !window.isDestroyed()) { window.show(); window.focus(); send('open-session', { id }); } });
     note.show();
   }

@@ -1065,3 +1065,48 @@ body.resizing, body.resizing * { cursor: col-resize !important; user-select: non
 .subagent-conversation .transcript-inner { max-width: none; }
 .subagent-conversation .tool-command, .subagent-conversation .tool-output { max-height: 320px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .step-duration { flex-shrink: 0; color: var(--faint); font-size: 11px; }
+
+.ultra-review-gaps { margin: 0 16px 8px; padding: 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; }
+.ultra-review-gaps pre { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px; overflow: auto; }
+
+/* Git review: repository state is separate from per-turn tool edit records. */
+.git-review-toggle { display: inline-flex; align-items: center; width: auto; gap: 6px; padding: 0 9px; font-size: 12px; }
+.git-review { position: relative; flex-shrink: 0; min-width: 0; max-width: 72%; display: flex; flex-direction: column; border-left: 1px solid var(--border); background: var(--bg); overflow: hidden; }
+.git-review-head { display: flex; align-items: center; gap: 9px; min-height: 48px; padding: 0 14px; border-bottom: 1px solid var(--border); font-size: 13px; }
+.git-branch { display: flex; align-items: center; gap: 5px; flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font-size: 11px; }
+.git-review-scope { padding: 9px 14px; font-size: 11px; color: var(--muted); border-bottom: 1px solid var(--border); line-height: 1.5; }
+.git-review-scope button { text-decoration: underline; color: var(--text); }
+.git-review-body { display: flex; flex: 1; min-height: 0; }
+.git-file-list { width: 190px; min-width: 130px; max-width: 33%; overflow: auto; border-right: 1px solid var(--border); flex-shrink: 0; padding-bottom: 16px; }
+.git-file-list h3 { font-size: 11px; font-weight: 600; margin: 0; padding: 14px 10px 6px; display: flex; justify-content: space-between; color: var(--muted); }
+.git-file { width: 100%; display: flex; gap: 6px; padding: 8px 10px; font: 11px/1.5 var(--mono); text-align: left; overflow-wrap: anywhere; }
+.git-file > span:last-child { min-width: 0; }
+.git-file:hover, .git-file.selected { background: rgba(255,255,255,.07); }
+.git-file.selected { box-shadow: inset 2px 0 var(--accent); }
+.git-file-status { color: var(--muted); width: 17px; flex-shrink: 0; }
+.git-diff-pane { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.git-file-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px; border-bottom: 1px solid var(--border); font: 12px var(--mono); }
+.git-file-head > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.git-file-head small { white-space: nowrap; }
+.git-file-actions { display: flex; gap: 8px; align-items: center; padding: 8px 12px; flex-wrap: wrap; border-bottom: 1px solid var(--border); font-size: 11px; }
+.git-diff-lines { flex: 1; min-height: 0; overflow: auto; padding: 8px 0 20px; font: 11.5px/1.7 var(--mono); }
+.git-diff-line { display: flex; width: 100%; min-width: max-content; text-align: left; font: inherit; line-height: inherit; border: none; padding: 0 12px 0 0; }
+.git-line-number { width: 39px; flex-shrink: 0; text-align: right; padding-right: 8px; color: var(--faint); user-select: none; }
+.git-line-sign { width: 18px; flex-shrink: 0; text-align: center; color: var(--muted); }
+.git-line-text { white-space: pre; user-select: text; }
+.git-review.wrap .git-diff-line { min-width: 0; }
+.git-review.wrap .git-line-text { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
+.git-diff-line.add { background: rgba(124,196,140,.1); }
+.git-diff-line.del { background: rgba(243,154,138,.1); }
+.git-diff-line:hover, .git-diff-line.selected { box-shadow: inset 3px 0 var(--accent); background: rgba(255,255,255,.1); }
+.git-diff-meta { padding: 0 12px; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10px; }
+.git-diff-meta.hunk { color: #90b8e0; background: rgba(80,130,190,.1); margin: 8px 0 3px; }
+.git-binary { padding: 16px; font-family: var(--sans); color: var(--muted); }
+.git-review-error { padding: 12px; color: #f39a8a; font-size: 12px; overflow-wrap: anywhere; display: flex; gap: 10px; align-items: center; }
+.git-review-error .button { flex-shrink: 0; }
+.git-comment { padding: 12px; border-top: 1px solid var(--border); font-size: 12px; }
+.git-comment label { display: block; }
+.git-comment textarea { display: block; margin: 8px 0; width: 100%; min-height: 68px; resize: vertical; padding: 8px; background: rgba(255,255,255,.04); border: 1px solid var(--border); border-radius: 6px; }
+.git-comment .button + .button { margin-left: 8px; }
+.git-commit { display: flex; gap: 8px; padding: 12px; border-top: 1px solid var(--border); }
+.git-commit input { flex: 1; min-width: 0; padding: 8px; border: 1px solid var(--border); border-radius: 6px; background: rgba(255,255,255,.04); font-size: 12px; }

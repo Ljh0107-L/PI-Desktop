@@ -12,7 +12,7 @@
 //     into every continuation, so the task survives the context being compacted;
 //   - finish_task first asks for an audit against the request; a second call in a later turn has an
 //     independent reviewer (a fresh agent that can run checks but not edit) check the work. Gaps send
-//     the model back to work; after 3 reviews the task finishes with what is still open;
+//     the model back to work; after 3 unsuccessful reviews the task needs attention;
 //   - runs that keep making no progress (no substantive tool calls) get a nudge, then stall.
 // Stopping the run (the desktop's Stop) pauses the task; Ultra off stops continuing it. A Pi that
 // restarts with a task in progress picks it up again.
@@ -99,7 +99,7 @@ export function createUltra(pi, { enabled: initial = false, review = null, agent
   const view = () => task && {
     objective: task.objective, status: task.status, turns: task.turns ?? 0, startedAt: task.startedAt, updatedAt: task.updatedAt,
     finishedAt: task.finishedAt, reason: task.reason, lastError: task.lastError, retryAt: task.retryAt, reviewing: !!task.reviewing,
-    reviews: task.reviews ?? 0, progress: task.progress?.at(-1) ?? null, instructions: task.instructions?.length ?? 0,
+    reviews: task.reviews ?? 0, review: task.review ?? null, progress: task.progress?.at(-1) ?? null, instructions: task.instructions?.length ?? 0,
   };
   const snapshot = () => ({ enabled, task: view() });
   const publish = () => ui?.setStatus?.('pidesk-ultra', JSON.stringify(snapshot()));
@@ -197,7 +197,7 @@ export function createUltra(pi, { enabled: initial = false, review = null, agent
     },
     resume() {
       if (!enabled || !task || ['active', 'complete'].includes(task.status)) return false;
-      update({ status: 'active', idleTurns: 0, errors: 0, fatalErrors: 0, reason: undefined, lastError: undefined, retryAt: undefined });
+      update({ status: 'active', idleTurns: 0, errors: 0, fatalErrors: 0, reviews: 0, finishedAt: undefined, reason: undefined, lastError: undefined, retryAt: undefined });
       next();
       return true;
     },
@@ -241,9 +241,11 @@ export function createUltra(pi, { enabled: initial = false, review = null, agent
         return { text: 'An independent review confirmed the work. The task is finished: end your turn with the summary for the user.', details: outcome.details };
       }
       if (reviews >= MAX_REVIEWS) {
-        update({ reviews, review: { verdict: outcome?.verdict ?? 'gaps', text, at: now() } });
-        done(outcome?.verdict === 'error' ? '' : `\n\nStill open after ${reviews} reviews:\n${text}`);
-        return { text: `${outcome?.verdict === 'error' ? `The review couldn't run (${text}).` : `After ${reviews} reviews the reviewer still finds gaps:\n\n${text}\n\n`} The task finishes here: end your turn with the summary for the user, including what is still open.`, details: outcome?.details };
+        clearRetry();
+        update({ status: 'needs_attention', reviews, reviewing: false, retryAt: undefined,
+          reason: outcome?.verdict === 'error' ? 'Independent review could not complete' : 'Independent review still finds gaps',
+          summary, review: { verdict: outcome?.verdict ?? 'gaps', text, at: now() } });
+        return { text: `${outcome?.verdict === 'error' ? `The review couldn't run (${text}).` : `After ${reviews} reviews the reviewer still finds gaps:\n\n${text}\n\n`} The task is NOT complete and needs attention. End your turn explaining what remains unverified or unfinished; the user can resume it.`, details: outcome?.details };
       }
       update({ reviews, review: { verdict: outcome?.verdict ?? 'gaps', text, at: now() } });
       return {

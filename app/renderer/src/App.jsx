@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Icon } from './Icons.jsx';
+import { Icon, Mascot } from './Icons.jsx';
 import { Sidebar, SessionMenuItems } from './Sidebar.jsx';
 import { Composer, ComposerBar } from './Composer.jsx';
 import { Transcript } from './Conversation.jsx';
@@ -7,11 +7,12 @@ import { AgentReports, SubagentSummary } from './Subagents.jsx';
 import { RightPanel } from './RightPanel.jsx';
 import { SettingsPage } from './Settings.jsx';
 import { FilePane } from './FilePane.jsx';
+import { GitReview } from './GitReview.jsx';
 import { TerminalPanel } from './TerminalPanel.jsx';
 import { Palette } from './Palette.jsx';
 import { MenuItem, Modal, Popover, Spinner } from './ui.jsx';
 import { emptyTranscript } from './transcript.js';
-import { api, bootstrap, closeConfirm, dismissNotice, set as setStore, getState, newSession, notify, openFile, openPalette, openSettings, sendPrompt, setDraft, setFilePaneOpen, startSession, toggleRightPanel, toggleSidebar, useStore } from './store.js';
+import { api, bootstrap, closeConfirm, dismissNotice, set as setStore, getState, isPendingSession, newSession, notify, openFile, openPalette, openSettings, sendPrompt, setDraft, setFilePaneOpen, startSession, toggleRightPanel, toggleSidebar, useStore } from './store.js';
 
 // The session's goal (/goal): objective, state, and pause / resume / clear.
 function GoalBanner({ session }) {
@@ -45,19 +46,19 @@ function UltraBanner({ session }) {
   }, [task?.status]);
   if (!task?.objective) return null;
   const retrying = task.status === 'active' && task.retryAt > Date.now();
-  const label = task.status === 'active' ? (task.reviewing ? 'Reviewing' : retrying ? 'Retrying soon' : 'Working') : { paused: 'Paused', stalled: 'Stalled', complete: 'Done' }[task.status] ?? task.status;
+  const label = task.status === 'active' ? (task.reviewing ? 'Reviewing' : retrying ? 'Retrying soon' : 'Working') : { paused: 'Paused', stalled: 'Stalled', needs_attention: 'Needs attention', complete: 'Done' }[task.status] ?? task.status;
   const run = verb => api('prompt', session.id, `/pidesk-ultra ${verb}`).catch(e => notify(e.message, 'error'));
   const stop = () => { api('abort', session.id).catch(() => {}); run('pause'); };
   const title = [task.objective, task.progress?.done && `Done: ${task.progress.done}`, task.progress?.next && `Next: ${task.progress.next}`, task.reason, task.lastError].filter(Boolean).join('\n');
   return (
-    <div className={`goal-banner ultra-banner ${task.status}`} title={title}>
+    <div className="ultra-task"><div className={`goal-banner ultra-banner ${task.status}`} title={title}>
       <Icon name="infinity" size={15} className="goal-icon" />
       <span className="goal-objective">{task.objective}</span>
-      <span className={`goal-state ${task.status === 'complete' ? 'complete' : task.status === 'stalled' ? 'blocked' : ''}`}>{task.status === 'active' && <span className="goal-pulse" />}{label} · {elapsed((task.finishedAt ?? Date.now()) - task.startedAt)}</span>
+      <span className={`goal-state ${task.status === 'complete' ? 'complete' : ['stalled', 'needs_attention'].includes(task.status) ? 'blocked' : ''}`}>{task.status === 'active' && <span className="goal-pulse" />}{label} · {elapsed((task.finishedAt ?? Date.now()) - task.startedAt)}</span>
       {task.status === 'active' && <button className="goal-action" onClick={stop}>Stop</button>}
-      {['paused', 'stalled'].includes(task.status) && ultra.enabled && <button className="goal-action" onClick={() => run('resume')}>Resume</button>}
+      {['paused', 'stalled', 'needs_attention'].includes(task.status) && ultra.enabled && <button className="goal-action" onClick={() => run('resume')}>Resume</button>}
       {task.status !== 'active' && <button className="goal-close" aria-label="Dismiss" title="Dismiss" onClick={() => run('dismiss')}><Icon name="x" size={13} /></button>}
-    </div>
+    </div>{task.status === 'needs_attention' && <div className="ultra-review-gaps" role="status"><strong>{task.reason}</strong><pre>{task.review?.text}</pre></div>}</div>
   );
 }
 
@@ -82,10 +83,10 @@ function NewSessionView() {
   }, [draft.environmentId, draft.cwd, draft.model?.provider, draft.model?.id]);
   return (
     <div className="new-session">
-      <div className="new-session-center" />
-      <div className="dock">
-        <Composer autoFocus placeholder="What should Pi work on?" onSubmit={startSession} />
-        <ComposerBar />
+      <div className="code-empty" aria-label="Ready to code"><Mascot size={7} /></div>
+      <div className="dock new-session-dock">
+        <ComposerBar contextOnly />
+        <Composer autoFocus placeholder="Describe a task or ask about your code…" onSubmit={startSession} footer={<ComposerBar />} />
       </div>
     </div>
   );
@@ -103,6 +104,7 @@ function ConnectionBanner({ session }) {
 }
 
 function SessionView({ session }) {
+  const gitReviewOpen = useStore(s => s.gitReviewOpen);
   const transcript = useStore(s => s.transcripts[session.id]) ?? emptyTranscript();
   const questions = useStore(s => s.questions[session.id]) ?? [];
   const ultraWorking = useStore(s => s.ultra[session.id]?.task?.status === 'active');
@@ -124,9 +126,9 @@ function SessionView({ session }) {
   return (
     <div className={`session-view ${filePaneMax ? 'files-max' : ''}`}>
       <div className="session-main">
-        <Transcript session={session} transcript={transcript} questions={questions}
+        {!transcript.messages.length && !transcript.live && !session.streaming && session.status === 'connected' && !questions.length ? <div className="code-empty" aria-label="Ready to code"><Mascot size={7} /></div> : <Transcript session={session} transcript={transcript} questions={questions}
           renderSubagents={block => <SubagentSummary key={block.key} sessionId={session.id} call={block.call} tool={transcript.tools[block.call.id]} />}
-          renderAgentReport={block => <AgentReports key={block.key} sessionId={session.id} agents={block.agents} />} />
+          renderAgentReport={block => <AgentReports key={block.key} sessionId={session.id} agents={block.agents} />} />}
         <div className="dock">
           {session.engine === 'cursor'
             // Cursor CLI was removed: its old conversations can still be read, copied and deleted.
@@ -135,18 +137,20 @@ function SessionView({ session }) {
               <ConnectionBanner session={session} />
               <GoalBanner session={session} />
               <UltraBanner session={session} />
-              <Composer session={session} autoFocus placeholder={questions.length ? 'Answer the agent’s question…' : ultraWorking ? 'Add to the task…' : session.streaming ? 'Send to interrupt…' : 'Reply to Pi…'} onSubmit={(text, attachments) => sendPrompt(session.id, text, attachments)} />
-              <ComposerBar session={session} />
+              <ComposerBar session={session} contextOnly />
+              <Composer session={session} autoFocus placeholder={questions.length ? 'Answer the agent’s question…' : ultraWorking ? 'Add to the task…' : session.streaming ? 'Send to interrupt…' : 'Reply to Pi…'} onSubmit={(text, attachments) => sendPrompt(session.id, text, attachments)} footer={<ComposerBar session={session} />} />
             </>}
         </div>
         {terminalOpen && <TerminalPanel session={session} />}
       </div>
-      {filePaneOpen ? <FilePane key={session.id} session={session} /> : rightPanel && <RightPanel session={session} />}
+      {gitReviewOpen ? <GitReview key={session.id} session={session} /> : filePaneOpen ? <FilePane key={session.id} session={session} /> : rightPanel && <RightPanel session={session} />}
     </div>
   );
 }
 
 function Header({ session, view }) {
+  const draft = useStore(s => s.draft);
+  const gitReviewOpen = useStore(s => s.gitReviewOpen);
   const rightPanel = useStore(s => s.rightPanel);
   const filePaneOpen = useStore(s => s.filePaneOpen);
   const terminalOpen = useStore(s => s.terminalOpen);
@@ -157,21 +161,35 @@ function Header({ session, view }) {
   const [title, setTitle] = useState('');
   const local = session?.environmentId === 'local';
   return (
-    <header className={`main-head drag ${sidebar ? '' : 'no-sidebar'}`}>
+    <header className={`main-head drag ${view === 'new' ? 'welcome-head' : ''} ${sidebar ? '' : 'no-sidebar'}`}>
       {!sidebar && <div className="window-tools no-drag"><button className="tool-button" onClick={toggleSidebar} aria-label="Show sidebar"><Icon name="sidebarToggle" size={19} /></button></div>}
-      {view === 'session' && session && session.id !== 'pending' ? <>
+      {view === 'session' && session && !isPendingSession(session.id) ? <>
         {renaming
           ? <input className="title-input no-drag" autoFocus value={title} onChange={e => setTitle(e.target.value)} onBlur={() => { setRenaming(false); if (title.trim()) api('rename', session.id, title.trim()); }} onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); if (e.key === 'Escape') setRenaming(false); }} />
-          : <button ref={anchor} className="title-button no-drag" onClick={() => setMenu(m => !m)}>{session.title}<Icon name="chevronDown" size={16} /></button>}
+          : <div className="header-context">
+              <button ref={anchor} className="title-button no-drag" onClick={() => setMenu(m => !m)} aria-expanded={menu} title={session.title}>
+                <span>{session.title}</span><Icon name="chevronDown" size={12} />
+              </button>
+              <div className="header-location" title={session.cwd}>
+                <Icon name={local ? 'folder' : 'terminal'} size={12} />
+                <span>{session.project || 'No folder'}</span>
+              </div>
+            </div>}
         <Popover anchor={anchor} open={menu} onClose={() => setMenu(false)} width={220} placement="bottom-start">
           <SessionMenuItems session={session} close={() => setMenu(false)} onRename={() => { setTitle(session.title); setRenaming(true); }} />
         </Popover>
         <div className="main-tools no-drag">
-          <button className={`tool-button ${terminalOpen ? 'on' : ''}`} onClick={() => setStore({ terminalOpen: !terminalOpen })} aria-label="Terminal" title="Terminal (⌃`)"><Icon name="terminalPanel" size={18} /></button>
-          <button className={`tool-button ${filePaneOpen ? 'on' : ''}`} onClick={() => setFilePaneOpen(!filePaneOpen)} aria-label="Files" title="Files"><Icon name="folder" size={18} /></button>
-          <button className={`tool-button ${rightPanel && !filePaneOpen ? 'on' : ''}`} onClick={() => { if (filePaneOpen) { setFilePaneOpen(false); if (!rightPanel) toggleRightPanel(); } else toggleRightPanel(); }} aria-label="Session details" title="Session details"><Icon name="panel" size={18} /></button>
+          <button className={`tool-button git-review-toggle ${gitReviewOpen ? 'on' : ''}`} onClick={() => setStore({ gitReviewOpen: !gitReviewOpen, filePaneOpen: false, filePaneMax: false })} aria-label="Review Git changes" aria-pressed={gitReviewOpen} title="Review repository changes"><Icon name="fileDiff" size={18} /><span>Review</span></button>
+          <button className={`tool-button ${terminalOpen ? 'on' : ''}`} onClick={() => setStore({ terminalOpen: !terminalOpen })} aria-label="Terminal" aria-pressed={terminalOpen} title="Terminal (⌃`)"><Icon name="terminalPanel" size={18} /></button>
+          <button className={`tool-button ${filePaneOpen ? 'on' : ''}`} onClick={() => setFilePaneOpen(!filePaneOpen)} aria-label="Files" aria-pressed={filePaneOpen} title="Files"><Icon name="folder" size={18} /></button>
+          <button className={`tool-button ${rightPanel && !filePaneOpen && !gitReviewOpen ? 'on' : ''}`} onClick={() => { if (filePaneOpen || gitReviewOpen) { setStore({ filePaneOpen: false, gitReviewOpen: false, rightPanel: true }); } else toggleRightPanel(); }} aria-label="Session details" aria-pressed={rightPanel && !filePaneOpen && !gitReviewOpen} title="Session details"><Icon name="panel" size={18} /></button>
         </div>
-      </> : null}
+      </> : <div className="header-context">
+        <strong className="header-new">New session</strong>
+        <div className="header-location" title={draft.cwd}>
+          <Icon name="folder" size={12} /><span>{draft.cwd?.split('/').filter(Boolean).at(-1) || 'Pi Desktop'}</span>
+        </div>
+      </div>}
     </header>
   );
 }
@@ -185,7 +203,7 @@ export function App() {
   const paletteOpen = useStore(s => s.paletteOpen);
   const notices = useStore(s => s.notices);
   const sidebar = useStore(s => s.sidebar);
-  const pendingTranscript = useStore(s => s.transcripts.pending);
+  const pendingTranscript = useStore(s => s.transcripts[s.activeId]);
   useEffect(() => { bootstrap().catch(e => notify(e.message, 'error')); }, []);
   useEffect(() => {
     const onKey = e => {
@@ -199,13 +217,13 @@ export function App() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
   if (!ready) return <div className="app loading" />;
-  const pending = activeId === 'pending';
-  const session = sessions.find(s => s.id === activeId) ?? (pending ? { id: 'pending', title: 'New session', status: 'connecting', phase: 'starting', environmentId: 'local', cwd: '', streaming: true } : null);
+  const pending = isPendingSession(activeId);
+  const session = sessions.find(s => s.id === activeId) ?? (pending ? { id: activeId, title: 'New session', status: 'connecting', phase: 'starting', environmentId: 'local', cwd: '', streaming: true } : null);
   const toasts = <div className="toasts">{notices.map(n => <div key={n.id} className={`toast ${n.level}`}><Icon name={n.level === 'error' ? 'alert' : 'check'} size={15} /> <span className="toast-text">{n.message}</span>
     {n.action && <button className="toast-action" onClick={() => { dismissNotice(n.id); n.action.run(); }}>{n.action.label}</button>}</div>)}</div>;
   if (settingsOpen) return <div className="app"><SettingsPage />{toasts}</div>;
   return (
-    <div className="app">
+    <div className="app workspace-app">
       {sidebar && <Sidebar />}
       <main className="main">
         <Header session={session} view={view} />

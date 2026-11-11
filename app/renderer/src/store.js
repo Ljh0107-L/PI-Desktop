@@ -4,6 +4,7 @@ import { backgroundSnapshot } from './background-jobs.js';
 import { relativeSessionPath } from './file-paths.js';
 import { isRetiredProvider, RETIRED_PROVIDER_MESSAGE } from '../../../core/retired-providers.mjs';
 import { modelForEnvironment, modelsForEnvironment } from './model-catalog.js';
+import { readAppearance, applyAppearance } from './appearance.js';
 import { useRef, useSyncExternalStore } from 'react';
 import { applyEvent, emptyTranscript, fromHistory, rewindTo } from './transcript.js';
 import { historyKey, mergeHistory, mergeReloadedHistory } from './history.js';
@@ -26,7 +27,10 @@ export const defaultFolder = (settings, environmentId) => environmentId === 'loc
 
 const listeners = new Set();
 const deleting = new Set(); // Suppress stale session-list events while deletion is being acknowledged.
+let nextPendingId = 0;
+export const isPendingSession = id => typeof id === 'string' && id.startsWith('pending:');
 let state = {
+  appearance: readAppearance(),
   ready: false,
   settings: null, environments: [], sessions: [], catalog: [], catalogError: null,
   activeId: null, view: 'new',             // 'new' | 'session'
@@ -39,11 +43,12 @@ let state = {
   confirm: null,                            // { title, message, action, run }                                // session id -> { objective, status, turns } | null
   files: {},                                // session id -> { tabs: [path], active }
   filePaneOpen: false,
+  gitReviewOpen: false,
   filePaneMax: false,                            // session id -> [question waiting for an answer]
   stats: {},                                // session id -> stats
   envStatus: {},                            // environment id -> { status, message }
   notices: [],
-  rightPanel: true,
+  rightPanel: false,
   subagentSelection: {},                    // session id -> { callId, taskIndex }; changes only on user navigation
   sidebar: true,
   settingsOpen: false, settingsTab: 'providers', addConnectionOpen: false,
@@ -75,6 +80,12 @@ export function useStore(selector) {
   return useSyncExternalStore(subscribe, get);
 }
 export const api = (method, ...args) => window.pidesk.invoke(method, ...args);
+
+export function setAppearance(value) {
+  const appearance = applyAppearance(value);
+  set({ appearance });
+  api('appearance', appearance).catch(() => {});
+}
 
 const transcriptOf = id => state.transcripts[id] ?? emptyTranscript();
 const setTranscript = (id, t) => set(s => ({ transcripts: { ...s.transcripts, [id]: t } }));
@@ -224,7 +235,8 @@ export function prefetchHistory(id) {
 }
 export async function reloadTranscript(id) {
   const seq = (historySeq.get(id) ?? 0) + 1; historySeq.set(id, seq);
-  const baseline = new Set(transcriptOf(id).messages.map(historyKey));
+  const initial = transcriptOf(id);
+  const baseline = new Set(initial.messages.map(historyKey));
   try {
     const page = await api('historyPage', id);
     if (historySeq.get(id) !== seq || deleting.has(id)) return;
@@ -233,8 +245,12 @@ export async function reloadTranscript(id) {
     const pageState = mergeReloadedHistory(page, current);
     if (JSON.stringify(current.history?.next) !== JSON.stringify(pageState.history.next)) historyBuffers.get(id)?.clear();
     const history = fromHistory(mergeHistory(pageState.messages, arrived), timingsOf(id));
-    const active = Object.fromEntries(Object.entries(current.tools).filter(([, tool]) => tool.status === 'running'));
-    setTranscript(id, { ...current, ...history, live: current.live, tools: { ...history.tools, ...active }, history: pageState.history });
+    const updatedTools = Object.fromEntries(Object.entries(current.tools)
+      .filter(([key, tool]) => tool.status === 'running' || initial.tools[key] !== tool));
+    const completed = current.live?.timestamp != null
+      && history.messages.some(message => message.role === 'assistant' && historyKey(message) === historyKey(current.live));
+    setTranscript(id, { ...current, ...history, live: completed ? null : current.live,
+      tools: { ...history.tools, ...updatedTools }, history: pageState.history });
     prefetchHistory(id);
   } catch (error) {
     if (historySeq.get(id) === seq && !deleting.has(id)) setTranscript(id, { ...transcriptOf(id), loaded: true, error: error.message });
@@ -334,7 +350,7 @@ export const setView = patch => set(patch);
 export function openSubagent(id, callId, taskIndex = null) {
   const result = transcriptOf(id).messages.find(m => m.role === 'toolResult' && m.toolCallId === callId && m.__history?.truncated);
   if (result) loadHistoryEntry(id, result.__history.ref).catch(error => notify(error.message, 'error'));
-  set(s => ({ subagentSelection: { ...s.subagentSelection, [id]: { callId, taskIndex } }, rightPanel: true, filePaneOpen: false, filePaneMax: false }));
+  set(s => ({ subagentSelection: { ...s.subagentSelection, [id]: { callId, taskIndex } }, rightPanel: true, filePaneOpen: false, filePaneMax: false, gitReviewOpen: false }));
 }
 // The inspector's controls for an agent running in this session's Pi.
 export function stopAgent(id, agentId) {
@@ -383,7 +399,7 @@ export function clearSubagentRecords(id, onlyIds) {
 export const toggleRightPanel = () => set(s => ({ rightPanel: !s.rightPanel }));
 export const openSettings = (open, tab, { addConnection = false } = {}) => set(s => ({ settingsOpen: open, settingsTab: tab ?? s.settingsTab, addConnectionOpen: addConnection, paletteOpen: false }));
 export const setAddConnectionOpen = open => set({ addConnectionOpen: open });
-export const openPalette = open => set({ paletteOpen: open });
+export const openPalette = (open, tab = 'All') => set({ paletteOpen: open, paletteTab: tab });
 export const toggleSidebar = () => set(s => ({ sidebar: !s.sidebar }));
 const here = () => ({ view: state.view, activeId: state.activeId });
 function navigate(target) {
@@ -456,17 +472,22 @@ export async function startSession(text, attachments = []) {
   const { draft } = state;
   if (!draft.model) throw new Error('Choose a model in Settings → Models first.');
   if (isRetiredProvider(draft.model.provider)) throw new Error(RETIRED_PROVIDER_MESSAGE);
-  const pendingId = 'pending';
+  const pendingId = `pending:${++nextPendingId}`;
   set({ view: 'session', activeId: pendingId, transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: [{ role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] } } });
   try {
     const session = await api('createSession', { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel, speed: draft.speed, ultra: draft.ultra, prompt: text });
-    if (draft.ultra) setDraft({ ultra: false }); // each conversation turns Ultra on for itself
-    set(s => ({ activeId: session.id, transcripts: { ...s.transcripts, [session.id]: { ...emptyTranscript(), loaded: true }, [pendingId]: undefined }, sessions: s.sessions.some(x => x.id === session.id) ? s.sessions : [session, ...s.sessions] }));
+    set(s => ({ ...(s.activeId === pendingId ? { activeId: session.id } : {}),
+      ...(draft.ultra && s.draft === draft ? { draft: { ...draft, ultra: false } } : {}),
+      transcripts: { ...s.transcripts, [session.id]: s.transcripts[session.id] ?? { ...emptyTranscript(), loaded: true }, [pendingId]: undefined },
+      history: s.history.map(v => v.activeId === pendingId ? { ...v, activeId: session.id } : v),
+      future: s.future.map(v => v.activeId === pendingId ? { ...v, activeId: session.id } : v),
+      sessions: s.sessions.some(x => x.id === session.id) ? s.sessions : [session, ...s.sessions] }));
     warnIfNoImages(draft.model, attachments);
     await api('prompt', session.id, text, attachments);
-    api('updateDefaults', { environmentId: draft.environmentId, model: draft.model, thinkingLevel: draft.thinkingLevel, speed: draft.speed }).then(setSettings);
+    api('updateDefaults', { environmentId: draft.environmentId, model: draft.model, thinkingLevel: draft.thinkingLevel, speed: draft.speed }).then(setSettings).catch(() => {});
   } catch (error) {
-    set({ view: 'new', activeId: null });
+    set(s => ({ ...(s.activeId === pendingId ? { view: 'new', activeId: null } : {}), transcripts: { ...s.transcripts, [pendingId]: undefined },
+      history: s.history.filter(v => v.activeId !== pendingId), future: s.future.filter(v => v.activeId !== pendingId) }));
     throw error;
   }
 }
@@ -521,6 +542,7 @@ export async function deleteSession(id) {
   const removed = state.sessions.find(s => s.id === id);
   const index = state.sessions.findIndex(s => s.id === id);
   deleting.add(id);
+  historySeq.set(id, (historySeq.get(id) ?? 0) + 1);
   historyBuffers.get(id)?.clear(); historyBuffers.delete(id);
   // The click takes effect immediately; SSH/process cleanup must not hold the interface hostage.
   set(s => ({ sessions: s.sessions.filter(x => x.id !== id) }));
@@ -562,7 +584,7 @@ export function openFile(id, path) {
   set(s => {
     const cur = s.files[id] ?? { tabs: [], active: null };
     const tabs = cur.tabs.includes(rel) ? cur.tabs : [...cur.tabs, rel].slice(-8);
-    return { files: { ...s.files, [id]: { tabs, active: rel, changes: null } }, filePaneOpen: true };
+    return { files: { ...s.files, [id]: { tabs, active: rel, changes: null } }, filePaneOpen: true, gitReviewOpen: false };
   });
 }
 export function closeFile(id, path) {
@@ -573,10 +595,10 @@ export function closeFile(id, path) {
     return { files: { ...s.files, [id]: { ...cur, tabs, active } } };
   });
 }
-export const setFilePaneOpen = open => set({ filePaneOpen: open });
+export const setFilePaneOpen = open => set({ filePaneOpen: open, ...(open ? { gitReviewOpen: false } : {}) });
 // Open the change review for one turn in the file pane.
 export function openChanges(id, changes) {
-  set(s => ({ files: { ...s.files, [id]: { ...(s.files[id] ?? { tabs: [] }), active: null, changes } }, filePaneOpen: true }));
+  set(s => ({ files: { ...s.files, [id]: { ...(s.files[id] ?? { tabs: [] }), active: null, changes } }, filePaneOpen: true, gitReviewOpen: false }));
 }
 export { set };
 

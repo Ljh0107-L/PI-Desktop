@@ -147,6 +147,7 @@ function ChangesView({ sessionId, changes }) {
   return (
     <div className="fp-preview">
       <div className="fp-content changes">
+        <div className="git-review-scope">Tool edit records for this turn. For the current repository diff, <button onClick={() => setStore({ gitReviewOpen: true, filePaneOpen: false, filePaneMax: false })}>open Git review</button>.</div>
         {changes.map(change => {
           const { added, removed } = changeStats(change);
           return (

@@ -2,6 +2,12 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.14 — Workspace layout and Git review
+
+- **Workspace.** A clearer project sidebar, aligned conversation and composer, and light and dark appearances. The composer groups attachment, model, response options, and send controls at the bottom. SSH connections are managed in Settings, and Ultra, reasoning, and speed are available under Response options.
+- **Git review.** Inspect staged, unstaged, and untracked changes in the conversation's repository. Review diffs, send line feedback to Pi, stage or unstage files, discard confirmed changes, and commit staged files.
+- **Session reliability.** Opening another conversation while a session starts keeps the new selection. History refreshes retain messages and tool updates arriving concurrently. Ultra keeps working when you add an instruction and reports Needs attention after three unsuccessful reviews, with findings and an option to resume.
+
 ## 0.2.13 — A quieter background tasks card
 
 - **Consistent sidebar layout.** Background tasks now use the same spacing and visual hierarchy as Usage and Subagents. The running count sits below the header instead of crowding its right edge. Task names, elapsed time and Details / Stop controls have separate space; expanded commands and output share one bounded panel.

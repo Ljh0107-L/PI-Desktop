@@ -1,8 +1,8 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
-import { EffortTrigger, MenuItem, MenuSection, Modal, SpeedTrigger, Spinner, Trigger, baseName, envIcon, shortPath } from './ui.jsx';
+import { EffortTrigger, MenuItem, MenuSection, Modal, Spinner, Trigger, baseName, envIcon, shortPath } from './ui.jsx';
 import { effectiveSpeed } from '../../../agent/pidesk-speed.mjs';
-import { api, captureComposerDraft, clearQueued, defaultFolder, getState, notify, openSettings, recoverComposerDraft, restoreComposerDraft, setComposerDraft, setDraft, setEnvironments, takeComposerDraft, useStore } from './store.js';
+import { api, captureComposerDraft, clearQueued, defaultFolder, getState, notify, openSettings, recoverComposerDraft, restoreComposerDraft, setComposerDraft, setDraft, setEnvironments, set as setStore, takeComposerDraft, useStore } from './store.js';
 import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerDraft as takeDraft, restoreComposerDraft as restoreDraft, recoverComposerDraft as recoverDraft } from './composer-draft.js';
 import { createComposerSizer } from './composer-size.js';
 import { cachedDir, listDir, prefetchDir } from './dirs.js';
@@ -267,7 +267,7 @@ function SlashMenu({ items, index, onPick }) {
   );
 }
 
-export function Composer({ session, onSubmit, autoFocus, placeholder, initialText = '', onCancel, compact }) {
+export function Composer({ session, onSubmit, autoFocus, placeholder, initialText = '', onCancel, compact, footer }) {
   // History editors are ephemeral; the main composer survives remounts/settings/navigation.
   const draftKey = session?.id ?? 'new';
   const savedDraft = useStore(s => s.composerDrafts[draftKey]);
@@ -288,6 +288,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   const [slashIndex, setSlashIndex] = useState(0);
   const [pi, setPi] = useState([]);
   const ref = useRef(null);
+  const fileInput = useRef(null);
   const streaming = session?.streaming;
   const size = useRef(null);
   useEffect(() => { if (autoFocus) ref.current?.focus({ preventScroll: true }); }, [autoFocus, session?.id]);
@@ -341,8 +342,12 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
     const el = ref.current;
     if (el && pendingCaret.current != null) { el.selectionStart = el.selectionEnd = pendingCaret.current; pendingCaret.current = null; }
   }, [text]);
+  const attachmentControl = <button type="button" className="composer-plus" aria-label="Add attachment" title="Add files or images" onClick={() => fileInput.current?.click()}><Icon name="plus" size={20} /></button>;
+  const sendControl = streaming && !canSend && !onCancel
+    ? <button className="send-button stop" onClick={() => { clearQueued(session.id); api('abort', session.id); }} aria-label="Stop" title="Stop"><Icon name="stop" size={22} /></button>
+    : <button className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={submit} aria-label="Send" title="Send (Enter)"><Icon name="arrowUp" size={17} stroke={2.4} /></button>;
   return (
-    <div className={`composer ${dragging ? 'dragging' : ''} ${attachments.length ? 'has-attachments' : ''} ${compact ? 'compact' : ''}`}
+    <div className={`composer ${footer ? 'with-toolbar' : ''} ${dragging ? 'dragging' : ''} ${attachments.length ? 'has-attachments' : ''} ${compact ? 'compact' : ''}`}
       onClick={e => { if (e.target === e.currentTarget) ref.current?.focus(); }}
       onDragOver={e => { if (e.dataTransfer.types.includes('Files')) { e.preventDefault(); setDragging(true); } }}
       onDragLeave={e => { if (!e.currentTarget.contains(e.relatedTarget)) setDragging(false); }}
@@ -364,6 +369,8 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
         </div>
       )}
       <div className="composer-row">
+        <input ref={fileInput} type="file" multiple hidden aria-label="Attach files" onChange={e => { add([...e.target.files]); e.target.value = ''; }} />
+        {!footer && attachmentControl}
         <textarea ref={ref} rows={1} value={text} placeholder={placeholder} aria-label="Message"
           onChange={e => {
             const indented = autoIndent(text, e.target.value, e.target.selectionStart);
@@ -387,10 +394,9 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
             if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); submit(); }
           }} />
         {onCancel && <button type="button" className="button ghost small" onClick={onCancel}>Cancel</button>}
-        {streaming && !canSend && !onCancel
-          ? <button className="send-button stop" onClick={() => { clearQueued(session.id); api('abort', session.id); }} aria-label="Stop" title="Stop"><Icon name="stop" size={22} /></button>
-          : <button className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={submit} aria-label="Send"><Icon name="arrowUp" size={17} stroke={2.4} /></button>}
+        {!footer && sendControl}
       </div>
+      {footer && <div className="composer-toolbar">{attachmentControl}{footer}{sendControl}</div>}
     </div>
   );
 }
@@ -403,7 +409,15 @@ const shortError = (message = '', label) => /disk .* is full/i.test(message) ? `
 const SPEED_LABELS = { standard: 'Standard', fast: 'Fast', ultrafast: 'Ultrafast' };
 
 // The row under the composer: environment + folder on the left (new sessions), model / speed / effort on the right.
-export function ComposerBar({ session }) {
+export function ComposerBar({ session, contextOnly = false }) {
+  const [branch, setBranch] = useState('');
+  useEffect(() => {
+    if (!contextOnly || !session?.id) return;
+    let alive = true;
+    const refresh = () => api('gitBranch', session.id).then(value => { if (alive) setBranch(value || ''); }).catch(() => {});
+    refresh(); window.addEventListener('focus', refresh);
+    return () => { alive = false; window.removeEventListener('focus', refresh); };
+  }, [contextOnly, session?.id, session?.cwd]);
   const draft = useStore(s => s.draft);
   const catalog = useStore(s => s.catalog);
   const environments = useStore(s => s.environments);
@@ -432,14 +446,12 @@ export function ComposerBar({ session }) {
   const toggleUltra = () => isNew ? setDraft({ ultra: !ultraOn }) : api('setUltra', session.id, !ultraOn).catch(e => notify(e.message, 'error'));
   const speeds = modelInfo?.speeds ?? [];
 
-  return (
-    <div className="composer-bar">
-      <div className="composer-bar-left">
+  if (contextOnly) return <div className="workspace-context">
         {isNew && <>
-          <Trigger className="env-trigger" width={330} placement="top-start" label="Environment" menu={close => <EnvironmentMenu value={environmentId} onChange={changeEnv} close={close} />}>
-            <Icon name={envIcon(env)} size={16} /><span>{env.label}</span>
+          <Trigger className="env-trigger" title={env.label} width={330} placement="top-start" label="Environment" menu={close => <EnvironmentMenu value={environmentId} onChange={changeEnv} close={close} />}>
+            <Icon name={envIcon(env)} size={16} /><span>{env.kind === 'local' ? 'Local' : env.label}</span>
           </Trigger>
-          <Trigger className="folder-trigger" width={300} placement="top-start" label="Folder" title={cwd ? shortPath(cwd, home) : undefined}
+          <Trigger className="folder-trigger" width={300} placement="top-start" label="Folder" title={cwd ? shortPath(cwd, home) : 'No folder'}
             menu={close => <FolderMenu environmentId={environmentId} value={cwd} onChange={path => setDraft({ cwd: path })} close={close} onBrowse={() => setBrowsing(true)} />}>
             <Icon name={cwd ? 'folder' : 'chat'} size={16} /><span>{cwd ? baseName(cwd) : 'No folder'}</span>
           </Trigger>
@@ -447,19 +459,31 @@ export function ComposerBar({ session }) {
           {prep?.status === 'error' && <button type="button" className="bar-status error" title={prep.message} onClick={() => api('prepareEnvironment', environmentId, true)}>
             <Icon name="alert" size={14} /> <span>{shortError(prep.message, env.label)}</span> <span className="bar-retry">Retry</span></button>}
         </>}
-      </div>
+    {!isNew && <>
+      {env.kind !== 'local' && <span className="workspace-chip" title={env.label}><Icon name={envIcon(env)} size={13} />{env.label}</span>}
+      {branch && <button className="workspace-chip" onClick={() => setStore({ gitReviewOpen: true, filePaneOpen: false })} title="Review repository changes"><Icon name="branch" size={13} />{branch}</button>}
+    </>}
+    {browsing && <RemoteBrowser environmentId={environmentId} start={cwd ?? undefined} onPick={path => setDraft({ cwd: path })} onClose={() => setBrowsing(false)} />}
+  </div>;
+
+  return (
+    <div className="composer-bar">
       <div className="composer-bar-right">
-        <button type="button" className={`trigger ultra-trigger ${ultraOn ? 'on' : ''}`} aria-pressed={ultraOn} onClick={toggleUltra}
-          title={ultraOn ? 'Ultra is on: Pi works on each request on its own until it is done' : 'Ultra: hand Pi a request and let it work on its own until it is done'}>
-          <Icon name="infinity" size={16} /><span>Ultra</span>
-        </button>
         {catalog.length || model
           ? <Trigger width={320} label="Model" title={modelTitle} className="model-trigger" menu={close => <ModelMenu value={model} environmentId={environmentId} onChange={changeModel} close={close} />}>
               <span className="strong">{modelLabel(model, catalog)}</span>
             </Trigger>
           : <button type="button" className="trigger attention" onClick={() => openSettings(true, 'providers')}><Icon name="key" size={15} /><span>Add a model</span></button>}
-        {speeds.length > 1 && <SpeedTrigger speeds={speeds.map(value => ({ value, label: SPEED_LABELS[value] }))} value={effectiveSpeed(speed, speeds)} onChange={changeSpeed} />}
-        {modelInfo?.reasoning !== false && <EffortTrigger levels={effortsFor(modelInfo).map(level => ({ value: level, label: effortLabel(level) }))} value={effort} onChange={changeEffort} />}
+        <Trigger label="Response options" title="Response options" width={280} className="response-options-trigger" menu={() => <div className="response-options">
+          {modelInfo?.reasoning !== false && <div className="response-option"><span>Reasoning</span><EffortTrigger levels={effortsFor(modelInfo).map(level => ({ value: level, label: effortLabel(level) }))} value={effort} onChange={changeEffort} /></div>}
+          {speeds.length > 1 && <div className="response-option"><span>Speed</span><Trigger label="Speed" width={200} menu={close => <MenuSection title="Speed">{speeds.map(value => <MenuItem key={value} label={SPEED_LABELS[value]} checked={effectiveSpeed(speed, speeds) === value} onClick={() => { changeSpeed(value); close(); }} />)}</MenuSection>}><span>{SPEED_LABELS[effectiveSpeed(speed, speeds)]}</span><Icon name="chevronDown" size={13} /></Trigger></div>}
+          <button type="button" className={`response-option ultra-trigger ${ultraOn ? 'on' : ''}`} aria-label="Ultra mode" aria-pressed={ultraOn} onClick={toggleUltra} title="Keep working until the task is done"><span><Icon name="infinity" size={15} /> Ultra mode</span><span className={`switch ${ultraOn ? 'on' : ''}`} aria-hidden="true"><span /></span></button>
+        </div>}>
+          {ultraOn && <span className="option-active">Ultra</span>}
+          {modelInfo?.reasoning !== false && effort && effort !== 'medium' && <span>{effortLabel(effort)}</span>}
+          {speeds.length > 1 && effectiveSpeed(speed, speeds) !== 'standard' && <span>{SPEED_LABELS[effectiveSpeed(speed, speeds)]}</span>}
+          <Icon name="settings" size={14} />
+        </Trigger>
       </div>
       {browsing && <RemoteBrowser environmentId={environmentId} start={cwd ?? undefined} onPick={path => setDraft({ cwd: path })} onClose={() => setBrowsing(false)} />}
     </div>

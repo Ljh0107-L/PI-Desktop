@@ -2,7 +2,8 @@ import { useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { MenuItem, Popover, Spinner, useResizable } from './ui.jsx';
 import { groupSessions } from './session-groups.js';
-import { api, askConfirm, deleteSession, forkSession, goBack, goForward, newSession, notify, openSession, openSettings, toggleSidebar, useStore, warmSession } from './store.js';
+import { setAppearance } from './store.js';
+import { api, askConfirm, deleteSession, forkSession, goBack, goForward, newSession, notify, openPalette, openSession, openSettings, toggleSidebar, useStore, warmSession } from './store.js';
 
 export function SessionMenuItems({ session, close, onRename }) {
   const active = useStore(s => s.activeId === session.id);
@@ -56,10 +57,9 @@ function Group({ group, activeId, view }) {
   return (
     <section className="session-group">
       <button className="group-head" onClick={() => setOpen(o => !o)} aria-expanded={open} title={group.noFolder ? 'Conversations without a project folder' : group.cwd}>
+        <Icon name={group.noFolder ? 'chat' : 'folder'} size={14} className="project-icon" />
         <span className="group-name">{group.project}</span>
-        <span className="group-sep">·</span>
-        <span className="group-env">{group.env}</span>
-        <Icon name={group.remote ? 'terminal' : 'laptop'} size={16} className="group-icon" />
+        {group.remote && <span className="group-env" title={group.env}><Icon name="terminal" size={11} />{group.env}</span>}
         <Icon name={open ? 'caretDown' : 'caretRight'} size={13} className="group-caret" />
       </button>
       {open && group.items.map(s => <SessionRow key={s.id} session={s} active={view === 'session' && activeId === s.id} />)}
@@ -68,6 +68,13 @@ function Group({ group, activeId, view }) {
 }
 
 export function Sidebar() {
+  // The project-first layout replaces the experimental flat-list preference.
+  const [grouped, setGrouped] = useState(() => { try { return localStorage.getItem('pidesk.sidebar.view') !== 'recents'; } catch { return true; } });
+  const changeView = projects => {
+    setGrouped(projects);
+    try { localStorage.setItem('pidesk.sidebar.view', projects ? 'projects' : 'recents'); } catch {}
+  };
+  const appearance = useStore(s => s.appearance);
   const update = useStore(s => s.update);
   const sessions = useStore(s => s.sessions);
   const activeId = useStore(s => s.activeId);
@@ -75,7 +82,7 @@ export function Sidebar() {
   const canBack = useStore(s => s.history.length > 0);
   const canForward = useStore(s => s.future.length > 0);
   const groups = useMemo(() => groupSessions(sessions), [sessions]);
-  const [sidebarWidth, sidebarHandle] = useResizable('sidebar', 284, 220, 480, 'right');
+  const [sidebarWidth, sidebarHandle] = useResizable('sidebar', 260, 220, 380, 'right');
   return (
     <aside className="sidebar" style={{ width: sidebarWidth }}>
       {sidebarHandle}
@@ -84,16 +91,23 @@ export function Sidebar() {
           <button className="tool-button" onClick={toggleSidebar} aria-label="Hide sidebar" title="Hide sidebar"><Icon name="sidebarToggle" size={19} /></button>
           <button className="tool-button" onClick={goBack} disabled={!canBack} aria-label="Back"><Icon name="back" size={19} /></button>
           <button className="tool-button" onClick={goForward} disabled={!canForward} aria-label="Forward"><Icon name="forward" size={19} /></button>
+          <button className="tool-button" onClick={() => openPalette(true)} aria-label="Search" title="Search (⌘K)"><Icon name="search" size={15} /></button>
+          <button className="tool-button" onClick={() => openPalette(true, 'Projects')} aria-label="Projects" title="Projects"><Icon name="listTree" size={15} /></button>
         </div>
       </div>
       <nav className="sidebar-nav">
-        <button className={`nav-item new ${view === 'new' ? 'active' : ''}`} onClick={newSession} title="New session (⌘N)"><Icon name="plus" size={18} /> New</button>
+        <button className="nav-item new" onClick={newSession} aria-label="New" title="New session (⌘N)"><Icon name="plus" size={14} /><span>New session</span><span className="nav-shortcut">⌘N</span></button>
       </nav>
+      <div className="sidebar-view-switch" role="group" aria-label="Conversation organization">
+        <button aria-label="Group conversations by project" aria-pressed={grouped} onClick={() => changeView(true)}>Projects</button>
+        <button aria-label="Show recent conversations" aria-pressed={!grouped} onClick={() => changeView(false)}>Recents</button>
+      </div>
       <div className="sidebar-sessions">
-        {groups.map(group => <Group key={group.key} group={group} activeId={activeId} view={view} />)}
+        {grouped ? groups.map(group => <Group key={group.key} group={group} activeId={activeId} view={view} />) : sessions.map(session => <SessionRow key={session.id} session={session} active={view === 'session' && activeId === session.id} />)}
       </div>
       <div className="sidebar-foot">
-        <button className="nav-item settings-button" onClick={() => openSettings(true)} title="Settings (⌘,)"><Icon name="settings" size={17} /> Settings</button>
+        <button className="nav-item settings-button" onClick={() => openSettings(true)} aria-label="Settings" title="Settings (⌘,)"><span className="workspace-avatar" aria-hidden="true">π</span><span>Pi Desktop</span><Icon name="chevronDown" size={13} /></button>
+        <button className="tool-button appearance-toggle" onClick={() => setAppearance(appearance === 'dark' ? 'light' : 'dark')} aria-label={`Switch to ${appearance === 'dark' ? 'light' : 'dark'} theme`} title={`${appearance === 'dark' ? 'Light' : 'Dark'} appearance`}><Icon name={appearance === 'dark' ? 'sun' : 'moon'} size={18} /></button>
         {update?.state === 'downloading' && <div className="update-button downloading" role="progressbar" aria-valuenow={Math.round((update.progress ?? 0) * 100)} title={`Downloading ${update.version}`}>
           <span className="update-fill" style={{ width: `${Math.max(4, Math.round((update.progress ?? 0) * 100))}%` }} />
           <span className="update-label">{Math.round((update.progress ?? 0) * 100)}%</span>

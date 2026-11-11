@@ -11,7 +11,8 @@ export function Palette() {
   const environments = useStore(s => s.environments);
   const recentFolders = useStore(s => s.settings?.recentFolders ?? {});
   const [query, setQuery] = useState('');
-  const [tab, setTab] = useState(0);
+  const initialTab = useStore(s => s.paletteTab);
+  const [tab, setTab] = useState(() => Math.max(0, TABS.indexOf(initialTab)));
   const [index, setIndex] = useState(0);
   const input = useRef(null);
   const list = useRef(null);

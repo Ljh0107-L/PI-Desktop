@@ -818,7 +818,7 @@ export class SessionManager extends EventEmitter {
     // The renderer can be a moment behind Pi. If the prompt was queued instead of starting a fresh
     // turn, abort the run that accepted it and send it again; otherwise a stale flag brings back the
     // old "new message waits for the current reply" behaviour.
-    if (interrupt && !interrupted && sent?.disposition === 'queued') {
+    if (interrupt && !interrupted && runtime?.ultra?.task?.status !== 'active' && sent?.disposition === 'queued') {
       ({ session, runtime } = await this.#interruptForPrompt(id, session, runtime));
       interrupted = true;
       sent = await send(session);

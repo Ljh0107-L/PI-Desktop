@@ -161,22 +161,36 @@ test('finishing takes an audit in a later turn, then an independent review; gaps
   assert.equal(h.run(h.talk), false, 'a finished task starts nothing');
 });
 
-test('after the last review the task finishes with what is still open', async () => {
-  const h = harness({ review: async () => ({ verdict: 'gaps', text: '- the report has no plots' }) });
+test('failed reviews need attention, preserve gaps and can resume to a passing review', async () => {
+  let verdict = 'gaps';
+  const h = harness({ review: async () => ({ verdict, text: '- the report has no plots' }) });
   h.ultra.onInput('Write the report');
   await h.ultra.finish({ summary: 'Report written' });
   h.run(h.withTools);
   for (let i = 1; i < MAX_REVIEWS; i++) assert.match((await h.ultra.finish({ summary: 'Report written' })).text, /found gaps/);
   const last = await h.ultra.finish({ summary: 'Report written' });
   assert.match(last.text, /still finds gaps/);
+  assert.equal(h.ultra.task.status, 'needs_attention');
+  assert.equal(h.ultra.task.finishedAt, undefined);
+  assert.match(h.ultra.snapshot().task.review.text, /report has no plots/);
+  assert.equal(h.run(h.talk), false, 'no automatic continuation after the review limit');
+  assert.equal(h.ultra.resume(), true);
+  assert.equal(h.ultra.task.status, 'active');
+  assert.equal(h.ultra.task.reviews, 0);
+  assert.match(h.sent.at(-1).message.content, /report has no plots/);
+  verdict = 'pass';
+  await h.ultra.finish({ summary: 'Plots added and verified' });
   assert.equal(h.ultra.task.status, 'complete');
-  assert.match(h.ultra.task.summary, /Still open after 3 reviews:\n- the report has no plots/);
+  assert.equal(h.ultra.task.summary, 'Plots added and verified');
   // A review that can't run doesn't hide that: it is retried, and counted.
   const broken = harness({ review: async () => { throw new Error('no model'); } });
   broken.ultra.onInput('x');
   await broken.ultra.finish({});
   broken.run(broken.withTools);
-  assert.match((await broken.ultra.finish({})).text, /couldn't run \(no model\)/);
+  for (let i = 0; i < MAX_REVIEWS; i++) assert.match((await broken.ultra.finish({})).text, /couldn't run \(no model\)/);
+  assert.equal(broken.ultra.task.status, 'needs_attention');
+  assert.equal(broken.ultra.snapshot().task.review.verdict, 'error');
+  assert.equal(broken.ultra.task.finishedAt, undefined);
 });
 
 test('Stop pauses the task, Ultra off stops continuing, and both can be undone', () => {

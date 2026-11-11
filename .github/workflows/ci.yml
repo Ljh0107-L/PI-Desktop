@@ -78,6 +78,14 @@ jobs:
           node test/history-ui.mjs
           R3=$?
           exit $(( R1 || R2 || R3 ))
+      - name: Git review renderer with real repository fixtures
+        run: |
+          npx playwright-core install chromium
+          node test/git-review-ui.mjs
+          PIDESK_UI_THEME=dark node test/git-review-ui.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: git-review-screenshots, path: /tmp/pi-desktop-review-ui, if-no-files-found: ignore }
       - uses: actions/upload-artifact@v4
         if: always()
         with: { name: e2e-screenshots, path: /tmp/pidesk-e2e/shots, if-no-files-found: ignore }

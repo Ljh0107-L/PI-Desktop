@@ -77,7 +77,7 @@ export function Trigger({ children, menu, width = 300, placement = 'top-end', cl
   const anchor = useRef(null);
   const [open, setOpen] = useState(false);
   return <>
-    <button ref={anchor} type="button" className={`trigger ${open ? 'active' : ''} ${className}`} onClick={() => setOpen(o => !o)} title={title} aria-label={label} disabled={disabled}>{children}</button>
+    <button ref={anchor} type="button" className={`trigger ${open ? 'active' : ''} ${className}`} onClick={() => setOpen(o => !o)} title={title} aria-label={label} aria-expanded={open && !disabled} disabled={disabled}>{children}</button>
     <Popover anchor={anchor} open={open && !disabled} onClose={() => setOpen(false)} width={width} placement={placement}>{menu(() => setOpen(false))}</Popover>
   </>;
 }

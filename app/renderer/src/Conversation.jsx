@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useLayoutEffect, use
 import { Icon } from './Icons.jsx';
 import { Markdown, Spinner } from './ui.jsx';
 import { changesOf, displayBlocks, formatTokens, isAbortText, retainWorkKeys, toolSummary, ultraProgress } from './transcript.js';
-import { api, editMessage, loadEarlierHistory, loadHistoryEntry, notify, openChanges, openFile } from './store.js';
+import { api, editMessage, isPendingSession, loadEarlierHistory, loadHistoryEntry, notify, openChanges, openFile } from './store.js';
 import { VirtualHistory } from './VirtualHistory.jsx';
 import { historyBookmark, restoreHistoryBookmark } from './history-scroll.js';
 import { ImagePreview } from './ImagePreview.jsx';
@@ -596,7 +596,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             case 'orphanResult': return <ToolCall key={block.key} call={{ id: block.message.toolCallId, name: block.message.toolName ?? 'tool', arguments: { description: 'Command result' } }} tool={transcript.tools[block.message.toolCallId]} />;
             case 'pendingHistory': return null;
             case 'image': return <ImagePreview key={block.key} src={`data:${block.image.mimeType};base64,${block.image.data}`} alt="Assistant image" />;
-            case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!block.truncated && (!transcript.history || !!block.entryId) && !readOnly && session?.engine !== 'cursor' && !!session && session.id !== 'pending' && session.status === 'connected' && !session.streaming && !block.text.startsWith('/')} />;
+            case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!block.truncated && (!transcript.history || !!block.entryId) && !readOnly && session?.engine !== 'cursor' && !!session && !isPendingSession(session.id) && session.status === 'connected' && !session.streaming && !block.text.startsWith('/')} />;
             case 'goal': return <GoalMarker key={block.key} objective={block.objective} />;
             case 'text': return <Markdown key={block.key} text={block.text} streaming={block.streaming} sessionId={session?.id} documentPath="" />;
             case 'usage': return <TurnFooter key={block.key} text={block.text} changes={readOnly ? [] : block.changes} sessionId={session?.id} last={block === lastUsage} />;
