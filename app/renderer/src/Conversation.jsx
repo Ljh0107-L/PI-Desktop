@@ -113,14 +113,14 @@ function ToolCall({ call, tool }) {
   const openTarget = path => onOpenFile ? onOpenFile(path) : window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: path }));
   return (
     <div className={`step tool-call ${status} ${open ? 'open' : ''}`} data-tool-id={call.id}>
-      <div className="step-head tool-call-head" role="button" tabIndex={0} aria-expanded={open} onClick={() => setOpen(o => !o)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
+      <div className="step-head tool-call-head" role="button" tabIndex={0} aria-expanded={open}
+        onClick={e => { if ((e.metaKey || e.ctrlKey) && filePath) { openTarget(filePath); return; } setOpen(o => !o); }}
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
         {status === 'running' && <Spinner size={12} />}
         <FadeText className="step-text" title={title ?? filePath ?? undefined}>
           {verb && <span className="step-verb">{verb}</span>}
           {filePath ? (
-            <span className="step-subject file-ref-inline" data-kind={fileBadgeKind(filePath)}
-              onClick={e => { e.stopPropagation(); openTarget(filePath); }}
-              title={`Open ${filePath}`}>{subject}</span>
+            <span className="step-subject file-ref-inline" data-kind={fileBadgeKind(filePath)}>{subject}</span>
           ) : (
             <span className={`step-subject ${mono ? 'mono' : ''}`}>{subject}</span>
           )}
@@ -236,28 +236,39 @@ function WorkGroup({ items, tools, live }) {
   const openTarget = path => onOpenFile ? onOpenFile(path) : window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: path }));
   return (
     <div className={`tool-group work ${open ? 'open' : ''}`}>
-      <div className="tool-group-head" role="button" tabIndex={0} aria-expanded={open} onClick={() => setOpen(o => !o)} onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
+      <div className="tool-group-head" role="button" tabIndex={0} aria-expanded={open}
+        onClick={e => { if ((e.metaKey || e.ctrlKey) && onlyFile) { openTarget(onlyFile); return; } setOpen(o => !o); }}
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setOpen(o => !o); } }}>
         {running && <Spinner size={12} />}
         <FadeText className={`group-summary ${thinkingNow ? 'shimmer' : ''}`}>
           {thinkingNow ? (firstLine(latest.text) || 'Thinking')
             : onlyFile && only?.verb ? <>
                 <span>{only.verb} </span>
-                <span className="file-ref-inline" data-kind={fileBadgeKind(onlyFile)} title={`Open ${onlyFile}`}
-                  onClick={e => { e.stopPropagation(); openTarget(onlyFile); }}>{only.subject}</span>
+                <span className="file-ref-inline" data-kind={fileBadgeKind(onlyFile)}>{only.subject}</span>
               </>
             : (summary || 'Working')}
         </FadeText>
         {failed > 0 && <span className="group-failed">({failed} failed)</span>}
         {(edits.added > 0 || edits.removed > 0) && (
-          <span className={`group-diff-stats ${sessionId && groupChanges.length ? 'clickable' : ''}`}
-            title={sessionId && groupChanges.length ? 'View changes' : undefined}
-            onClick={sessionId && groupChanges.length ? e => { e.stopPropagation(); openChanges(sessionId, groupChanges); } : undefined}>
+          <span className="group-diff-stats">
             {edits.added > 0 && <span className="plus">+{edits.added}</span>}
             {edits.removed > 0 && <span className="minus">−{edits.removed}</span>}
           </span>
         )}
         <Caret open={open} />
       </div>
+      {onlyFile && sessionId && (
+        <button type="button" className="work-quick-open" onClick={() => openTarget(onlyFile)}
+          title={`Open ${onlyFile}`} aria-label={`Open ${only?.subject ?? onlyFile}`}>
+          <Icon name="arrowUpRight" size={12} />
+        </button>
+      )}
+      {!onlyFile && sessionId && groupChanges.length > 0 && (
+        <button type="button" className="work-quick-open" onClick={() => openChanges(sessionId, groupChanges)}
+          title="View changes" aria-label="View changes">
+          <Icon name="fileDiff" size={12} />
+        </button>
+      )}
       {open && <div className="work-body">
         {items.flatMap(item => item.kind === 'tools'
           ? item.calls.map(call => <ToolCall key={call.id} call={call} tool={tools[call.id]} />)

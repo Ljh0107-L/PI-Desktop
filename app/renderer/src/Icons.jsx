@@ -1,6 +1,6 @@
 // Icons: Lucide line icons, plus custom glyphs for filled stop square and file-type badges.
 import {
-  Activity, Archive, ArrowDown, ArrowLeft, ArrowUp, Atom, BookOpen, Braces, Brain, BriefcaseBusiness,
+  Activity, Archive, ArrowDown, ArrowLeft, ArrowUp, ArrowUpRight, Atom, BookOpen, Braces, Brain, BriefcaseBusiness,
   Check, ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Clock, Code, Copy, CornerDownLeft, Database,
   Download, Ellipsis, ExternalLink, File, FileCode, FileDiff, FileImage, FilePen, FileText, FoldVertical,
   Folder, FolderOpen, GitBranch, GitFork, Globe, Gauge, KeyRound, Laptop, Layers, ListChecks, ListTree,
@@ -14,7 +14,7 @@ const LUCIDE = {
   sun: Sun, moon: Moon, book: BookOpen, customize: BriefcaseBusiness,
   plus: Plus, search: Search, settings: Settings, terminal: SquareTerminal, laptop: Laptop, folder: Folder, folderOpen: FolderOpen,
   chevronDown: ChevronDown, chevronRight: ChevronRight, chevronUp: ChevronUp, caretDown: ChevronDown, caretRight: ChevronRight,
-  check: Check, arrowUp: ArrowUp, panel: PanelRight,
+  check: Check, arrowUp: ArrowUp, arrowUpRight: ArrowUpRight, panel: PanelRight,
   sidebar: PanelLeft, sidebarToggle: PanelLeft, sparkle: Sparkles, shield: ShieldCheck, shieldAlert: ShieldAlert,
   file: StickyNote, fileEdit: FilePen, x: X, alert: TriangleAlert, brain: Brain, refresh: RefreshCw, server: Server,
   key: KeyRound, trash: Trash2, edit: Pencil, globe: Globe, more: Ellipsis, archive: Archive, back: ChevronLeft,
