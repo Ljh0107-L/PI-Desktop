@@ -120,9 +120,9 @@ button:not(:disabled) { cursor: pointer; }
 .ultra-review-gaps pre { font-size: 13px; line-height: 1.6; color: var(--text-2); }
 
 /* Secondary surfaces share spacing and typography with the main workspace. */
-.right-panel { width: 272px; padding: 20px 16px 16px; border-left: 1px solid var(--hairline); background: #f5f3ed; gap: 18px; }
-.panel-card { border: none; border-radius: 0; padding: 0 0 16px; border-bottom: 1px solid var(--hairline); background: transparent; }
-.panel-card-head { font-size: 13px; color: var(--muted); padding: 0; height: 30px; }
+.right-panel { border-left: 1px solid var(--hairline); background: #f5f3ed; }
+.panel-card { border-color: var(--hairline); background: var(--workspace-canvas, var(--bg)); }
+.panel-card-head { font-size: 13px; color: var(--text-2); }
 .panel-card-aside { font-size: 13px; }
 .meter span { background: var(--accent-2); }
 .usage-speed-value { letter-spacing: -.04em; }
