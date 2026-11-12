@@ -220,6 +220,11 @@ const api = {
   goal: id => manager.goal(id),
   ultra: id => manager.ultra(id),
   setUltra: (id, on) => manager.setUltra(id, on),
+  // Claude Code engine: effort, Ultracode, and the pinned binary on a machine (installed on first use).
+  setEffort: (id, level) => manager.setEffort(id, level),
+  setUltracode: (id, on) => manager.setUltracode(id, on),
+  claudeCodeInfo: () => manager.claudeCodeInfo(),
+  prepareClaudeCode: environmentId => manager.prepareClaude(environmentId).then(layout => ({ ok: true, version: manager.claudeCodeInfo().version, bin: layout.bin }), error => ({ ok: false, error: error.message })),
   agents: id => manager.agents(id),
   jobs: id => manager.jobs(id),
   stopAgent: (id, agentId) => manager.stopAgent(id, agentId),
@@ -343,13 +348,14 @@ app.whenReady().then(async () => {
       agentDir: join(app.getPath('userData'), 'agent'),
       runDir: join(app.getPath('userData'), 'run'),
       uploadDir: join(app.getPath('userData'), 'uploads'),
+      claudeRoot: app.getPath('userData'), // <userData>/claude-code/<version>/claude, never a `claude` on PATH
       extraEnv: { ELECTRON_RUN_AS_NODE: '1' },
     },
   });
   usage = new UsageLedger({ path: join(app.getPath('userData'), 'usage.jsonl'), sessionsDir: join(app.getPath('userData'), 'agent', 'sessions') });
   manager.on('event', ({ event }) => { if (event.type === 'message_end') usage.record(event.message); });
   manager.on('environments-changed', () => send('environments', environments()));
-  for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'rewound', 'notice', 'environment', 'goal', 'agents', 'jobs', 'ultra']) manager.on(channel, payload => send(channel, payload));
+  for (const channel of ['event', 'status', 'question', 'question-resolved', 'questions-cleared', 'resync', 'rewound', 'notice', 'environment', 'goal', 'agents', 'jobs', 'ultra', 'claude-code']) manager.on(channel, payload => send(channel, payload));
   manager.on('ultra', ultraChanged);
   manager.on('status', ultraPiStatus);
   manager.on('sessions', () => send('sessions', manager.list()));

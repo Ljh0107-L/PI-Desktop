@@ -9,7 +9,9 @@
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
-export const EXTENSION_FILES = ['pidesk-speed.mjs', 'pidesk-ultra.mjs', 'pidesk-subagent.mjs', 'pidesk-background.mjs', 'pidesk-gemini.mjs', 'pidesk-session-tools.mjs', 'pidesk-history.mjs', 'pidesk-bridge.js'];
+// pidesk-claude.mjs is not loaded by Pi: the relay runs it as the Claude Code engine's process. It is
+// staged and uploaded with the others so every machine that runs Pi can also run Claude Code.
+export const EXTENSION_FILES = ['pidesk-speed.mjs', 'pidesk-ultra.mjs', 'pidesk-subagent.mjs', 'pidesk-background.mjs', 'pidesk-gemini.mjs', 'pidesk-session-tools.mjs', 'pidesk-history.mjs', 'pidesk-claude.mjs', 'pidesk-bridge.js'];
 // Retired extension code only; stored credentials and conversation history are left untouched.
 export const OBSOLETE_FILES = ['cursor-acp.mjs', 'pidesk-cursor.mjs', 'pidesk-chatgpt-vault.mjs', 'pidesk-chatgpt-auth.mjs', 'pidesk-chatgpt.mjs'];
 export const EXTENSION_PACKAGE = '{"private":true}\n';

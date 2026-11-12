@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { execFile } from 'node:child_process';
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { PiSession } from '../../core/pi-session.mjs';
 import { closeSshMux, egressEnv, localRelayTransport, localTransport, relaySpawnSpec, shellQuote, sshRelayTransport } from '../../core/transports.mjs';
@@ -15,6 +15,13 @@ import { isRetiredProvider, RETIRED_PROVIDER_MESSAGE } from '../../core/retired-
 import { SPEEDS, speedOptions } from '../../agent/pidesk-speed.mjs';
 import { readHistory } from '../../agent/pidesk-history.mjs';
 import { historyEvent } from '../../core/history-view.mjs';
+import { CLAUDE_CODE_VERSION, CLAUDE_EFFORTS, claudeEffort, ensureLocalClaude, isClaudeCodeModel, prepareRemoteClaude } from './claude-code.mjs';
+
+// Conversation engines: Pi (default) and Claude Code (the pinned native binary driven by agent/pidesk-claude.mjs).
+export const CLAUDE_ENGINE = 'claude-code';
+const isClaude = record => record?.engine === CLAUDE_ENGINE;
+const CLAUDE_NO_ULTRA = 'Claude Code conversations use Claude Code’s own Ultracode instead of Ultra.';
+const CLAUDE_MODEL_ONLY = 'Claude Code works only with Anthropic Messages models. Choose one in Settings → Models.';
 
 // A conversation record keeps a speed only when it isn't standard.
 const speedField = speed => SPEEDS.includes(speed) && speed !== 'standard' ? { speed } : {};
@@ -92,20 +99,26 @@ export class SessionManager extends EventEmitter {
   providersVersion = 0;   // bumped whenever providers/keys change in Settings
   egress = null;
 
-  constructor({ store, environments, local, piVersion, piPackageDir, bridgePath, relayPath, cacheDir, remoteSetup = prepareRemote }) {
+  constructor({ store, environments, local, piVersion, piPackageDir, bridgePath, relayPath, cacheDir, remoteSetup = prepareRemote, claudeAdapterPath, claudeLocal = ensureLocalClaude, claudeRemote = prepareRemoteClaude, claudeEnv = {} }) {
     super();
     this.focused = null; // the session on screen: never stopped by the sweep
     this.sweeper = setInterval(() => this.sweep().catch(() => {}), SWEEP_MS);
     this.sweeper.unref?.();
     this.store = store;
     this.environments = environments; // () => [environment]
-    this.local = local;               // { node, piCli, agentDir, extraEnv, runDir, uploadDir }
+    this.local = local;               // { node, piCli, agentDir, extraEnv, runDir, uploadDir, claudeRoot }
     this.piVersion = piVersion;
     this.bridgePath = bridgePath;
     this.relayPath = relayPath;
     this.cacheDir = cacheDir;
     this.piPackageDir = piPackageDir;
     this.remoteSetup = remoteSetup;
+    // Claude Code engine: the adapter beside the bridge (staged, and uploaded to hosts with it), and the installers.
+    this.claudeAdapterPath = claudeAdapterPath ?? (bridgePath ? join(dirname(bridgePath), 'pidesk-claude.mjs') : null);
+    this.claudeLocal = claudeLocal;
+    this.claudeRemote = claudeRemote;
+    this.claudeInstalls = new Map(); // environment id -> Promise<{ bin, configDir }>
+    this.claudeEnv = claudeEnv;      // extra non-secret variables for Claude Code (tests)
   }
 
   env(id) {
@@ -166,7 +179,12 @@ export class SessionManager extends EventEmitter {
     this.invalidateCatalog();
     this.prepared.clear();
     for (const key of [...this.spares.keys()]) this.#dropSpare(key);
-    for (const runtime of this.runtimes.values()) if (runtime.status === 'connected') this.#syncProviders(runtime).catch(() => {});
+    for (const [id, runtime] of this.runtimes) {
+      if (runtime.status !== 'connected') continue;
+      // A Claude Code conversation gets its endpoint and key again (a new key restarts Claude Code, resumed).
+      if (runtime.engine === CLAUDE_ENGINE) { const record = this.#recordOf(id); if (record) this.#applyModel(record, runtime).catch(error => this.emit('notice', { id, level: 'warning', message: error.message })); }
+      else this.#syncProviders(runtime).catch(() => {});
+    }
   }
   // Desktop settings a Pi applies itself (Settings → Subagents, the conversation's speed): in its boot
   // record, then by command whenever they changed or the Pi started without them.
@@ -177,6 +195,7 @@ export class SessionManager extends EventEmitter {
   #recordOf(id) { return this.store.sessions.find(s => s.id === id) ?? [...this.spares.values()].find(sp => sp.id === id)?.record; }
   async #syncConfig(runtime, record) {
     const session = runtime?.session;
+    if (runtime?.engine === CLAUDE_ENGINE) return; // Pi Desktop's Subagents/Ultra/Speed settings are Pi's
     const key = JSON.stringify(this.bootConfig(record));
     if (!session || runtime.configKey === key) return;
     await session.prompt(`/pidesk-config ${Buffer.from(key).toString('base64')}`);
@@ -191,6 +210,7 @@ export class SessionManager extends EventEmitter {
     if (!session) return Promise.resolve();
     const run = async () => {
       if (runtime.session !== session) return;
+      if (isClaude(record)) return this.#applyClaude(record, runtime, session);
       const want = record.model;
       if (isRetiredProvider(want?.provider)) throw new Error(RETIRED_PROVIDER_MESSAGE);
       let applied = runtime.applied ?? {};
@@ -210,9 +230,25 @@ export class SessionManager extends EventEmitter {
     runtime.applying = queued;
     return queued;
   }
+  // A Claude Code conversation's endpoint, key, model, effort and Ultracode, made true in its adapter.
+  async #applyClaude(record, runtime, session) {
+    const config = await this.claudeConfig(record);
+    const key = JSON.stringify(config);
+    if (runtime.claudeKey === key) return;
+    const result = await session.request('claude_configure', config, { timeout: 60000 });
+    if (runtime.session !== session) return;
+    runtime.claudeKey = key;
+    runtime.applied = { model: { provider: config.model.provider, id: config.model.id }, thinkingLevel: config.effort };
+    // Ultracode needs a model and endpoint that offer it: the adapter turned it off and said why.
+    if (config.ultracode && result?.ultracode === false) {
+      delete record.ultracode;
+      this.#save(record, {});
+      runtime.claudeKey = JSON.stringify({ ...config, ultracode: false });
+    }
+  }
   async #syncProviders(runtime) {
     const session = runtime?.session;
-    if (!session) return;
+    if (!session || runtime.engine === CLAUDE_ENGINE) return;
     while (runtime.session === session && runtime.providersVersion !== this.providersVersion) {
       // Settings updates and the first prompt can arrive together. Send one update at a time,
       // then re-check the version so an older acknowledgement cannot mark newer keys as synced.
@@ -241,7 +277,7 @@ export class SessionManager extends EventEmitter {
         // Built-in providers can be narrowed to the models the user picked in Settings.
         const enabled = Object.fromEntries(this.store.settings.providers.filter(p => p.enabledModels?.length).map(p => [p.id, new Set(p.enabledModels)]));
         return models.filter(m => configured.has(m.provider) && (!enabled[m.provider] || enabled[m.provider].has(m.id)))
-          .map(m => ({ provider: m.provider, id: m.id, name: m.name ?? m.id, reasoning: !!m.reasoning, thinkingLevelMap: m.thinkingLevelMap, contextWindow: m.contextWindow, maxTokens: m.maxTokens, baseUrl: m.baseUrl, input: m.input, speeds: speedOptions(m), ...(m.environments ? { environments: m.environments } : {}) }));
+          .map(m => ({ provider: m.provider, id: m.id, name: m.name ?? m.id, api: m.api, reasoning: !!m.reasoning, thinkingLevelMap: m.thinkingLevelMap, contextWindow: m.contextWindow, maxTokens: m.maxTokens, baseUrl: m.baseUrl, input: m.input, cost: m.cost, speeds: speedOptions(m), engines: isClaudeCodeModel(m) ? ['pi', CLAUDE_ENGINE] : ['pi'], ...(m.environments ? { environments: m.environments } : {}) }));
       } finally { await session.stop(); }
     })();
     const cached = this.catalogCache;
@@ -262,6 +298,65 @@ export class SessionManager extends EventEmitter {
   async providerHosts() {
     const models = await this.catalog().catch(() => []);
     return [...new Set(models.filter(m => m.baseUrl?.startsWith('https://')).map(m => hostPortOf(m.baseUrl)))];
+  }
+
+  // ---------------------------------------------------------------- Claude Code engine
+  async #claudeModel(want) {
+    if (!want?.provider || !want.id) throw new Error(CLAUDE_MODEL_ONLY);
+    if (isRetiredProvider(want.provider)) throw new Error(RETIRED_PROVIDER_MESSAGE);
+    const model = (await this.catalog()).find(m => m.provider === want.provider && m.id === want.id);
+    if (!model || !isClaudeCodeModel(model)) throw new Error(CLAUDE_MODEL_ONLY);
+    return model;
+  }
+  // The endpoint, key, model and Claude Code settings a conversation runs with (Settings → Models only:
+  // built-in Anthropic, or any provider or custom endpoint that speaks the Anthropic Messages API).
+  async claudeConfig(record) {
+    const model = await this.#claudeModel(record.model);
+    const saved = this.store.settings.providers.find(p => p.id === model.provider);
+    const apiKey = this.store.getKey(model.provider);
+    if (!apiKey) throw new Error(`Add an API key for ${saved?.name ?? model.provider} in Settings → Models to use it with Claude Code.`);
+    // Anthropic's own API is Claude Code's default endpoint; any other one is passed as its base URL.
+    const baseUrl = saved?.kind === 'custom' ? providerBaseUrl(saved.api, saved.baseUrl)
+      : model.provider === 'anthropic' ? undefined : model.baseUrl ? providerBaseUrl('anthropic-messages', model.baseUrl) : undefined;
+    const headers = saved?.headers && typeof saved.headers === 'object' && Object.keys(saved.headers).length ? saved.headers : undefined;
+    return {
+      provider: { id: model.provider, kind: saved?.kind ?? 'builtin', api: 'anthropic-messages', apiKey, ...(baseUrl ? { baseUrl } : {}), ...(headers ? { headers } : {}) },
+      model: { provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow, maxTokens: model.maxTokens, cost: model.cost },
+      effort: CLAUDE_EFFORTS.includes(record.effort) ? record.effort : null,
+      ultracode: !!record.ultracode,
+      fast: record.speed === 'fast',
+    };
+  }
+  // Install (once per machine) the pinned Claude Code where `environmentId` runs conversations: this Mac
+  // downloads it into its own data folder; an SSH host downloads it itself, or gets it uploaded from here.
+  prepareClaude(environmentId, onProgress = () => {}) {
+    const env = this.env(environmentId);
+    const cached = this.claudeInstalls.get(env.id);
+    if (cached) { cached.listeners.add(onProgress); return cached.promise; }
+    const listeners = new Set([onProgress]);
+    const progress = message => {
+      for (const listener of listeners) listener(message);
+      this.emit('claude-code', { id: env.id, status: 'preparing', message, version: CLAUDE_CODE_VERSION });
+    };
+    const promise = (async () => {
+      if (env.kind === 'local') return this.claudeLocal({ root: this.local.claudeRoot ?? dirname(this.local.agentDir), cacheDir: this.cacheDir, onProgress: progress });
+      const facts = await this.prepare(env.id);
+      return this.claudeRemote(env, facts, { runSsh, cacheDir: this.cacheDir, onProgress: progress });
+    })();
+    const entry = { promise, listeners };
+    this.claudeInstalls.set(env.id, entry);
+    promise.then(() => {
+      listeners.clear();
+      this.emit('claude-code', { id: env.id, status: 'ready', version: CLAUDE_CODE_VERSION });
+    }, error => {
+      listeners.clear();
+      if (this.claudeInstalls.get(env.id) === entry) this.claudeInstalls.delete(env.id);
+      this.emit('claude-code', { id: env.id, status: 'error', message: error.message, version: CLAUDE_CODE_VERSION });
+    }).catch(() => {});
+    return promise;
+  }
+  claudeCodeInfo() {
+    return { version: CLAUDE_CODE_VERSION, efforts: CLAUDE_EFFORTS, environments: Object.fromEntries([...this.claudeInstalls.keys()].map(id => [id, 'installed-or-installing'])) };
   }
 
   // ---------------------------------------------------------------- environments
@@ -332,7 +427,7 @@ export class SessionManager extends EventEmitter {
   }
   #view(record) {
     const runtime = this.runtimes.get(record.id);
-    return { ...record, engine: record.engine === 'cursor' ? 'cursor' : 'pi', status: runtime?.status ?? 'idle', phase: runtime?.phase ?? null, streaming: !!runtime?.streaming, pendingQuestions: runtime ? [...runtime.questions.values()] : [] };
+    return { ...record, engine: record.engine === 'cursor' ? 'cursor' : isClaude(record) ? CLAUDE_ENGINE : 'pi', status: runtime?.status ?? 'idle', phase: runtime?.phase ?? null, streaming: !!runtime?.streaming, pendingQuestions: runtime ? [...runtime.questions.values()] : [] };
   }
   record(id) {
     const record = this.store.sessions.find(s => s.id === id);
@@ -378,10 +473,12 @@ export class SessionManager extends EventEmitter {
   // run; the first message then adopts it instead of waiting for SSH + Pi start-up. With No folder the
   // spare runs in the root and moves into the conversation's own directory when the first message names it.
   spares = new Map(); // `${environmentId}\n${cwd}` (or projectlessSpareKey) -> { id, record, timer }
-  async prewarm({ environmentId, cwd: chosen, model, thinkingLevel, speed, noFolder }) {
+  async prewarm({ environmentId, cwd: chosen, model, thinkingLevel, speed, noFolder, engine }) {
     if (!environmentId || isRetiredProvider(model?.provider)) return false;
     const env = this.environments().find(e => e.id === environmentId);
     if (!env || (env.kind === 'ssh' && !env.enabled)) return false;
+    // Claude Code: install the binary there in advance (the first message would otherwise wait for it).
+    if (engine === CLAUDE_ENGINE) { this.prepareClaude(environmentId).catch(() => {}); return true; }
     const cwd = chosen || await this.projectlessRoot(environmentId).catch(() => null);
     if (!cwd) return false;
     const key = chosen ? `${environmentId}\n${cwd}` : projectlessSpareKey(environmentId);
@@ -470,8 +567,13 @@ export class SessionManager extends EventEmitter {
     if (result?.cancelled) throw new Error('Moving the pre-warmed Pi was cancelled.');
   }
 
-  async create({ environmentId, cwd: chosen, model, thinkingLevel, speed, ultra, prompt }) {
+  async create({ environmentId, cwd: chosen, model, thinkingLevel, speed, ultra, prompt, engine, effort, ultracode }) {
     if (isRetiredProvider(model?.provider)) throw new Error(RETIRED_PROVIDER_MESSAGE);
+    const claude = engine === CLAUDE_ENGINE;
+    if (claude) {
+      if (ultra) throw new Error(CLAUDE_NO_ULTRA);
+      await this.#claudeModel(model);
+    }
     const env = this.env(environmentId);
     const noFolder = !chosen;
     const cwd = noFolder ? await this.#projectlessDir(env, prompt) : chosen;
@@ -480,14 +582,17 @@ export class SessionManager extends EventEmitter {
       project: noFolder ? 'No folder' : env.kind === 'local' ? basename(cwd) : remoteBase(cwd),
     };
     const spareKey = noFolder ? projectlessSpareKey(environmentId) : `${environmentId}\n${cwd}`;
-    const spare = this.spares.get(spareKey);
+    const spare = claude ? null : this.spares.get(spareKey); // spares are Pi processes
     if (spare) {
       this.spares.delete(spareKey);
       clearTimeout(spare.timer);
       try { return await this.#adopt(spare.record, fields, { model, thinkingLevel, speed, ultra }); }
       catch { await this.#stopSpare(spare); } // the warm Pi failed or could not move: start a fresh one below
     }
-    const record = { id: randomUUID(), ...fields, model, thinkingLevel: thinkingLevel ?? 'medium', ...speedField(speed), ...(ultra ? { ultra: true } : {}), createdAt: Date.now(), updatedAt: Date.now() };
+    const engineFields = claude
+      ? { engine: CLAUDE_ENGINE, ...(CLAUDE_EFFORTS.includes(effort) ? { effort } : {}), ...(ultracode ? { ultracode: true } : {}) }
+      : (ultra ? { ultra: true } : {});
+    const record = { id: randomUUID(), ...fields, model, thinkingLevel: thinkingLevel ?? 'medium', ...speedField(speed), ...engineFields, createdAt: Date.now(), updatedAt: Date.now() };
     this.#add(record);
     await this.ensureStarted(record.id);
     return this.#view(record);
@@ -582,17 +687,29 @@ export class SessionManager extends EventEmitter {
   async #start(record, runtime) {
     const env = this.env(record.environmentId);
     const bootVersion = this.providersVersion;
-    const boot = { providers: this.bootProviders(), config: this.bootConfig(record) };
+    const claude = isClaude(record);
+    runtime.engine = claude ? CLAUDE_ENGINE : 'pi';
+    // Claude Code: its endpoint and key first (a clear error before any setup), then its binary there.
+    const claudeConfig = claude ? await this.claudeConfig(record) : null;
+    const claudeProgress = message => this.#status(record, runtime, { status: runtime.status, phase: 'preparing', message });
+    let boot = claude ? null : { providers: this.bootProviders(), config: this.bootConfig(record) };
     const piArgs = record.piSessionFile ? ['--session', record.piSessionFile] : [];
     let session;
     if (env.kind === 'local') {
       mkdirSync(this.local.agentDir, { recursive: true });
-      const spawn = relaySpawnSpec({ cwd: record.cwd, node: this.local.node, piCli: this.local.piCli, agentDir: this.local.agentDir, extensions: [this.bridgePath], piArgs, extraEnv: { ...this.local.extraEnv, ...this.piEnv(record) } });
+      let spawn;
+      if (claude) {
+        const layout = await this.prepareClaude(env.id, claudeProgress);
+        this.#assertCurrent(record, runtime);
+        boot = { claudeCode: { ...claudeConfig, bin: layout.bin, configDir: layout.configDir, sessionsDir: join(this.local.agentDir, 'sessions'), sessionFile: record.piSessionFile ?? null, cwd: record.cwd, env: this.claudeEnv } };
+        spawn = { cwd: record.cwd, env: { ...this.local.extraEnv }, argv: [this.local.node, this.claudeAdapterPath] };
+      } else spawn = relaySpawnSpec({ cwd: record.cwd, node: this.local.node, piCli: this.local.piCli, agentDir: this.local.agentDir, extensions: [this.bridgePath], piArgs, extraEnv: { ...this.local.extraEnv, ...this.piEnv(record) } });
       const transport = localRelayTransport({ node: this.local.node, relayPath: this.relayPath, runDir: this.local.runDir, extraEnv: this.local.extraEnv });
       session = new PiSession({ id: record.id, boot, transport, relay: { sinceSeq: runtime.lastSeq, spawn } });
     } else {
       this.#status(record, runtime, { status: runtime.status, phase: 'preparing' });
       const facts = await this.prepare(env.id);
+      const layout = claude ? await this.prepareClaude(env.id, claudeProgress) : null;
       // A running relay Pi retains its proxy environment. Even if a fresh probe now says the
       // endpoint is reachable, reconnect the old fixed forward rather than strand that Pi.
       const hosts = record.egressPort ? [...new Set([...(facts.unreachable ?? []), ...await this.providerHosts()])] : facts.unreachable ?? [];
@@ -601,12 +718,17 @@ export class SessionManager extends EventEmitter {
       // The remote port is fixed per session: the relay's Pi keeps HTTPS_PROXY across reconnects.
       if (egressProxy && !record.egressPort) this.#save(record, { egressPort: 30000 + Math.floor(Math.random() * 30000) });
       const egress = egressProxy && { localPort: egressProxy.port, remotePort: record.egressPort };
-      const spawn = relaySpawnSpec({ cwd: record.cwd, node: facts.node, piCli: facts.piCli, agentDir: facts.agentDir, extensions: [facts.bridge], piArgs, extraEnv: { TMPDIR: facts.tmpDir, ...this.piEnv(record), ...(egress ? egressEnv(egress.remotePort) : {}) } });
+      let spawn;
+      if (claude) {
+        boot = { claudeCode: { ...claudeConfig, bin: layout.bin, configDir: layout.configDir, sessionsDir: `${facts.agentDir}/sessions`, sessionFile: record.piSessionFile ?? null, cwd: record.cwd, env: this.claudeEnv } };
+        spawn = { cwd: record.cwd, env: { TMPDIR: facts.tmpDir, ...(egress ? egressEnv(egress.remotePort) : {}) }, argv: [facts.node, `${facts.root}/ext/pidesk-claude.mjs`] };
+      } else spawn = relaySpawnSpec({ cwd: record.cwd, node: facts.node, piCli: facts.piCli, agentDir: facts.agentDir, extensions: [facts.bridge], piArgs, extraEnv: { TMPDIR: facts.tmpDir, ...this.piEnv(record), ...(egress ? egressEnv(egress.remotePort) : {}) } });
       const sharedOnHost = [...this.runtimes.values()].filter(r => r !== runtime && r.shared && r.envId === env.id && r.session && !r.closing).length;
       runtime.envId = env.id; runtime.shared = sharedOnHost < 6;
       const transport = sshRelayTransport({ host: env.host, sshOptions: env.sshArgs ?? [], node: facts.node, relayPath: facts.relay, runDir: facts.runDir, egress, shared: runtime.shared });
       session = new PiSession({ id: record.id, boot, transport, relay: { sinceSeq: runtime.lastSeq, spawn } });
     }
+    if (claude) runtime.claudeBootKey = JSON.stringify(claudeConfig);
     runtime.session = session;
     runtime.questions.clear();
     const current = () => this.#current(record, runtime) && runtime.session === session;
@@ -640,13 +762,31 @@ export class SessionManager extends EventEmitter {
       await session.start({ readyTimeout: 90000 });
       this.#assertCurrent(record, runtime);
       this.#status(record, runtime, { status: runtime.status, phase: 'configuring' });
+      if (claude) return await this.#configureClaude(record, runtime, session);
       return await this.#configureSession(record, runtime, session, bootVersion, JSON.stringify(boot.config));
     } catch (error) {
       await session.stop().catch(() => {});
       if (runtime.session === session) runtime.session = null;
       if (session.attachInfo?.created) await this.stopRelay(env, record.id).catch(() => {});
+      // Re-check the Claude Code install next time (it may have been removed from the machine).
+      if (claude) this.claudeInstalls.delete(env.id);
       throw error;
     }
+  }
+
+  async #configureClaude(record, runtime, session) {
+    runtime.lastSeq = session.lastSeq;
+    runtime.autoReconnect = true;
+    const created = !!session.attachInfo?.created;
+    const state = session.initialState ?? await session.state();
+    runtime.streaming = !!state.isStreaming;
+    runtime.applied = { model: state.model ? { provider: state.model.provider, id: state.model.id } : null, thinkingLevel: state.thinkingLevel };
+    // An adapter this desktop just started has the current settings; one that kept running may not.
+    runtime.claudeKey = created ? runtime.claudeBootKey : null;
+    await this.#applyModel(record, runtime).catch(error => { if (!record.spare && this.#current(record, runtime)) this.emit('notice', { id: record.id, level: 'warning', message: error.message }); });
+    this.#assertCurrent(record, runtime);
+    this.#save(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId });
+    return session;
   }
 
   async #configureSession(record, runtime, session, bootVersion, bootConfigKey) {
@@ -791,7 +931,8 @@ export class SessionManager extends EventEmitter {
     await this.#syncProviders(this.runtimes.get(id));
     await this.#syncConfig(this.runtimes.get(id), record).catch(() => {});
     await this.#applyModel(record, this.runtimes.get(id)).catch(error => {
-      if (isRetiredProvider(record.model?.provider)) throw error;
+      // Claude Code cannot run without its Anthropic Messages model and key: say so instead of sending.
+      if (isRetiredProvider(record.model?.provider) || isClaude(record)) throw error;
       this.emit('notice', { id, level: 'warning', message: error.message });
     });
     // The first message names the conversation at once (its first line), and the model then suggests a
@@ -823,7 +964,7 @@ export class SessionManager extends EventEmitter {
       interrupted = true;
       sent = await send(session);
     }
-    if (nameIt && !nameIt.startsWith('/')) session.prompt(`/pidesk-title ${Buffer.from(nameIt).toString('base64')}`).catch(() => {});
+    if (nameIt && !nameIt.startsWith('/') && !isClaude(record)) session.prompt(`/pidesk-title ${Buffer.from(nameIt).toString('base64')}`).catch(() => {});
     return { ...(sent && typeof sent === 'object' ? sent : {}), interrupted };
   }
 
@@ -914,6 +1055,7 @@ export class SessionManager extends EventEmitter {
   async setModel(id, provider, modelId) {
     if (isRetiredProvider(provider)) throw new Error(RETIRED_PROVIDER_MESSAGE);
     const record = this.record(id);
+    if (isClaude(record)) await this.#claudeModel({ provider, id: modelId });
     let runtime = this.runtimes.get(id);
     // A host that can't reach this model's endpoint needs its traffic relayed through this Mac, which is
     // wired up when Pi starts. A session started without it is restarted (same session file, history kept).
@@ -947,13 +1089,37 @@ export class SessionManager extends EventEmitter {
 
   async setThinking(id, level) {
     const record = this.record(id);
+    // Claude Code has effort levels instead of Pi's thinking levels: the nearest one.
+    if (isClaude(record)) return this.setEffort(id, claudeEffort(level) ?? level);
     this.#save(record, { thinkingLevel: level });
     const runtime = this.runtimes.get(id);
     if (runtime?.status === 'connected') await this.#applyModel(record, runtime);
   }
+  // Claude Code's effort (low … max), applied to a running Claude Code at once.
+  async setEffort(id, level) {
+    const record = this.record(id);
+    if (!isClaude(record)) throw new Error('Effort levels belong to Claude Code conversations.');
+    if (level != null && !CLAUDE_EFFORTS.includes(level)) throw new Error(`Unknown effort level: ${level}`);
+    if (level == null) delete record.effort;
+    this.#save(record, level == null ? {} : { effort: level });
+    const runtime = this.runtimes.get(id);
+    if (runtime?.status === 'connected') await this.#applyModel(record, runtime);
+    return { effort: record.effort ?? null };
+  }
+  // Claude Code's Ultracode (standing multi-agent workflows), for models and endpoints that offer it.
+  async setUltracode(id, on) {
+    const record = this.record(id);
+    if (!isClaude(record)) throw new Error('Ultracode belongs to Claude Code conversations; Pi conversations have Ultra.');
+    if (on) record.ultracode = true; else delete record.ultracode;
+    this.#save(record, {});
+    const runtime = this.runtimes.get(id);
+    if (runtime?.status === 'connected') await this.#applyModel(record, runtime);
+    return { ultracode: !!record.ultracode };
+  }
   // Ultra mode (the composer's Ultra switch): Pi works on each request on its own until it is done.
   async setUltra(id, on) {
     const record = this.record(id);
+    if (isClaude(record)) { if (on) throw new Error(CLAUDE_NO_ULTRA); return; }
     if (on) record.ultra = true; else delete record.ultra;
     this.#save(record, {});
     const runtime = this.runtimes.get(id);
@@ -967,7 +1133,8 @@ export class SessionManager extends EventEmitter {
     if (speed === 'standard') delete record.speed;
     this.#save(record, speedField(speed));
     const runtime = this.runtimes.get(id);
-    if (runtime?.status === 'connected') await this.#syncConfig(runtime, record);
+    // Claude Code: Fast is its fast mode, where the model offers it.
+    if (runtime?.status === 'connected') await (isClaude(record) ? this.#applyModel(record, runtime) : this.#syncConfig(runtime, record));
   }
 
 
@@ -1066,7 +1233,7 @@ export class SessionManager extends EventEmitter {
   async warmFolder(id) {
     const record = this.store.sessions.find(s => s.id === id);
     if (!record || record.archived || record.engine === 'cursor') return false;
-    return this.prewarm({ environmentId: record.environmentId, cwd: record.cwd, model: record.model, thinkingLevel: record.thinkingLevel, speed: record.speed, noFolder: record.noFolder });
+    return this.prewarm({ environmentId: record.environmentId, cwd: record.cwd, model: record.model, thinkingLevel: record.thinkingLevel, speed: record.speed, noFolder: record.noFolder, engine: record.engine });
   }
   #idle(runtime) {
     return runtime.status === 'connected' && !runtime.streaming && !runtime.starting && !runtime.questions.size && runtime.goal?.status !== 'active' && runtime.ultra?.task?.status !== 'active'
@@ -1144,10 +1311,11 @@ export class SessionManager extends EventEmitter {
     const fields = {
       title: `${source.title} (fork)`, environmentId: source.environmentId, environmentLabel: env.label, cwd: source.cwd,
       project: source.project, noFolder: source.noFolder, model: source.model, thinkingLevel: source.thinkingLevel, ...speedField(source.speed),
+      ...(isClaude(source) ? { engine: CLAUDE_ENGINE, ...(source.effort ? { effort: source.effort } : {}), ...(source.ultracode ? { ultracode: true } : {}) } : {}),
       createdAt: Date.now(), updatedAt: Date.now(),
     };
     const key = `${source.environmentId}\n${source.cwd}`;
-    const spare = this.spares.get(key);
+    const spare = isClaude(source) ? null : this.spares.get(key); // spares are Pi processes
     let record, session;
     if (spare && this.runtimes.get(spare.id)?.status === 'connected') {
       this.spares.delete(key);
@@ -1217,6 +1385,8 @@ export class SessionManager extends EventEmitter {
     const runtime = this.runtimes.get(id);
     if (runtime?.status !== 'connected') return [];
     const { commands } = await runtime.session.request('get_commands').catch(() => ({ commands: [] }));
+    // Claude Code's own commands and skills (including its /goal) are all the user's to run.
+    if (runtime.engine === CLAUDE_ENGINE) return commands.filter(c => !c.name.startsWith('pidesk-')).map(c => ({ name: c.name, description: c.description ?? '', source: 'claude-code', ...(c.argumentHint ? { argumentHint: c.argumentHint } : {}) }));
     return commands.filter(c => !c.name.startsWith('pidesk-') && c.name !== 'goal').map(c => ({ name: c.name, description: c.description ?? '', source: c.source }));
   }
 
