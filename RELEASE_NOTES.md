@@ -2,6 +2,12 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.17 — Calibrated high-luminance typography and anodized surface luster
+
+- **High-luminance prose and UI chrome.** Calibrated dark-mode body prose (`#f8f9fc`), headings and emphasis (`#ffffff` with `Display-P3` peak white on wide-gamut Mac displays), inline code text (`#fcfdff`), composer placeholders (`#a2a3ae`), toolbar controls (`#c6c8d4`) and sidebar navigation (`#dfe0e8`) to match Antigravity's pixel-level stroke brightness without anti-aliasing greyness.
+- **Directional top-lit surface luster.** Added cohesive overhead specular catch-lights (`border-top` highlights, micro-gradients and `1px` inset top reflections) across `+ New Conversation`, active session pills, the rounded `#050507` inset canvas rim, user message cards, code blocks, floating glass menus and the double-bezel composer tray.
+- **Cool-glass inline code and file pills.** Upgraded inline `<code>`, `.file-ref` and `@mention` pills with subtle cool-blue glass gradients, `0.5px` top inner reflections and brighter syntax-typed file icons.
+
 ## 0.2.16 — Antigravity workspace craft, @file mentions and live controls
 
 - **Native macOS typography and Strong Contrast surfaces.** Restored macOS CoreText stem darkening (`-webkit-font-smoothing: auto`) with zero CJK letter-spacing squeeze across `SF Pro Text`, `PingFang SC` and `SF Mono`, paired with borderless inline code and file pills (`JSX/TSX`, `CSS/JSON`, code and folder icons). Unified the sidebar and top header into a seamless L-frame (`#121116` dark / `#f4f4f7` light) cradling a rounded inset conversation canvas (`#050507` dark / `#ffffff` light) and a recessed double-bezel composer tray.
