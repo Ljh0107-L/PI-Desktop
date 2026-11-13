@@ -42,15 +42,26 @@ function literalKey(key) {
   return escaped.startsWith('!') ? '$' + escaped : escaped;
 }
 
-function modelDefaults(model) {
+const ADAPTIVE_ANTHROPIC_MODEL = /claude-(?:opus-4-[6-9]|opus-[5-9]|sonnet-4-[6-9]|sonnet-[5-9]|haiku-[5-9]|fable-[5-9]|mythos)/i;
+
+function modelDefaults(model, providerApi) {
+  const api = model.api ?? providerApi;
+  const map = model.thinkingLevelMap;
+  const adaptiveAnthropic = api === 'anthropic-messages' && model.reasoning !== false && (
+    map?.xhigh != null || map?.max != null || ADAPTIVE_ANTHROPIC_MODEL.test(model.id ?? '')
+  );
+  const compat = adaptiveAnthropic
+    ? { forceAdaptiveThinking: true, supportsTemperature: false, ...model.compat }
+    : model.compat;
   return {
     name: model.id,
     reasoning: false,
     input: ['text'],
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-    contextWindow: 128000,
-    maxTokens: 16384,
+    contextWindow: 800000,
+    maxTokens: 32768,
     ...model,
+    ...(compat ? { compat } : {}),
   };
 }
 
@@ -360,7 +371,7 @@ export default function pideskBridge(pi) {
       const { id, apiKey, models, ...rest } = provider;
       const config = { ...rest };
       if (apiKey) config.apiKey = literalKey(apiKey);
-      if (models) config.models = models.map(modelDefaults);
+      if (models) config.models = models.map(m => modelDefaults(m, config.api));
       // Gemini models whose id doesn't say which Gemini they are: streamed under the model their name gives.
       if (config.api === GEMINI_API && config.models?.some(m => geminiAlias(m))) {
         config.models = config.models.map(m => geminiModel(m));

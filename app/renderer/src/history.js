@@ -31,7 +31,7 @@ export function mergeReloadedHistory(page, current) {
   const keepWindow = current.history?.snapshot?.identity === page.snapshot?.identity && overlap && !current.rewinding;
   const first = messages[0];
   const start = first ? current.messages.findIndex(m => m.__entryId === first.__entryId || (!m.__entryId && historyKey(m) === historyKey(first))) : -1;
-  const older = start < 0 ? [] : current.messages.slice(0, start).filter(m => m.__entryId);
+  const older = start < 0 || !page.next ? [] : current.messages.slice(0, start).filter(m => !m.__optimistic);
   return {
     messages: keepWindow ? mergeHistory(older, messages) : messages,
     history: { ...(keepWindow ? current.history : {}), snapshot: page.snapshot, next: keepWindow ? current.history.next : page.next,

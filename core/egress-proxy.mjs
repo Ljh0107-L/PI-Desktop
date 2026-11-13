@@ -13,18 +13,47 @@ export function startEgressProxy({ allow = [], port = 0 } = {}) {
   const stats = { tunnels: 0, rejected: [] };
   const sockets = new Set();
   const track = socket => { sockets.add(socket); socket.once('close', () => sockets.delete(socket)); return socket; };
-  const server = http.createServer((req, res) => { res.writeHead(405).end('CONNECT only'); });
+  const server = http.createServer((req, res) => {
+    let targetUrl;
+    try { targetUrl = new URL(req.url ?? ''); } catch { res.writeHead(405).end('CONNECT only'); return; }
+    if (!['http:', 'https:'].includes(targetUrl.protocol)) { res.writeHead(405).end('CONNECT only'); return; }
+    const target = `${targetUrl.hostname}:${targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80)}`.toLowerCase();
+    if (!allowed.has(target)) {
+      stats.rejected.push(target);
+      if (stats.rejected.length > 100) stats.rejected.shift();
+      res.writeHead(403).end('Forbidden');
+      return;
+    }
+    stats.tunnels++;
+    const headers = { ...req.headers };
+    delete headers['proxy-connection'];
+    delete headers['proxy-authorization'];
+    const upstream = http.request({
+      hostname: targetUrl.hostname.replace(/^\[|\]$/g, ''),
+      port: Number(targetUrl.port || 80),
+      method: req.method,
+      path: `${targetUrl.pathname}${targetUrl.search}`,
+      headers,
+    }, upRes => {
+      res.writeHead(upRes.statusCode ?? 502, upRes.headers);
+      upRes.pipe(res);
+    });
+    upstream.on('error', () => { if (!res.headersSent) res.writeHead(502); res.end('Bad Gateway'); });
+    res.on('close', () => { if (!res.writableEnded) upstream.destroy(); });
+    req.pipe(upstream);
+  });
   server.on('connection', track);
   server.on('connect', (req, clientSocket, head) => {
     const target = String(req.url ?? '').toLowerCase();
-    const match = /^([a-z0-9.-]+):(\d{1,5})$/.exec(target);
+    const match = /^(\[[0-9a-f:]+\]|[a-z0-9.-]+):(\d{1,5})$/.exec(target);
     if (!match || !allowed.has(target)) {
       stats.rejected.push(target);
       if (stats.rejected.length > 100) stats.rejected.shift();
       clientSocket.end('HTTP/1.1 403 Forbidden\r\n\r\n');
       return;
     }
-    const upstream = track(net.connect(Number(match[2]), match[1], () => {
+    const host = match[1].replace(/^\[|\]$/g, '');
+    const upstream = track(net.connect(Number(match[2]), host, () => {
       stats.tunnels++;
       clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n');
       if (head?.length) upstream.write(head);

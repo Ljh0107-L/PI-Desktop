@@ -92,6 +92,11 @@ export function claudeEnv(base, { configDir, provider = {}, model = {}, extra = 
     for (const k of ['ANTHROPIC_DEFAULT_HAIKU_MODEL', 'ANTHROPIC_DEFAULT_SONNET_MODEL', 'ANTHROPIC_DEFAULT_OPUS_MODEL', 'CLAUDE_CODE_SUBAGENT_MODEL']) env[k] = model.id;
   }
   if (Number.isFinite(model.maxTokens) && model.maxTokens > 0 && provider.id !== 'anthropic') env.CLAUDE_CODE_MAX_OUTPUT_TOKENS = String(model.maxTokens);
+  if (Number.isFinite(model.contextWindow) && model.contextWindow > 0) {
+    const cw = Math.floor(model.contextWindow);
+    if (provider.id !== 'anthropic') env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = String(cw);
+    if (cw >= 100000 && cw <= 1000000 && (provider.id !== 'anthropic' || cw < 1000000)) env.CLAUDE_CODE_AUTO_COMPACT_WINDOW = String(cw);
+  }
   return env;
 }
 
@@ -286,17 +291,21 @@ export class ClaudeAdapter {
 
   // Context in use: Claude Code's own figure when it is idle, else the last reply's prompt + output.
   async stats() {
-    const window = this.config.model?.contextWindow ?? this.lastContext?.contextWindow ?? null;
+    const configured = Number.isFinite(this.config.model?.contextWindow) && this.config.model.contextWindow > 0
+      ? this.config.model.contextWindow
+      : null;
+    const window = configured ?? this.lastContext?.contextWindow ?? null;
     if (this.child && !this.streaming) {
       const usage = await this.control({ subtype: 'get_context_usage' }, { timeout: 3000 }).catch(() => null);
       if (Number.isFinite(usage?.totalTokens) && Number.isFinite(usage?.maxTokens) && usage.maxTokens > 0) {
-        this.lastContext = { tokens: usage.totalTokens, contextWindow: usage.maxTokens };
-        return { contextUsage: { tokens: usage.totalTokens, contextWindow: usage.maxTokens, percent: usage.totalTokens * 100 / usage.maxTokens } };
+        const effectiveWindow = configured ? Math.min(configured, usage.maxTokens) : usage.maxTokens;
+        this.lastContext = { tokens: usage.totalTokens, contextWindow: effectiveWindow };
+        return { contextUsage: { tokens: usage.totalTokens, contextWindow: effectiveWindow, percent: usage.totalTokens * 100 / effectiveWindow } };
       }
     }
     const ctx = this.lastContext;
     if (!ctx) return { contextUsage: window ? { tokens: null, contextWindow: window, percent: null } : null };
-    const max = ctx.contextWindow ?? window;
+    const max = configured && ctx.contextWindow ? Math.min(configured, ctx.contextWindow) : (configured ?? ctx.contextWindow);
     return { contextUsage: { tokens: ctx.tokens, contextWindow: max, percent: max ? ctx.tokens * 100 / max : null } };
   }
 
@@ -337,7 +346,7 @@ export class ClaudeAdapter {
     }
     return { restarted: false, notices, ultracode: this.config.ultracode };
   }
-  #processKey(config) { const p = config.provider ?? {}; return JSON.stringify([p.id, p.apiKey, p.baseUrl, p.headers ?? null, p.id !== 'anthropic' ? config.model?.id : null]); }
+  #processKey(config) { const p = config.provider ?? {}; return JSON.stringify([p.id, p.apiKey, p.baseUrl, p.headers ?? null, p.id !== 'anthropic' ? config.model?.id : null, config.model?.contextWindow ?? null, config.model?.maxTokens ?? null]); }
 
   // ---------------------------------------------------------------- Claude Code process
   #args() {
@@ -616,7 +625,12 @@ export class ClaudeAdapter {
           let input = {};
           try { input = b.json ? JSON.parse(b.json) : {}; } catch { input = {}; }
           b.input = input;
-          this.#update({ type: 'toolcall_end', contentIndex: i, toolCall: normalizeToolCall(b.id, b.name, input) });
+          const toolCall = normalizeToolCall(b.id, b.name, input);
+          this.#update({ type: 'toolcall_end', contentIndex: i, toolCall });
+          if (!b.server && !this.pendingTools.has(b.id)) {
+            this.pendingTools.set(b.id, { name: toolCall.name, ccName: toolCall.ccName ?? toolCall.name, startedAt: now, steps: [], usage: null });
+            this.emit({ type: 'tool_execution_start', toolCallId: b.id, toolName: toolCall.name, args: toolCall.arguments });
+          }
         }
         return;
       }
@@ -647,6 +661,8 @@ export class ClaudeAdapter {
     if (!live) return;
     this.live = null;
     const end = this.now();
+    const deferredResults = live.deferredResults ?? [];
+    const finishedIds = new Set(deferredResults.map(r => r.message.toolCallId));
     const synthetic = live.model === '<synthetic>';
     const usage = piUsage(synthetic ? {} : live.usage, this.config.model?.cost);
     const stopReason = forcedStop ?? STOP[live.stopReason] ?? (live.stopReason ? 'stop' : 'aborted');
@@ -663,8 +679,15 @@ export class ClaudeAdapter {
       if (block.type !== 'toolCall') continue;
       // Server tools (web search run by the API) have no client-side result.
       if (live.blocks.find(b => b?.id === block.id)?.server) continue;
-      this.pendingTools.set(block.id, { name: block.name, ccName: block.ccName ?? block.name, startedAt: end, steps: [], usage: null });
-      this.emit({ type: 'tool_execution_start', toolCallId: block.id, toolName: block.name, args: block.arguments });
+      if (!this.pendingTools.has(block.id) && !finishedIds.has(block.id)) {
+        this.pendingTools.set(block.id, { name: block.name, ccName: block.ccName ?? block.name, startedAt: end, steps: [], usage: null });
+        this.emit({ type: 'tool_execution_start', toolCallId: block.id, toolName: block.name, args: block.arguments });
+      }
+    }
+    for (const { message: resultMessage, uuid } of deferredResults) {
+      this.#record(resultMessage, { uuid });
+      this.emit({ type: 'message_start', message: resultMessage });
+      this.emit({ type: 'message_end', message: resultMessage });
     }
   }
 
@@ -744,10 +767,12 @@ export class ClaudeAdapter {
     const pending = this.pendingTools.get(block.tool_use_id);
     this.pendingTools.delete(block.tool_use_id);
     const now = this.now();
-    const toolName = pending?.name ?? 'tool';
+    const liveBlock = !pending ? this.live?.blocks?.find(b => b?.id === block.tool_use_id) : null;
+    const toolName = pending?.name ?? (liveBlock ? (CC_TOOL_NAMES[liveBlock.name] ?? liveBlock.name) : 'tool');
     const content = toolResultContent(block.content);
     const structured = record.tool_use_result;
-    const details = { engine: 'claude-code', ...(pending?.ccName ? { ccTool: pending.ccName } : {}), ...(structured && typeof structured === 'object' ? { claude: structured } : {}) };
+    const ccName = pending?.ccName ?? (liveBlock && CC_TOOL_NAMES[liveBlock.name] ? liveBlock.name : undefined);
+    const details = { engine: 'claude-code', ...(ccName ? { ccTool: ccName } : {}), ...(structured && typeof structured === 'object' ? { claude: structured } : {}) };
     if (pending?.steps?.length || pending?.agentUsage) {
       details.kind = 'claude-code-agent';
       details.stepCount = pending.steps.length;
@@ -760,6 +785,10 @@ export class ClaudeAdapter {
     const isError = !!block.is_error;
     const message = { role: 'toolResult', toolCallId: block.tool_use_id, toolName, content, details, isError, timestamp: now };
     this.emit({ type: 'tool_execution_end', toolCallId: block.tool_use_id, toolName, result: { content, details }, isError, durationMs: pending ? now - pending.startedAt : undefined });
+    if (this.live) {
+      (this.live.deferredResults ??= []).push({ message, uuid: record.uuid });
+      return;
+    }
     this.#record(message, { uuid: record.uuid });
     this.emit({ type: 'message_start', message });
     this.emit({ type: 'message_end', message });
@@ -786,7 +815,9 @@ export class ClaudeAdapter {
   #onResult(record) {
     if (record.session_id) this.claudeSessionId = record.session_id;
     if (this.live) this.#finishLive('aborted');
-    const window = Object.values(record.modelUsage ?? {})[0]?.contextWindow;
+    const reportedWindow = Object.values(record.modelUsage ?? {})[0]?.contextWindow;
+    const configuredWindow = Number.isFinite(this.config.model?.contextWindow) && this.config.model.contextWindow > 0 ? this.config.model.contextWindow : null;
+    const window = configuredWindow && reportedWindow ? Math.min(configuredWindow, reportedWindow) : (configuredWindow ?? reportedWindow);
     if (window && this.lastContext) this.lastContext.contextWindow = window;
     if (this.compacting) {
       this.compacting = false;

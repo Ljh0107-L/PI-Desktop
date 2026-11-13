@@ -39,22 +39,16 @@ export function Icon({ name, size = 16, stroke = 1.75, className, style }) {
   return <Component className={className} style={style} size={size} strokeWidth={stroke} absoluteStrokeWidth={false} aria-hidden="true" />;
 }
 
-// Crisp architectural π emblem with subtle obsidian-glass gradient depth.
+// Soft warm π emblem in Claude Desktop style.
 export function Mascot({ size = 7, className }) {
   const px = size * 7;
   return (
     <svg className={className} width={px} height={px} viewBox="0 0 48 48" fill="none" aria-hidden="true">
-      <defs>
-        <linearGradient id="pi-emblem-bg" x1="24" y1="4" x2="24" y2="44" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="currentColor" stopOpacity="0.14" />
-          <stop offset="100%" stopColor="currentColor" stopOpacity="0.03" />
-        </linearGradient>
-      </defs>
-      <rect x="4" y="4" width="40" height="40" rx="12" fill="url(#pi-emblem-bg)" stroke="currentColor" strokeOpacity="0.22" strokeWidth="1" />
+      <rect x="4" y="4" width="40" height="40" rx="13" fill="currentColor" fillOpacity="0.06" stroke="currentColor" strokeOpacity="0.14" strokeWidth="1" />
       <path
         d="M14.8 18.2C16.4 16.9 18.3 16.5 21.2 16.5H33.5M20.8 16.5C20.5 22.8 19.4 28.2 17.3 32.4M28.2 16.5V28.3C28.2 30.7 29.3 32.1 31.3 32.1C32.4 32.1 33.3 31.6 33.9 30.8"
         stroke="currentColor"
-        strokeWidth="2.35"
+        strokeWidth="2.2"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
@@ -62,19 +56,13 @@ export function Mascot({ size = 7, className }) {
   );
 }
 
-// Crisp architectural Claude Code emblem matching Mascot's obsidian-glass geometry.
+// Soft warm terracotta Claude Code emblem.
 export function ClaudeMascot({ size = 7, className }) {
   const px = size * 7;
   return (
     <svg className={className} width={px} height={px} viewBox="0 0 48 48" fill="none" aria-hidden="true">
-      <defs>
-        <linearGradient id="cc-emblem-bg" x1="24" y1="4" x2="24" y2="44" gradientUnits="userSpaceOnUse">
-          <stop offset="0%" stopColor="#fb923c" stopOpacity="0.18" />
-          <stop offset="100%" stopColor="#ea580c" stopOpacity="0.04" />
-        </linearGradient>
-      </defs>
-      <rect x="4" y="4" width="40" height="40" rx="12" fill="url(#cc-emblem-bg)" stroke="#fb923c" strokeOpacity="0.32" strokeWidth="1" />
-      <path d="M15.5 18.5L21.5 24L15.5 29.5M24.5 29.5H32.5" stroke="currentColor" strokeWidth="2.35" strokeLinecap="round" strokeLinejoin="round" />
+      <rect x="4" y="4" width="40" height="40" rx="13" fill="#da7756" fillOpacity="0.11" stroke="#da7756" strokeOpacity="0.26" strokeWidth="1" />
+      <path d="M15.5 18.5L21.5 24L15.5 29.5M24.5 29.5H32.5" stroke="#da7756" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

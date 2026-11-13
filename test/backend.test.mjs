@@ -261,6 +261,30 @@ test('egress shutdown destroys CONNECT tunnels and handles listen errors', { tim
   await waitFor(() => client.destroyed && peers.size === 0);
 });
 
+test('egress proxy forwards allowlisted HTTP URLs, IPv6 CONNECT targets, and rejects disallowed hosts', { timeout: 5000 }, async t => {
+  const http = await import('node:http');
+  const upstream = http.createServer((req, res) => res.writeHead(200, { 'content-type': 'text/plain' }).end(`ok:${req.url}`));
+  upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening');
+  t.after(() => { upstream.closeAllConnections?.(); upstream.close(); });
+  const target = `127.0.0.1:${upstream.address().port}`;
+  const proxy = await startEgressProxy({ allow: [target] });
+  t.after(() => proxy.close());
+  const viaProxy = await new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: proxy.port, method: 'GET', path: `http://${target}/v1/models` }, res => {
+      let body = ''; res.on('data', d => { body += d; }); res.on('end', () => resolve({ status: res.statusCode, body }));
+    });
+    req.on('error', reject);
+    req.end();
+  });
+  assert.deepEqual(viaProxy, { status: 200, body: 'ok:/v1/models' });
+  const denied = await new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: proxy.port, method: 'GET', path: 'http://evil.invalid/v1/models' }, res => resolve(res.statusCode));
+    req.on('error', reject);
+    req.end();
+  });
+  assert.equal(denied, 403);
+});
+
 // Nothing of the app keeps running on this Mac after it quits; sessions on SSH hosts keep their relays.
 test('the relay shutdown stops every session, answers, then exits', { timeout: 15000 }, async t => {
   const f = await fixture(t, { startDaemon: false });

@@ -137,6 +137,8 @@ export async function readHistory(file, options = {}) {
     if (cursor && (!Number.isSafeInteger(cursor.offset) || cursor.offset < 0 || cursor.offset > snapshot.end || typeof cursor.id !== 'string')) throw new Error('Invalid history cursor.');
     let target = cursor?.id ?? null, remaining = cursor?.offset ?? snapshot.end;
     const messages = [], omitted = new Map(cursor?.omitted ?? []);
+    const declaredCalls = new Set(), unresolvedCalls = new Set();
+    let lastClean = null;
     let total = 2, visibleMessages = 0, next = null, warning = null, first = true;
     const stats = { scannedBytes: 0 };
     for await (const row of reverseLines(handle, remaining, stats)) {
@@ -154,18 +156,33 @@ export async function readHistory(file, options = {}) {
       const message = projectEntry(entry, ref, { omitted: omitted.get(entry.id) });
       const cost = message ? bytes(message) + (messages.length ? 1 : 0) : 0;
       if (message && messages.length && (messages.length >= PAGE_MESSAGES || total + cost > PAGE_BYTES)) {
-        next = { snapshot, offset: row.offset + row.length, id: entry.id, omitted: [...omitted] };
+        if (unresolvedCalls.size && lastClean?.len > 0) {
+          messages.length = lastClean.len;
+          next = { snapshot, offset: lastClean.offset, id: lastClean.target, omitted: lastClean.omitted };
+        } else {
+          next = { snapshot, offset: row.offset + row.length, id: entry.id, omitted: [...omitted] };
+        }
         break;
       }
       if (message) {
         messages.push(message); total += cost; omitted.delete(entry.id);
         const content = entry.message?.content;
+        if (message.role === 'toolResult' && message.toolCallId && !declaredCalls.has(message.toolCallId)) {
+          unresolvedCalls.add(message.toolCallId);
+        } else if (message.role === 'assistant' && Array.isArray(content)) {
+          for (const block of content) {
+            if (block?.type === 'toolCall' && block.id) { declaredCalls.add(block.id); unresolvedCalls.delete(block.id); }
+          }
+        } else if (message.role === 'user' || message.role === 'compactionSummary') {
+          unresolvedCalls.clear();
+        }
         if (message.role === 'user' || message.role === 'compactionSummary' || (message.role === 'assistant' && Array.isArray(content) && content.some(block => block?.type === 'text' && block.text?.trim()))) visibleMessages++;
       }
       target = entry.parentId;
       remaining = row.offset;
       if (!target) break;
-      if (visibleMessages >= 40 && (message?.role === 'user' || messages.length >= 80)) {
+      if (unresolvedCalls.size === 0) lastClean = { len: messages.length, target, offset: row.offset, omitted: [...omitted] };
+      if (visibleMessages >= 40 && unresolvedCalls.size === 0 && (message?.role === 'user' || messages.length >= 80)) {
         next = { snapshot, offset: row.offset, id: target, omitted: [...omitted] };
         break;
       }

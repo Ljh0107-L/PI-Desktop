@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { execFile } from 'node:child_process';
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { basename, dirname, join } from 'node:path';
 import { homedir } from 'node:os';
@@ -15,7 +15,21 @@ import { isRetiredProvider, RETIRED_PROVIDER_MESSAGE } from '../../core/retired-
 import { SPEEDS, speedOptions } from '../../agent/pidesk-speed.mjs';
 import { readHistory } from '../../agent/pidesk-history.mjs';
 import { historyEvent } from '../../core/history-view.mjs';
-import { CLAUDE_CODE_VERSION, CLAUDE_EFFORTS, claudeBuiltinBaseUrl, claudeEffort, ensureLocalClaude, isClaudeCodeModel, prepareRemoteClaude } from './claude-code.mjs';
+import { CLAUDE_CODE_VERSION, CLAUDE_EFFORTS, clampClaudeEffort, claudeBuiltinBaseUrl, claudeEffort, ensureLocalClaude, isClaudeCodeModel, prepareRemoteClaude, resolveClaudeEffort } from './claude-code.mjs';
+
+const PI_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+function clampPiThinkingLevel(model, level) {
+  if (!model || !level) return level;
+  if (model.reasoning === false) return 'off';
+  const map = model.thinkingLevelMap ?? {};
+  const supported = PI_THINKING_LEVELS.filter(l => map[l] === null ? false : (l === 'xhigh' || l === 'max') ? map[l] !== undefined : true);
+  if (supported.includes(level)) return level;
+  const idx = PI_THINKING_LEVELS.indexOf(level);
+  if (idx === -1) return supported[0] ?? 'off';
+  for (let i = idx; i < PI_THINKING_LEVELS.length; i++) if (supported.includes(PI_THINKING_LEVELS[i])) return PI_THINKING_LEVELS[i];
+  for (let i = idx - 1; i >= 0; i--) if (supported.includes(PI_THINKING_LEVELS[i])) return PI_THINKING_LEVELS[i];
+  return supported[0] ?? 'off';
+}
 
 // Conversation engines: Pi (default) and Claude Code (the pinned native binary driven by agent/pidesk-claude.mjs).
 export const CLAUDE_ENGINE = 'claude-code';
@@ -178,6 +192,7 @@ export class SessionManager extends EventEmitter {
     this.providersVersion += 1;
     this.invalidateCatalog();
     this.prepared.clear();
+    if (this.egress) this.providerHosts().then(hosts => this.egress?.allow(hosts)).catch(() => {});
     for (const key of [...this.spares.keys()]) this.#dropSpare(key);
     for (const [id, runtime] of this.runtimes) {
       if (runtime.status !== 'connected') continue;
@@ -201,6 +216,17 @@ export class SessionManager extends EventEmitter {
     await session.prompt(`/pidesk-config ${Buffer.from(key).toString('base64')}`);
     if (runtime.session === session) runtime.configKey = key;
   }
+  async #modelInfo(want) {
+    if (!want?.provider || !want?.id) return null;
+    const fromSettings = this.store.settings?.providers?.find(p => p.id === want.provider)?.models?.find(m => m.id === want.id);
+    if (fromSettings) return fromSettings;
+    if (this.catalogCache || this.catalog !== SessionManager.prototype.catalog || (this.local?.piCli && existsSync(this.local.piCli))) {
+      const list = await this.catalog().catch(() => []);
+      return list.find(m => m.provider === want.provider && m.id === want.id) ?? null;
+    }
+    return null;
+  }
+
   // The model and effort chosen for this conversation, made true in its Pi: when it attaches (one that
   // kept running may have missed a change), after each change and before each prompt. One change at a
   // time and the effort after the model, because Pi resets the effort when the model changes. What the
@@ -220,9 +246,12 @@ export class SessionManager extends EventEmitter {
         applied = { model: { provider: want.provider, id: want.id } };
         if (runtime.session === session) runtime.applied = applied;
       }
-      if (record.thinkingLevel && applied.thinkingLevel !== record.thinkingLevel) {
-        await session.request('set_thinking_level', { level: record.thinkingLevel });
-        applied = { ...applied, thinkingLevel: record.thinkingLevel };
+      const info = await this.#modelInfo(want);
+      const effectiveLevel = info && record.thinkingLevel ? clampPiThinkingLevel(info, record.thinkingLevel) : record.thinkingLevel;
+      if (effectiveLevel && effectiveLevel !== record.thinkingLevel) this.#save(record, { thinkingLevel: effectiveLevel });
+      if (effectiveLevel && applied.thinkingLevel !== effectiveLevel) {
+        await session.request('set_thinking_level', { level: effectiveLevel });
+        applied = { ...applied, thinkingLevel: effectiveLevel };
       }
       if (runtime.session === session) runtime.applied = applied;
     };
@@ -298,7 +327,7 @@ export class SessionManager extends EventEmitter {
 
   async providerHosts() {
     const models = await this.catalog().catch(() => []);
-    return [...new Set(models.filter(m => m.baseUrl?.startsWith('https://')).map(m => hostPortOf(m.baseUrl)))];
+    return [...new Set(models.filter(m => /^https?:\/\//i.test(m.baseUrl ?? '')).map(m => hostPortOf(m.baseUrl)))];
   }
 
   // ---------------------------------------------------------------- Claude Code engine
@@ -324,7 +353,7 @@ export class SessionManager extends EventEmitter {
     return {
       provider: { id: model.provider, kind: saved?.kind ?? 'builtin', api: 'anthropic-messages', apiKey, ...(baseUrl ? { baseUrl } : {}), ...(headers ? { headers } : {}) },
       model: { provider: model.provider, id: model.id, name: model.name, contextWindow: model.contextWindow, maxTokens: model.maxTokens, cost: model.cost },
-      effort: CLAUDE_EFFORTS.includes(record.effort) ? record.effort : null,
+      effort: resolveClaudeEffort(model, record.effort),
       ultracode: !!record.ultracode,
       fast: record.speed === 'fast',
     };
@@ -583,9 +612,10 @@ export class SessionManager extends EventEmitter {
   async create({ environmentId, cwd: chosen, model, thinkingLevel, speed, ultra, prompt, engine, effort, ultracode }) {
     if (isRetiredProvider(model?.provider)) throw new Error(RETIRED_PROVIDER_MESSAGE);
     const claude = engine === CLAUDE_ENGINE;
+    let claudeModel = null;
     if (claude) {
       if (ultra) throw new Error(CLAUDE_NO_ULTRA);
-      await this.#claudeModel(model);
+      claudeModel = await this.#claudeModel(model);
     }
     const env = this.env(environmentId);
     const noFolder = !chosen;
@@ -602,10 +632,13 @@ export class SessionManager extends EventEmitter {
       try { return await this.#adopt(spare.record, fields, { model, thinkingLevel, speed, ultra }); }
       catch { await this.#stopSpare(spare); } // the warm Pi failed or could not move: start a fresh one below
     }
+    const clampedEffort = claude && effort ? clampClaudeEffort(claudeModel, effort) : null;
+    const piModel = !claude ? await this.#modelInfo(model) : null;
+    const effectiveThinking = piModel && thinkingLevel ? clampPiThinkingLevel(piModel, thinkingLevel) : (thinkingLevel ?? 'medium');
     const engineFields = claude
-      ? { engine: CLAUDE_ENGINE, ...(CLAUDE_EFFORTS.includes(effort) ? { effort } : {}), ...(ultracode ? { ultracode: true } : {}) }
+      ? { engine: CLAUDE_ENGINE, ...(clampedEffort ? { effort: clampedEffort } : {}), ...(ultracode ? { ultracode: true } : {}) }
       : (ultra ? { ultra: true } : {});
-    const record = { id: randomUUID(), ...fields, model, thinkingLevel: thinkingLevel ?? 'medium', ...speedField(speed), ...engineFields, createdAt: Date.now(), updatedAt: Date.now() };
+    const record = { id: randomUUID(), ...fields, model, thinkingLevel: effectiveThinking, ...speedField(speed), ...engineFields, createdAt: Date.now(), updatedAt: Date.now() };
     this.#add(record);
     await this.ensureStarted(record.id);
     return this.#view(record);
@@ -781,6 +814,12 @@ export class SessionManager extends EventEmitter {
       await session.stop().catch(() => {});
       if (runtime.session === session) runtime.session = null;
       if (session.attachInfo?.created) await this.stopRelay(env, record.id).catch(() => {});
+      // If an ssh -R port forward failed before attach (port collision or stale dead sshd forward)
+      // and no session process is alive on the relay, drop the pinned egressPort so the next try picks a fresh one.
+      if (env.kind === 'ssh' && record.egressPort && !session.attachInfo && /remote port forwarding failed/i.test(`${error?.message ?? ''}\n${session.stderr ?? ''}`)) {
+        const alive = await this.relaySessions(env).then(list => list.some(s => s.id === record.id && s.alive), () => true);
+        if (!alive) { delete record.egressPort; this.#save(record, {}); }
+      }
       // Re-check the Claude Code install next time (it may have been removed from the machine).
       if (claude) this.claudeInstalls.delete(env.id);
       throw error;
@@ -1074,14 +1113,14 @@ export class SessionManager extends EventEmitter {
   async setModel(id, provider, modelId) {
     if (isRetiredProvider(provider)) throw new Error(RETIRED_PROVIDER_MESSAGE);
     const record = this.record(id);
-    if (isClaude(record)) await this.#claudeModel({ provider, id: modelId });
+    const claudeModel = isClaude(record) ? await this.#claudeModel({ provider, id: modelId }) : null;
     let runtime = this.runtimes.get(id);
     // A host that can't reach this model's endpoint needs its traffic relayed through this Mac, which is
     // wired up when Pi starts. A session started without it is restarted (same session file, history kept).
     const env = this.env(record.environmentId);
     if (env.kind === 'ssh' && runtime?.session && !record.egressPort) {
       const baseUrl = (await this.catalog().catch(() => [])).find(m => m.provider === provider && m.id === modelId)?.baseUrl;
-      const facts = baseUrl?.startsWith('https://') ? await this.prepare(env.id) : null;
+      const facts = /^https?:\/\//i.test(baseUrl ?? '') ? await this.prepare(env.id) : null;
       if (facts?.unreachable?.includes(hostPortOf(baseUrl))) {
         if (runtime.streaming) throw new Error('Wait for the current reply to finish, then switch models.');
         this.#save(record, { model: { provider, id: modelId } });
@@ -1097,11 +1136,25 @@ export class SessionManager extends EventEmitter {
       }
     }
     const previous = record.model;
-    this.#save(record, { model: { provider, id: modelId } }); // the composer shows it at once
+    const previousEffort = record.effort;
+    const previousThinking = record.thinkingLevel;
+    const nextPatch = { model: { provider, id: modelId } };
+    if (claudeModel) {
+      const clampedEffort = record.effort ? clampClaudeEffort(claudeModel, record.effort) : null;
+      if (!clampedEffort) delete record.effort;
+      else nextPatch.effort = clampedEffort;
+    } else {
+      const info = await this.#modelInfo({ provider, id: modelId });
+      if (info && record.thinkingLevel) nextPatch.thinkingLevel = clampPiThinkingLevel(info, record.thinkingLevel);
+    }
+    this.#save(record, nextPatch); // the composer shows it at once
     if (runtime?.status !== 'connected') return; // applied when its Pi attaches or before the next prompt
     try { await this.#applyModel(record, runtime); }
     catch (error) {
-      if (record.model?.provider === provider && record.model?.id === modelId) this.#save(record, { model: previous });
+      if (record.model?.provider === provider && record.model?.id === modelId) {
+        if (previousEffort === undefined) delete record.effort; else record.effort = previousEffort;
+        this.#save(record, { model: previous, ...(previousThinking !== undefined ? { thinkingLevel: previousThinking } : {}) });
+      }
       throw error;
     }
   }
@@ -1110,7 +1163,9 @@ export class SessionManager extends EventEmitter {
     const record = this.record(id);
     // Claude Code has effort levels instead of Pi's thinking levels: the nearest one.
     if (isClaude(record)) return this.setEffort(id, claudeEffort(level) ?? level);
-    this.#save(record, { thinkingLevel: level });
+    const info = await this.#modelInfo(record.model);
+    const effective = info ? clampPiThinkingLevel(info, level) : level;
+    this.#save(record, { thinkingLevel: effective });
     const runtime = this.runtimes.get(id);
     if (runtime?.status === 'connected') await this.#applyModel(record, runtime);
   }
@@ -1119,8 +1174,10 @@ export class SessionManager extends EventEmitter {
     const record = this.record(id);
     if (!isClaude(record)) throw new Error('Effort levels belong to Claude Code conversations.');
     if (level != null && !CLAUDE_EFFORTS.includes(level)) throw new Error(`Unknown effort level: ${level}`);
-    if (level == null) delete record.effort;
-    this.#save(record, level == null ? {} : { effort: level });
+    const info = level == null ? null : await this.#modelInfo(record.model);
+    const effective = level == null ? null : (info ? clampClaudeEffort(info, level) : level);
+    if (effective == null) delete record.effort;
+    this.#save(record, effective == null ? {} : { effort: effective });
     const runtime = this.runtimes.get(id);
     if (runtime?.status === 'connected') await this.#applyModel(record, runtime);
     return { effort: record.effort ?? null };

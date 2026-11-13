@@ -302,6 +302,19 @@ test('worktree isolation maps paths into its own checkout and removes it when no
   assert.equal(worktreePath('/usr/share', wt), realpathSync('/usr/share'), 'outside the checkout');
   assert.equal(worktreePath(join(repo, '.git', 'config'), wt), join(real, '.git', 'config'), 'git internals');
   assert.equal(worktreePath('~/notes.txt', wt), '~/notes.txt');
+
+  // Read-only explore agents and non-git directories must not fail on git rev-parse.
+  const nonGit = join(root, 'plain-dir');
+  mkdirSync(nonGit, { recursive: true });
+  const exploreInRepo = await start(createSubagentTool(), context(async () => reply('found it'), { cwd: repo }), [{ name: 'Scan repo', task: 'Inspect repo', type: 'explore', isolation: 'worktree' }], { background: false });
+  assert.equal(exploreInRepo.details.results[0].status, 'completed');
+  assert.equal(exploreInRepo.details.results[0].worktree, undefined);
+  assert.ok(exploreInRepo.details.results[0].steps.some(s => s.id === 'worktree-note'));
+
+  const generalInPlain = await start(createSubagentTool(), context(async () => reply('done in plain'), { cwd: nonGit }), [{ name: 'Inspect plain', task: 'Work in plain dir', isolation: 'worktree' }], { background: false });
+  assert.equal(generalInPlain.details.results[0].status, 'completed');
+  assert.equal(generalInPlain.details.results[0].worktree, undefined);
+  assert.ok(generalInPlain.details.results[0].steps.some(s => s.id === 'worktree-note' && /not inside a git repository/.test(s.text)));
 });
 
 test('agents still running when their Pi ended are recorded as stopped, once', () => {

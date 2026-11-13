@@ -3,7 +3,7 @@ import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerD
 import { backgroundSnapshot } from './background-jobs.js';
 import { relativeSessionPath } from './file-paths.js';
 import { isRetiredProvider, RETIRED_PROVIDER_MESSAGE } from '../../../core/retired-providers.mjs';
-import { modelForEnvironment, modelsForEnvironment } from './model-catalog.js';
+import { clampEffort, claudeEffortsFor, effortsFor, modelForEnvironment, modelsForEnvironment } from './model-catalog.js';
 import { readAppearance, applyAppearance } from './appearance.js';
 import { useRef, useSyncExternalStore } from 'react';
 import { applyEvent, emptyTranscript, fromHistory, rewindTo } from './transcript.js';
@@ -260,7 +260,11 @@ export async function reloadTranscript(id) {
     if (JSON.stringify(current.history?.next) !== JSON.stringify(pageState.history.next)) historyBuffers.get(id)?.clear();
     const history = fromHistory(mergeHistory(pageState.messages, arrived), timingsOf(id));
     const updatedTools = Object.fromEntries(Object.entries(current.tools)
-      .filter(([key, tool]) => tool.status === 'running' || initial.tools[key] !== tool));
+      .filter(([key, tool]) => {
+        const persisted = history.tools[key];
+        if (tool.status === 'running') return !persisted;
+        return initial.tools[key] !== tool && (!persisted || persisted.historyRef);
+      }));
     const completed = current.live?.timestamp != null
       && history.messages.some(message => message.role === 'assistant' && historyKey(message) === historyKey(current.live));
     setTranscript(id, { ...current, ...history, live: completed ? null : current.live,
@@ -315,21 +319,37 @@ export function loadHistoryEntry(id, ref) {
   return pending;
 }
 
+function clampDraftEfforts(catalog, draft) {
+  const modelInfo = catalog?.find(m => m.provider === draft.model?.provider && m.id === draft.model?.id);
+  if (!modelInfo) return draft;
+  const piLevels = effortsFor(modelInfo);
+  const ccLevels = claudeEffortsFor(modelInfo);
+  return {
+    ...draft,
+    ...(piLevels.length ? { thinkingLevel: clampEffort(piLevels, draft.thinkingLevel) } : {}),
+    ...(ccLevels.length ? { effort: clampEffort(ccLevels, draft.effort) } : {}),
+  };
+}
+
 export async function loadCatalog() {
   try {
     const catalog = await api('catalog');
     set(s => {
-      const draft = { ...s.draft };
+      let draft = { ...s.draft };
       draft.model = modelForEnvironment(catalog, draft.environmentId, draft.model, draft.engine);
+      draft = clampDraftEfforts(catalog, draft);
       return { catalog, catalogError: null, draft };
     });
   } catch (error) { set({ catalogError: error.message }); }
 }
 
 export const setDraft = patch => set(s => {
-  const draft = { ...s.draft, ...patch };
+  let draft = { ...s.draft, ...patch };
   if (Object.hasOwn(patch, 'environmentId') || Object.hasOwn(patch, 'engine')) {
     draft.model = modelForEnvironment(s.catalog, draft.environmentId, draft.model, draft.engine);
+  }
+  if (Object.hasOwn(patch, 'model') || Object.hasOwn(patch, 'environmentId') || Object.hasOwn(patch, 'engine')) {
+    draft = clampDraftEfforts(s.catalog, draft);
   }
   return { draft };
 });
@@ -440,8 +460,9 @@ export function goForward() {
 }
 export function pickRecent(environmentId, cwd) {
   set(s => {
-    const draft = { ...s.draft, environmentId, cwd };
+    let draft = { ...s.draft, environmentId, cwd };
     draft.model = modelForEnvironment(s.catalog, environmentId, draft.model, draft.engine);
+    draft = clampDraftEfforts(s.catalog, draft);
     return { draft };
   });
   if (environmentId !== 'local') api('prepareEnvironment', environmentId);

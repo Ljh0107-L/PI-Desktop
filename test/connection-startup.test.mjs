@@ -11,7 +11,7 @@ import { SessionManager } from '../app/main/session-manager.mjs';
 import { prepareRemote, remoteInspectionScript } from '../app/main/remote-setup.mjs';
 import { EXTENSION_FILES, EXTENSION_PACKAGE, OBSOLETE_FILES, stageExtensions } from '../app/main/extensions.mjs';
 import { PiSession } from '../core/pi-session.mjs';
-import { sshRelayTransport } from '../core/transports.mjs';
+import { egressEnv, sshRelayTransport } from '../core/transports.mjs';
 
 const deferred = () => {
   let resolve, reject;
@@ -548,4 +548,46 @@ test('relay resume argv stays secret-free and egress connections never multiplex
   assert.ok(transport.args.includes('ControlMaster=no'));
   assert.ok(transport.args.includes('ExitOnForwardFailure=yes'));
   assert.ok(!transport.args.some(arg => /BOOT|apiKey|providers/.test(arg)));
+  assert.deepEqual(egressEnv(34567), {
+    HTTPS_PROXY: 'http://127.0.0.1:34567',
+    HTTP_PROXY: 'http://127.0.0.1:34567',
+    NO_PROXY: 'localhost,127.0.0.1,::1',
+    https_proxy: 'http://127.0.0.1:34567',
+    http_proxy: 'http://127.0.0.1:34567',
+    no_proxy: 'localhost,127.0.0.1,::1',
+  });
+});
+
+test('missing curl falls back to Node TCP probe for model reachability, and providersChanged refreshes running egress allowlist', async t => {
+  const f = remoteFixture(t);
+  let reachabilityScript = null;
+  const facts = await prepareRemote(f.env, { ...f.options, providerHosts: ['blocked.invalid:443', 'open.invalid:443'] }, {
+    probe: async () => f.host,
+    run: async (_env, script) => {
+      if (script.includes('nocurl')) return 'nocurl\n';
+      if (script.includes('node:net')) { reachabilityScript = script; return 'no blocked.invalid:443\nok open.invalid:443\n'; }
+      return f.inspection();
+    },
+  });
+  assert.ok(reachabilityScript?.includes('blocked.invalid:443'));
+  assert.deepEqual(facts.unreachable, ['blocked.invalid:443']);
+
+  // If even the Node probe fails, fail safe by treating hosts as unreachable.
+  const fallbackFacts = await prepareRemote(f.env, { ...f.options, providerHosts: ['blocked.invalid:443'] }, {
+    probe: async () => f.host,
+    run: async (_env, script) => {
+      if (script.includes('nocurl')) return 'nocurl\n';
+      if (script.includes('node:net')) throw new Error('probe failed');
+      return f.inspection();
+    },
+  });
+  assert.deepEqual(fallbackFacts.unreachable, ['blocked.invalid:443']);
+
+  const { manager } = managerFixture(t);
+  const allowed = [];
+  manager.egress = { port: 43210, allow: hosts => allowed.push(hosts), close() {} };
+  manager.catalog = async () => [{ provider: 'p', id: 'm', baseUrl: 'http://internal-relay:8080/v1' }];
+  manager.providersChanged();
+  await tick();
+  assert.deepEqual(allowed, [['internal-relay:8080']]);
 });

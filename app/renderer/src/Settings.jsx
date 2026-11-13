@@ -33,8 +33,8 @@ function ModelRow({ model, onChange, onRemove, lockedId = false, outputTitle }) 
       </div>
       {model.open && <div className="model-advanced">
         <div className="field-pair">
-          <label className="field"><span className="field-label">Context window</span><input value={model.contextWindow} onChange={e => set({ contextWindow: e.target.value })} placeholder="128K" /></label>
-          <label className="field" title={outputTitle}><span className="field-label">Max output tokens</span><input value={model.maxTokens} onChange={e => set({ maxTokens: e.target.value })} placeholder="16K" /></label>
+          <label className="field"><span className="field-label">Context window</span><input value={model.contextWindow} onChange={e => set({ contextWindow: e.target.value })} placeholder="800K" /></label>
+          <label className="field" title={outputTitle}><span className="field-label">Max output tokens</span><input value={model.maxTokens} onChange={e => set({ maxTokens: e.target.value })} placeholder="32768" /></label>
         </div>
         <div className="field"><span className="field-label">Input</span>
           <div className="check-group">

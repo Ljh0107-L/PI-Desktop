@@ -57,7 +57,13 @@ export function downloadClaudeTarball(platform, cacheDir, { onProgress = () => {
   const integrity = integrities[platform];
   if (!integrity) return Promise.reject(new Error(`Claude Code ${CLAUDE_CODE_VERSION} has no build for ${platform}.`));
   const out = join(cacheDir, `claude-code-${platform}-${CLAUDE_CODE_VERSION}.tgz`);
-  if (existsSync(out)) return Promise.resolve(out);
+  if (existsSync(out)) {
+    try {
+      const actual = `sha512-${createHash('sha512').update(readFileSync(out)).digest('base64')}`;
+      if (actual === integrity) return Promise.resolve(out);
+    } catch { /* re-download */ }
+    rmSync(out, { force: true });
+  }
   const key = out;
   if (downloads.has(key)) return downloads.get(key);
   const promise = (async () => {
@@ -65,7 +71,7 @@ export function downloadClaudeTarball(platform, cacheDir, { onProgress = () => {
     let lastError;
     for (const registry of registries) {
       const url = claudeTarballUrl(registry, platform);
-      const part = `${out}.${process.pid}.part`;
+      const part = `${out}.${process.pid}.${Math.random().toString(36).slice(2)}.part`;
       try {
         const res = await fetchImpl(url, { redirect: 'follow', signal: AbortSignal.timeout(30 * 60 * 1000) });
         if (!res.ok || !res.body) throw new Error(`${res.status} ${res.statusText} from ${url}`);
@@ -138,22 +144,27 @@ if [ -e /lib/ld-musl-x86_64.so.1 ] || [ -e /lib/ld-musl-aarch64.so.1 ] || (ldd -
 if [ -x ${shellQuote(bin)} ]; then printf 'installed=%s\n' "$(${shellQuote(bin)} --version 2>/dev/null | head -1)"; fi
 command -v curl >/dev/null && echo 'curl=1'
 if command -v sha512sum >/dev/null; then echo 'sha=sha512sum'; elif command -v shasum >/dev/null; then echo 'sha=shasum'; fi
+if command -v npm >/dev/null; then printf 'registry=%s\n' "$(npm config get registry 2>/dev/null)"; fi
 true`;
 }
 const kv = text => Object.fromEntries(String(text).split('\n').map(line => { const i = line.indexOf('='); return i > 0 ? [line.slice(0, i), line.slice(i + 1).trim()] : null; }).filter(Boolean));
 
-// Extract the binary from a tarball on stdin (or a file) into the pinned directory, atomically.
+// Extract the binary from a tarball on stdin (or a file) into the pinned directory, atomically,
+// without --strip-components=1 so BusyBox tar works too. Prune superseded Claude Code versions.
 function remoteExtract(root, source) {
   const { dir } = claudeLayout(root);
   const q = shellQuote(dir);
+  const parentQ = shellQuote(`${root}/claude-code`);
   return [
     'set -e',
-    `rm -rf ${q}.tmp`,
-    `mkdir -p ${q}.tmp`,
-    `tar -xzf ${source} -C ${q}.tmp --strip-components=1 package/claude`,
+    `rm -rf ${q}.extract ${q}.tmp`,
+    `mkdir -p ${q}.extract ${q}.tmp`,
+    `tar -xzf ${source} -C ${q}.extract package/claude`,
+    `mv ${q}.extract/package/claude ${q}.tmp/claude`,
     `chmod 755 ${q}.tmp/claude`,
-    `rm -rf ${q}`,
+    `rm -rf ${q}.extract ${q}`,
     `mv ${q}.tmp ${q}`,
+    `for old in ${parentQ}/[0-9]*.[0-9]*; do [ "$old" = ${q} ] || rm -rf "$old"; done`,
     `mkdir -p ${shellQuote(claudeLayout(root).configDir)}`,
     `chmod 700 ${shellQuote(claudeLayout(root).configDir)}`,
   ].join('\n');
@@ -173,24 +184,29 @@ export async function prepareRemoteClaude(env, facts, { runSsh, cacheDir, onProg
   const platform = claudePlatform(state.os, state.arch, state.musl === '1');
   if (!platform || !integrities[platform]) throw new Error(`Claude Code is not available for ${state.os} ${state.arch} on ${env.label ?? env.host}.`);
   const hex = integrityHex(integrities[platform]);
+  const hostRegistry = /^https?:\/\//i.test(state.registry ?? '') && state.registry !== 'undefined' ? state.registry.replace(/\/+$/, '') : null;
+  const hostRegistries = hostRegistry && !registries.some(r => r.replace(/\/+$/, '') === hostRegistry) ? [hostRegistry, ...registries] : registries;
   // The host downloads it itself when it can reach a registry: fastest, and nothing crosses this Mac.
   if (!forceUpload && state.curl === '1' && state.sha) {
     const sum = state.sha === 'shasum' ? 'shasum -a 512' : 'sha512sum';
     const tarball = `${root}/tmp/claude-code-${platform}-${CLAUDE_CODE_VERSION}.tgz`;
-    for (const registry of registries) {
+    const tarballQ = shellQuote(tarball);
+    for (const registry of hostRegistries) {
       onProgress(`Installing Claude Code on ${env.label ?? env.host}…`);
       const script = [
         'set -e',
+        `trap 'rm -f ${tarballQ}' EXIT`,
         `mkdir -p ${shellQuote(`${root}/tmp`)}`,
         // A short connection check first, so a host without internet does not wait for a long timeout.
         `curl -fsS -m 8 -o /dev/null -r 0-0 ${shellQuote(claudeTarballUrl(registry, platform))}`,
-        `curl -fsSL -m 900 ${shellQuote(claudeTarballUrl(registry, platform))} -o ${shellQuote(tarball)}`,
-        `[ "$(${sum} ${shellQuote(tarball)} | cut -d' ' -f1)" = ${hex} ]`,
-        remoteExtract(root, shellQuote(tarball)),
-        `rm -f ${shellQuote(tarball)}`,
+        `curl -fsSL --connect-timeout 8 -m 900 ${shellQuote(claudeTarballUrl(registry, platform))} -o ${tarballQ}`,
+        `[ "$(${sum} ${tarballQ} | cut -d' ' -f1)" = ${hex} ]`,
+        remoteExtract(root, tarballQ),
       ].join('\n');
       try { await runSsh(env, script, { timeout: 960000 }); return layout; }
-      catch { await runSsh(env, `rm -f ${shellQuote(tarball)}`, { timeout: 30000 }).catch(() => {}); }
+      catch (error) {
+        if (/No space left|ENOSPC|Permission denied|tar: .*not found/i.test(error?.message ?? '')) throw error;
+      }
     }
   }
   // No internet on the host (or the download failed): download here and upload over SSH.
@@ -238,4 +254,37 @@ export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 export function claudeEffort(level) {
   if (CLAUDE_EFFORTS.includes(level)) return level;
   return { off: 'low', minimal: 'low' }[level] ?? null;
+}
+export function claudeEffortsFor(model) {
+  if (model?.reasoning === false) return [];
+  if (!model?.thinkingLevelMap) return [...CLAUDE_EFFORTS];
+  const map = model.thinkingLevelMap;
+  return CLAUDE_EFFORTS.filter(level => {
+    const mapped = map[level];
+    if (mapped === null) return false;
+    if (level === 'xhigh' || level === 'max') return mapped != null;
+    return true;
+  });
+}
+export function clampClaudeEffort(model, level) {
+  if (level == null) return null;
+  const mapped = claudeEffort(level);
+  if (!mapped) return null;
+  const allowed = claudeEffortsFor(model);
+  if (!allowed.length) return null;
+  if (allowed.includes(mapped)) return mapped;
+  const requestedIndex = CLAUDE_EFFORTS.indexOf(mapped);
+  for (let i = requestedIndex; i < CLAUDE_EFFORTS.length; i++) {
+    if (allowed.includes(CLAUDE_EFFORTS[i])) return CLAUDE_EFFORTS[i];
+  }
+  for (let i = requestedIndex - 1; i >= 0; i--) {
+    if (allowed.includes(CLAUDE_EFFORTS[i])) return CLAUDE_EFFORTS[i];
+  }
+  return allowed[0] ?? null;
+}
+export function resolveClaudeEffort(model, level) {
+  const clamped = clampClaudeEffort(model, level);
+  if (!clamped) return null;
+  const mapped = model?.thinkingLevelMap?.[clamped];
+  return typeof mapped === 'string' && CLAUDE_EFFORTS.includes(mapped) ? mapped : clamped;
 }

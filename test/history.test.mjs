@@ -300,3 +300,38 @@ test('opening a local page does not wait for Pi startup or request get_entries',
   assert.ok(page.messages.length <= PAGE_MESSAGES);
   assert.ok(page.next);
 });
+
+test('tail refresh preserves earlier live-streamed messages from the current turn before page start', () => {
+  const reloadedPrev = projectEntry(entry(0), { id: 'e0' });
+  const liveTurnStart = entry(1, 'e0', { role: 'user', content: [{ type: 'text', text: 'turn 2 prompt' }] }).message;
+  const liveCall = entry(2, 'e1', { role: 'assistant', content: [{ type: 'toolCall', id: 'c1', name: 'read', arguments: { path: 'a.js' } }] }).message;
+  const liveResult = entry(3, 'e2', { role: 'toolResult', toolCallId: 'c1', toolName: 'read', content: [{ type: 'text', text: 'ok' }] }).message;
+  const current = {
+    messages: [reloadedPrev, liveTurnStart, liveCall, liveResult],
+    history: { snapshot: { identity: 'same-file' }, next: null },
+  };
+  const page = {
+    messages: [projectEntry(entry(3, 'e2', liveResult), { id: 'e3' })],
+    snapshot: { identity: 'same-file' },
+    next: { id: 'e2' },
+  };
+  const merged = mergeReloadedHistory(page, current);
+  assert.equal(merged.messages.length, 4);
+  const blocks = displayBlocks(fromHistory(merged.messages));
+  assert.equal(blocks.some(b => b.kind === 'orphanResult'), false);
+  assert.equal(blocks.filter(b => b.kind === 'user').length, 2);
+});
+
+test('readHistory never splits an assistant tool call from its tool results across a page boundary', async t => {
+  const rows = [entry(0, null, { role: 'user', content: [{ type: 'text', text: 'start' }] })];
+  for (let i = 1; i <= 100; i += 2) {
+    rows.push(entry(i, `e${i - 1}`, { role: 'assistant', content: [{ type: 'text', text: `step ${i}` }, { type: 'toolCall', id: `call-${i}`, name: 'read', arguments: { path: `f${i}.js` } }] }));
+    rows.push(entry(i + 1, `e${i}`, { role: 'toolResult', toolCallId: `call-${i}`, toolName: 'read', content: [{ type: 'text', text: 'x'.repeat(200) }] }));
+  }
+  const file = fixture(t, rows);
+  const page1 = await readHistory(file);
+  assert.ok(page1.next);
+  assert.equal(displayBlocks(fromHistory(page1.messages)).some(b => b.kind === 'orphanResult'), false);
+  const page2 = await readHistory(file, { cursor: page1.next });
+  assert.equal(displayBlocks(fromHistory(mergeHistory(page2.messages, page1.messages))).some(b => b.kind === 'orphanResult'), false);
+});

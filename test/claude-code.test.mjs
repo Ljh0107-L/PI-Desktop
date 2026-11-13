@@ -11,7 +11,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { ClaudeAdapter, Transcript, claudeEnv, normalizeToolCall, piUsage, toolResultContent } from '../agent/pidesk-claude.mjs';
-import { CLAUDE_CODE_BUILTIN_BASE_URLS, CLAUDE_CODE_VERSION, CLAUDE_CODE_INTEGRITY, claudeBuiltinBaseUrl, claudeEffort, claudeLayout, claudePlatform, claudeTarballUrl, downloadClaudeTarball, ensureLocalClaude, isClaudeCodeModel, prepareRemoteClaude, remoteClaudeProbeScript } from '../app/main/claude-code.mjs';
+import { CLAUDE_CODE_BUILTIN_BASE_URLS, CLAUDE_CODE_VERSION, CLAUDE_CODE_INTEGRITY, clampClaudeEffort, claudeBuiltinBaseUrl, claudeEffort, claudeEffortsFor, claudeLayout, claudePlatform, claudeTarballUrl, downloadClaudeTarball, ensureLocalClaude, isClaudeCodeModel, prepareRemoteClaude, remoteClaudeProbeScript, resolveClaudeEffort } from '../app/main/claude-code.mjs';
+import { claudeEffortsFor as uiClaudeEffortsFor, clampEffort, effortsFor } from '../app/renderer/src/model-catalog.js';
 import { EXTENSION_FILES } from '../app/main/extensions.mjs';
 import { SessionManager } from '../app/main/session-manager.mjs';
 import { readHistory } from '../agent/pidesk-history.mjs';
@@ -50,7 +51,7 @@ test('usage is Pi-shaped and priced with the model rates', () => {
 
 test('Claude Code gets only its own credentials and a private config directory', () => {
   const env = claudeEnv({ PATH: '/bin', HOME: '/h', PIDESK_BOOT: '{"secret":1}', OPENAI_API_KEY: 'x', HTTPS_PROXY: 'http://127.0.0.1:9' },
-    { configDir: '/cfg', provider: { id: 'gw', apiKey: 'sk-1', baseUrl: 'https://gw.example', headers: { 'X-Team': 'a' } }, model: { id: 'gw-model', maxTokens: 64000 } });
+    { configDir: '/cfg', provider: { id: 'gw', apiKey: 'sk-1', baseUrl: 'https://gw.example', headers: { 'X-Team': 'a' } }, model: { id: 'gw-model', maxTokens: 64000, contextWindow: 800000 } });
   assert.equal(env.PIDESK_BOOT, undefined);
   assert.equal(env.OPENAI_API_KEY, undefined);
   assert.equal(env.CLAUDE_CONFIG_DIR, '/cfg');
@@ -58,6 +59,9 @@ test('Claude Code gets only its own credentials and a private config directory',
   assert.equal(env.ANTHROPIC_BASE_URL, 'https://gw.example');
   assert.equal(env.ANTHROPIC_CUSTOM_HEADERS, 'X-Team: a');
   assert.equal(env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'gw-model', 'a custom endpoint serves its own models for background work');
+  assert.equal(env.CLAUDE_CODE_MAX_OUTPUT_TOKENS, '64000');
+  assert.equal(env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, '800000');
+  assert.equal(env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '800000');
   assert.equal(env.HTTPS_PROXY, 'http://127.0.0.1:9', 'egress through the desktop still works');
   assert.equal(env.DISABLE_AUTOUPDATER, '1');
   assert.equal(env.CLAUDE_CODE_PROMPT_CACHE_TTL, '1h');
@@ -66,6 +70,10 @@ test('Claude Code gets only its own credentials and a private config directory',
   const official = claudeEnv({}, { configDir: '/c', provider: { id: 'anthropic', apiKey: 'sk-a' }, model: { id: 'claude-x' } });
   assert.equal(official.ANTHROPIC_BASE_URL, undefined);
   assert.equal(official.ANTHROPIC_DEFAULT_HAIKU_MODEL, undefined, "Anthropic's API keeps Claude Code's own aliases");
+  assert.equal(official.CLAUDE_CODE_MAX_CONTEXT_TOKENS, undefined);
+  assert.equal(official.CLAUDE_CODE_AUTO_COMPACT_WINDOW, undefined);
+  const officialCapped = claudeEnv({}, { configDir: '/c', provider: { id: 'anthropic', apiKey: 'sk-a' }, model: { id: 'claude-x', contextWindow: 800000 } });
+  assert.equal(officialCapped.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '800000');
 });
 
 test('Anthropic Messages models and compatible built-in providers run Claude Code; Pi thinking levels map to its effort', () => {
@@ -390,6 +398,11 @@ test('downloads are verified against the pinned checksum, with a mirror after a 
   assert.equal(calls.length, 2);
   await assert.rejects(downloadClaudeTarball('linux-arm64', join(dir, 'cache2'), { fetchImpl: fetchServing(data), registries: ['https://x.example'], integrities: { 'linux-arm64': 'sha512-AAAA' } }), /checksum/);
   assert.ok(!existsSync(join(dir, 'cache2', `claude-code-linux-arm64-${CLAUDE_CODE_VERSION}.tgz`)), 'nothing unverified is kept');
+  // Corrupted cached tarball is discarded and re-downloaded.
+  const corruptCache = join(dir, 'cache-corrupt'); mkdirSync(corruptCache, { recursive: true });
+  writeFileSync(join(corruptCache, `claude-code-linux-x64-${CLAUDE_CODE_VERSION}.tgz`), 'corrupt');
+  const redownloaded = await downloadClaudeTarball('linux-x64', corruptCache, { fetchImpl: fetchServing(data), registries: ['https://mirror.example'], integrities: { 'linux-x64': integrity } });
+  assert.deepEqual(readFileSync(redownloaded), data);
 });
 
 test('this Mac installs its own copy in the app data folder, once', { timeout: 20000 }, async t => {
@@ -440,6 +453,11 @@ test('an SSH host downloads Claude Code itself, or gets it uploaded when it has 
   scripts.length = 0;
   await prepareRemoteClaude(env, facts, { ...options, runSsh: sshWith({ curl: false }) });
   assert.ok(scripts.some(s => s.input) && !scripts.some(s => s.script.includes('curl -fsSL')));
+  // Fatal disk-full error fails immediately instead of uploading 150 MB from the Mac.
+  await assert.rejects(prepareRemoteClaude(env, facts, {
+    ...options,
+    runSsh: async (_env, script) => script.includes("printf 'os=%s") ? 'os=Linux\narch=x86_64\ncurl=1\nsha=sha512sum\n' : Promise.reject(new Error('No space left on device')),
+  }), /No space left/);
 });
 
 // The install scripts themselves, run by a real POSIX shell against a real HTTP registry: download with
@@ -599,4 +617,164 @@ test('the real Claude Code binary runs a conversation end to end', { skip: !proc
   assert.ok(mock.requests.every(r => r.model === 'mock-claude'), 'background work uses the conversation model on a custom endpoint');
   const replies = page.messages.filter(m => m.role === 'assistant');
   assert.ok(replies.every(m => m.usage?.output > 0 && m.__timing?.requestStart <= m.__timing?.end));
+});
+
+test('Claude Code effort levels respect model reasoning and thinkingLevelMap', async t => {
+  const noMax = { reasoning: true, thinkingLevelMap: { off: null, minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh' } };
+  assert.deepEqual(claudeEffortsFor(noMax), ['low', 'medium', 'high', 'xhigh']);
+  assert.deepEqual(uiClaudeEffortsFor(noMax), ['low', 'medium', 'high', 'xhigh']);
+  assert.equal(clampClaudeEffort(noMax, 'max'), 'xhigh');
+  assert.equal(clampEffort(uiClaudeEffortsFor(noMax), 'max'), 'xhigh');
+  assert.equal(resolveClaudeEffort(noMax, 'max'), 'xhigh');
+
+  const mapped = { reasoning: true, thinkingLevelMap: { low: 'low', medium: null, high: 'max' } };
+  assert.deepEqual(claudeEffortsFor(mapped), ['low', 'high']);
+  assert.equal(clampClaudeEffort(mapped, 'medium'), 'high');
+  assert.equal(resolveClaudeEffort(mapped, 'high'), 'max');
+
+  const disabled = { reasoning: false };
+  assert.deepEqual(claudeEffortsFor(disabled), []);
+  assert.deepEqual(uiClaudeEffortsFor(disabled), []);
+  assert.deepEqual(effortsFor(disabled), []);
+  assert.equal(resolveClaudeEffort(disabled, 'high'), null);
+
+  const f = await managerFixture(t);
+  const baseCatalog = await f.manager.catalog();
+  f.manager.catalog = async () => [
+    ...baseCatalog,
+    { provider: 'gw', id: 'gw-no-max', name: 'No Max', api: 'anthropic-messages', reasoning: true, thinkingLevelMap: { off: null, minimal: null, low: 'low', medium: 'medium', high: 'high', xhigh: 'xhigh' } },
+  ];
+  const created = await f.manager.create({ environmentId: 'local', cwd: f.work, model: { provider: 'gw', id: 'gw-no-max' }, engine: 'claude-code', effort: 'max' });
+  assert.equal(created.effort, 'xhigh');
+  const cfg = await f.manager.claudeConfig({ model: { provider: 'gw', id: 'gw-no-max' }, effort: 'max' });
+  assert.equal(cfg.effort, 'xhigh');
+});
+
+test('early tool_result arriving before message_stop keeps tool_execution_start before end and assistant before toolResult in transcript', async t => {
+  const { EventEmitter } = await import('node:events');
+  const { PassThrough } = await import('node:stream');
+  const dir = tmp(t);
+  const events = [];
+  const waiters = [];
+  const write = record => { events.push(record); for (const w of [...waiters]) if (w.pred(record)) { waiters.splice(waiters.indexOf(w), 1); w.resolve(record); } };
+  let child;
+  const spawnImpl = () => {
+    const proc = new EventEmitter();
+    proc.stdin = new PassThrough();
+    proc.stdout = new PassThrough();
+    proc.stderr = new PassThrough();
+    proc.kill = () => {};
+    let buf = '';
+    proc.stdin.on('data', chunk => {
+      buf += chunk.toString();
+      let i;
+      while ((i = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+        if (!line) continue;
+        const req = JSON.parse(line);
+        if (req.type === 'control_request' && req.request?.subtype === 'initialize') {
+          proc.stdout.write(JSON.stringify({ type: 'control_response', response: { subtype: 'success', request_id: req.request_id, response: { commands: [], models: [], account: { tokenSource: 'none', apiKeySource: 'ANTHROPIC_API_KEY' }, claude_code_version: '2.1.322' } } }) + '\n');
+        } else if (req.type === 'user') {
+          const emit = r => proc.stdout.write(JSON.stringify(r) + '\n');
+          emit({ type: 'stream_event', event: { type: 'message_start', message: { id: 'm1', model: 'gw-claude', usage: { input_tokens: 10, output_tokens: 1 } } } });
+          emit({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'call_early', name: 'Read', input: {} } } });
+          emit({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"file_path":"/tmp/a.js"}' } } });
+          emit({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+          // Parallel tool finishes BEFORE message_stop arrives!
+          emit({ type: 'user', message: { role: 'user', content: [{ type: 'tool_result', tool_use_id: 'call_early', content: 'console.log(1)' }] } });
+          emit({ type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: 'tool_use' }, usage: { output_tokens: 5 } } });
+          emit({ type: 'stream_event', event: { type: 'message_stop' } });
+          emit({ type: 'result', subtype: 'success', is_error: false, usage: { input_tokens: 10, output_tokens: 5 } });
+        }
+      }
+    });
+    child = proc;
+    return proc;
+  };
+  const adapter = new ClaudeAdapter({
+    boot: { claudeCode: { bin: 'mock', configDir: join(dir, 'cfg'), sessionsDir: join(dir, 'sessions'), cwd: dir, provider: { id: 'gw', kind: 'custom', api: 'anthropic-messages', apiKey: 'sk-1' }, model: { provider: 'gw', id: 'gw-claude' } } },
+    write, spawnImpl, env: process.env,
+  });
+  const settled = new Promise(resolve => waiters.push({ pred: r => r.type === 'agent_settled', resolve }));
+  adapter.handle({ type: 'prompt', id: 'p1', message: 'read it' });
+  await settled;
+  assert.ok(child);
+
+  const startIdx = events.findIndex(e => e.type === 'tool_execution_start' && e.toolCallId === 'call_early');
+  const endIdx = events.findIndex(e => e.type === 'tool_execution_end' && e.toolCallId === 'call_early');
+  assert.ok(startIdx >= 0 && endIdx > startIdx, `expected start before end, got ${startIdx} vs ${endIdx}`);
+  assert.equal(events[startIdx].toolName, 'read');
+  assert.equal(events[endIdx].toolName, 'read');
+
+  const msgEnds = events.map((e, i) => ({ e, i })).filter(x => x.e.type === 'message_end' && x.e.message.role !== 'user');
+  assert.equal(msgEnds[0].e.message.role, 'assistant');
+  assert.equal(msgEnds[1].e.message.role, 'toolResult');
+  assert.equal(msgEnds[1].e.message.toolName, 'read');
+
+  const saved = adapter.transcript.messages();
+  assert.deepEqual(saved.map(m => m.role), ['user', 'assistant', 'toolResult']);
+  assert.equal(saved[2].toolName, 'read');
+});
+
+test('Claude Code respects configured 800K contextWindow in stats and restarts if window changes', async t => {
+  const { EventEmitter } = await import('node:events');
+  const { PassThrough } = await import('node:stream');
+  const dir = tmp(t);
+  const starts = [];
+  const spawnImpl = (_bin, _args, opts) => {
+    starts.push({ env: opts.env });
+    const proc = new EventEmitter();
+    proc.stdin = new PassThrough();
+    proc.stdout = new PassThrough();
+    proc.stderr = new PassThrough();
+    proc.kill = () => {};
+    let buf = '';
+    proc.stdin.on('data', chunk => {
+      buf += chunk.toString();
+      let i;
+      while ((i = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+        if (!line) continue;
+        const req = JSON.parse(line);
+        if (req.type === 'control_request' && req.request?.subtype === 'initialize') {
+          proc.stdout.write(JSON.stringify({ type: 'control_response', response: { subtype: 'success', request_id: req.request_id, response: { commands: [], models: [], account: { tokenSource: 'none', apiKeySource: 'ANTHROPIC_API_KEY' }, claude_code_version: '2.1.322' } } }) + '\n');
+        } else if (req.type === 'control_request' && req.request?.subtype === 'get_context_usage') {
+          // Simulate Claude Code reporting 1M while model in Settings is capped at 800K.
+          proc.stdout.write(JSON.stringify({ type: 'control_response', response: { subtype: 'success', request_id: req.request_id, response: { totalTokens: 400000, maxTokens: 1000000 } } }) + '\n');
+        } else if (req.type === 'user') {
+          const emit = r => proc.stdout.write(JSON.stringify(r) + '\n');
+          emit({ type: 'stream_event', event: { type: 'message_start', message: { id: 'm1', model: 'claude-fable-5-x', usage: { input_tokens: 400000, output_tokens: 1 } } } });
+          emit({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } });
+          emit({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'ok' } } });
+          emit({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+          emit({ type: 'stream_event', event: { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: 10 } } });
+          emit({ type: 'stream_event', event: { type: 'message_stop' } });
+          emit({ type: 'result', subtype: 'success', is_error: false, usage: { input_tokens: 400000, output_tokens: 10 }, modelUsage: { 'claude-fable-5-x': { contextWindow: 1000000 } } });
+        }
+      }
+    });
+    return proc;
+  };
+  const waiters = [];
+  const write = record => { for (const w of [...waiters]) if (w.pred(record)) { waiters.splice(waiters.indexOf(w), 1); w.resolve(record); } };
+  const adapter = new ClaudeAdapter({
+    boot: { claudeCode: { bin: 'mock', configDir: join(dir, 'cfg'), sessionsDir: join(dir, 'sessions'), cwd: dir, provider: { id: 'cpa', kind: 'custom', api: 'anthropic-messages', apiKey: 'sk-1' }, model: { provider: 'cpa', id: 'claude-fable-5-x', contextWindow: 800000, maxTokens: 32768 } } },
+    write, spawnImpl, env: process.env,
+  });
+  let settled = new Promise(resolve => waiters.push({ pred: r => r.type === 'agent_settled', resolve }));
+  adapter.handle({ type: 'prompt', id: 'p1', message: 'hi' });
+  await settled;
+  assert.equal(starts[0].env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, '800000');
+  assert.equal(starts[0].env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '800000');
+  const stats = await adapter.stats();
+  assert.equal(stats.contextUsage.contextWindow, 800000);
+  assert.equal(stats.contextUsage.percent, 50);
+
+  // Updating contextWindow in Settings triggers a fresh process on the next turn.
+  await adapter.configure({ model: { provider: 'cpa', id: 'claude-fable-5-x', contextWindow: 500000, maxTokens: 32768 } });
+  settled = new Promise(resolve => waiters.push({ pred: r => r.type === 'agent_settled', resolve }));
+  adapter.handle({ type: 'prompt', id: 'p2', message: 'again' });
+  await settled;
+  assert.equal(starts.length, 2);
+  assert.equal(starts[1].env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '500000');
 });

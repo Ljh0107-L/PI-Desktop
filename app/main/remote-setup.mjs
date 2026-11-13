@@ -13,15 +13,16 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, relative } from 'node:path';
 import { join } from 'node:path';
 import { shellQuote, sshMuxArgs } from '../../core/transports.mjs';
 import { EXTENSION_FILES, EXTENSION_PACKAGE, OBSOLETE_FILES } from './extensions.mjs';
 
 const MIN_NODE = '22.19.0';
-const NEEDED_KB = 600 * 1024;                 // Pi + portable Node with headroom
+const NEEDED_KB = 900 * 1024;                 // portable Node + Pi + Claude Code headroom
 const SCRATCH = ['/opt/tmp', '/data', '/data00', '/data0', '/mnt/data', '/scratch', '/var/tmp', '/tmp'];
+const NODE_MIRRORS = ['https://nodejs.org/dist/latest-v22.x', 'https://npmmirror.com/mirrors/node/latest-v22.x'];
 
 export function sshBaseArgs(env) {
   return ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=3', ...sshMuxArgs(), ...(env.sshArgs ?? [])];
@@ -70,12 +71,14 @@ const kv = text => {
   return out;
 };
 
-// Step 1: what the host has (Node candidates, disk space, platform).
-export async function probeHost(env) {
+// Step 1: what the host has (Node candidates, disk space, executability, platform).
+export async function probeHost(env, preferredRoot) {
   const scratchNodes = SCRATCH.map(d => d + '/.pidesk-$(id -un)/node/bin/node').join(' ');
+  const extraDir = preferredRoot ? ` ${shellQuote(dirname(preferredRoot))}` : '';
   const script = [
     "printf 'home=%s\\n' \"$HOME\"; printf 'user=%s\\n' \"$(id -un)\"; printf 'hostname=%s\\n' \"$(hostname)\"",
     "printf 'os=%s\\n' \"$(uname -s)\"; printf 'arch=%s\\n' \"$(uname -m)\"",
+    "if [ -e /lib/ld-musl-x86_64.so.1 ] || [ -e /lib/ld-musl-aarch64.so.1 ] || (ldd --version 2>&1 | grep -qi musl); then echo 'musl=1'; fi",
     'SH=$SHELL; [ -n "$SH" ] || SH=sh',
     'for c in "$(command -v node 2>/dev/null)" "$($SH -lc \'command -v node\' 2>/dev/null | tail -1)" ' +
       '$HOME/.nvm/versions/node/*/bin/node $HOME/.local/share/fnm/node-versions/*/installation/bin/node $HOME/.fnm/node-versions/*/installation/bin/node ' +
@@ -83,9 +86,9 @@ export async function probeHost(env) {
       '$HOME/.pidesk/node/bin/node ' + scratchNodes + '; do',
     "  [ -n \"$c\" ] && [ -x \"$c\" ] && printf 'node=%s %s\\n' \"$c\" \"$(\"$c\" -v 2>/dev/null)\"",
     'done',
-    'for d in "$HOME" ' + SCRATCH.join(' ') + '; do',
-    // -w is not enough: read-only mounts still pass it. Create a file to be sure.
-    "  t=\"$d/.pidesk-probe.$$\"; if [ -d \"$d\" ] && touch \"$t\" 2>/dev/null; then rm -f \"$t\"; printf 'disk=%s %s\\n' \"$d\" \"$(df -Pk \"$d\" 2>/dev/null | awk 'NR==2{print $4}')\"; fi",
+    'for d in "$HOME" ' + SCRATCH.join(' ') + extraDir + '; do',
+    // -w is not enough: read-only mounts still pass it, and noexec mounts block Node/Claude binaries.
+    "  t=\"$d/.pidesk-probe.$$\"; if [ -d \"$d\" ] && printf '#!/bin/sh\\nexit 0\\n' > \"$t\" 2>/dev/null; then exec_ok=0; chmod +x \"$t\" 2>/dev/null && \"$t\" 2>/dev/null && exec_ok=1; rm -f \"$t\"; printf 'disk=%s %s %s\\n' \"$d\" \"$(df -Pk \"$d\" 2>/dev/null | awk 'NR==2{print $4}')\" \"$exec_ok\"; fi",
     'done',
     "command -v curl >/dev/null && echo 'curl=1'; command -v sha256sum >/dev/null && echo 'sha=sha256sum'; command -v shasum >/dev/null && echo 'sha=shasum'",
     'true',
@@ -93,71 +96,124 @@ export async function probeHost(env) {
   const raw = kv(await runSsh(env, script));
   const nodes = (raw.node ?? []).map(line => { const [path, version] = line.split(' '); return { path, version }; })
     .filter(n => n.version?.startsWith('v'));
-  const disks = (raw.disk ?? []).map(line => { const [dir, kb] = line.split(' '); return { dir, kb: Number(kb) || 0 }; });
-  return { home: raw.home?.[0], user: raw.user?.[0], hostname: raw.hostname?.[0], os: raw.os?.[0], arch: raw.arch?.[0], nodes, disks, curl: !!raw.curl, sha: raw.sha?.[0] };
+  const disks = (raw.disk ?? []).map(line => { const [dir, kb, execFlag] = line.split(' '); return { dir, kb: Number(kb) || 0, exec: execFlag !== '0' }; });
+  return { home: raw.home?.[0], user: raw.user?.[0], hostname: raw.hostname?.[0], os: raw.os?.[0], arch: raw.arch?.[0], musl: !!raw.musl, nodes, disks, curl: !!raw.curl, sha: raw.sha?.[0] };
 }
 
 function chooseRoot(host, preferred) {
-  if (preferred) return preferred;
-  const home = host.disks.find(d => d.dir === host.home);
-  if (home && home.kb >= NEEDED_KB) return `${host.home}/.pidesk`;
-  const roomy = host.disks.filter(d => d.dir !== host.home && d.kb >= 4 * NEEDED_KB).sort((a, b) => b.kb - a.kb)[0];
+  const disks = host.disks ?? [];
+  const matchDisk = target => disks
+    .filter(d => target === d.dir || target.startsWith(d.dir.replace(/\/$/, '') + '/'))
+    .sort((a, b) => b.dir.length - a.dir.length)[0];
+  if (preferred) {
+    const matched = disks.length ? matchDisk(preferred) : null;
+    if (!matched || (matched.exec !== false && matched.kb >= NEEDED_KB)) return preferred;
+  }
+  const home = disks.find(d => d.dir === host.home);
+  if (home && home.exec !== false && home.kb >= NEEDED_KB) return `${host.home}/.pidesk`;
+  const minFor = dir => ['/tmp', '/var/tmp'].includes(dir) ? 2 * NEEDED_KB : NEEDED_KB;
+  const roomy = disks.filter(d => d.dir !== host.home && d.exec !== false && d.kb >= minFor(d.dir)).sort((a, b) => b.kb - a.kb)[0];
   if (!roomy) {
-    const free = home ? `${Math.round(home.kb / 1024)} MB free` : 'no write access';
-    throw Object.assign(new Error(`The disk on ${host.label} is full (${free} in ${host.home}). Free up about 600 MB there, then try again.`), { code: 'DISK_FULL' });
+    const free = home ? (home.exec === false ? 'mounted noexec' : `${Math.round(home.kb / 1024)} MB free`) : 'no write access';
+    throw Object.assign(new Error(`No usable install directory on ${host.label} (${free} in ${host.home}). Free up about 900 MB on an executable disk, then try again.`), { code: 'DISK_FULL' });
   }
   return `${roomy.dir.replace(/\/$/, '')}/.pidesk-${host.user}`;
 }
 
-// Portable Node for hosts without one: newest 22.x from nodejs.org, downloaded on the host when it has
-// internet, otherwise on this Mac (cached, checksum-verified) and streamed over SSH.
-async function nodeRelease(platform) {
-  const base = 'https://nodejs.org/dist/latest-v22.x/';
-  const sums = await (await fetch(base + 'SHASUMS256.txt')).text();
-  const line = sums.split('\n').find(l => l.endsWith(`-${platform}.tar.gz`));
-  if (!line) throw new Error(`No Node.js build for ${platform}`);
-  const [sha, file] = line.trim().split(/\s+/);
-  return { url: base + file, file, sha };
+// Portable Node for hosts without one: newest 22.x from nodejs.org (or npmmirror), downloaded on the
+// host when it has internet, otherwise on this Mac (cached, checksum-verified) and streamed over SSH.
+async function nodeRelease(platform, cacheDir) {
+  let lastError;
+  for (const base of NODE_MIRRORS) {
+    try {
+      const res = await fetch(`${base}/SHASUMS256.txt`, { signal: AbortSignal.timeout(15000) });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      const sums = await res.text();
+      const line = sums.split('\n').find(l => l.endsWith(`-${platform}.tar.gz`));
+      if (!line) throw new Error(`No Node.js build for ${platform}`);
+      const [sha, file] = line.trim().split(/\s+/);
+      return { url: `${base}/${file}`, urls: NODE_MIRRORS.map(m => `${m}/${file}`), file, sha };
+    } catch (error) { lastError = error; }
+  }
+  // Offline Mac fallback: reuse a previously cached tarball for this platform if present.
+  try {
+    const re = new RegExp(`^node-v(22\\.\\d+\\.\\d+)-${platform}\\.tar\\.gz$`);
+    const cached = readdirSync(cacheDir).map(name => ({ name, m: re.exec(name) })).filter(x => x.m)
+      .sort((a, b) => (versionAtLeast(a.m[1], b.m[1]) ? -1 : 1))[0];
+    if (cached) return { file: cached.name, cachedOnly: true };
+  } catch { /* cacheDir absent */ }
+  throw lastError ?? new Error(`Could not resolve Node.js 22 build for ${platform}`);
 }
 const PLATFORMS = { 'Linux x86_64': 'linux-x64', 'Linux aarch64': 'linux-arm64', 'Linux arm64': 'linux-arm64', 'Darwin arm64': 'darwin-arm64', 'Darwin x86_64': 'darwin-x64' };
+const nodeDownloads = new Map();
+
+async function downloadLocalNode(release, cacheDir, onProgress) {
+  mkdirSync(cacheDir, { recursive: true });
+  const local = join(cacheDir, release.file);
+  if (existsSync(local)) return local;
+  if (release.cachedOnly) throw new Error(`Node.js cache missing for ${release.file}`);
+  if (nodeDownloads.has(local)) return nodeDownloads.get(local);
+  const promise = (async () => {
+    onProgress('Downloading Node.js…');
+    let lastError;
+    for (const url of release.urls ?? [release.url]) {
+      try {
+        const res = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(10 * 60 * 1000) });
+        if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+        const body = Buffer.from(await res.arrayBuffer());
+        if (release.sha && createHash('sha256').update(body).digest('hex') !== release.sha) throw new Error('Node.js download failed its checksum');
+        const part = `${local}.${process.pid}.${Math.random().toString(36).slice(2)}.part`;
+        writeFileSync(part, body);
+        renameSync(part, local);
+        return local;
+      } catch (error) { lastError = error; }
+    }
+    throw lastError ?? new Error('Node.js download failed');
+  })().finally(() => nodeDownloads.delete(local));
+  nodeDownloads.set(local, promise);
+  return promise;
+}
 
 async function installNode(env, host, root, cacheDir, onProgress) {
+  if (host.musl) {
+    throw new Error(`No usable Node.js (>= ${MIN_NODE}) on ${host.label ?? env.host} (musl Linux). Install Node.js 22.19+ on the server (e.g. apk add nodejs) and retry.`);
+  }
   const platform = PLATFORMS[`${host.os} ${host.arch}`];
   if (!platform) throw new Error(`No usable Node.js on ${env.label} and no portable build for ${host.os} ${host.arch}.`);
   onProgress('Installing Node.js…');
-  const release = await nodeRelease(platform);
+  const release = await nodeRelease(platform, cacheDir);
   const dest = `${root}/node`;
-  // One statement per line, never an `&&` list: these scripts run under `set -e`, which ignores
-  // failures inside a list, and a half-extracted tarball must never pass for an installed Node.
+  const destQ = shellQuote(dest);
+  // Extract without --strip-components=1 so BusyBox tar works too, and keep stdin single-pass.
   const extract = source => [
-    `rm -rf ${shellQuote(dest)}.tmp`,
-    `mkdir -p ${shellQuote(dest)}.tmp`,
-    `tar -xzf ${source} -C ${shellQuote(dest)}.tmp --strip-components=1`,
-    `rm -rf ${shellQuote(dest)}`,
-    `mv ${shellQuote(dest)}.tmp ${shellQuote(dest)}`,
+    `rm -rf ${destQ}.extract ${destQ}.tmp`,
+    `mkdir -p ${destQ}.extract`,
+    `tar -xzf ${source} -C ${destQ}.extract`,
+    `set -- ${destQ}.extract/*`,
+    '[ -d "$1" ]',
+    `mv "$1" ${destQ}.tmp`,
+    `rm -rf ${destQ}.extract ${destQ}`,
+    `mv ${destQ}.tmp ${destQ}`,
   ].join('\n');
-  if (host.curl && host.sha) {
+  if (host.curl && host.sha && !release.cachedOnly) {
     const sum = host.sha === 'shasum' ? 'shasum -a 256' : 'sha256sum';
     const tarball = `${root}/tmp/${release.file}`;
-    // tar reads the downloaded file itself; a trailing `< file` would only redirect the last command.
-    const remote = [
-      'set -e',
-      `mkdir -p ${shellQuote(root)}/tmp`,
-      `curl -fsSL -m 300 ${shellQuote(release.url)} -o ${shellQuote(tarball)}`,
-      `[ "$(${sum} ${shellQuote(tarball)} | cut -d' ' -f1)" = ${release.sha} ]`,
-      extract(shellQuote(tarball)),
-      `rm -f ${shellQuote(tarball)}`,
-    ].join('\n');
-    try { await runSsh(env, remote, { timeout: 420000 }); return `${dest}/bin/node`; } catch { /* no internet on the host: upload instead */ }
+    const tarballQ = shellQuote(tarball);
+    for (const url of release.urls ?? [release.url]) {
+      const remote = [
+        'set -e',
+        `trap 'rm -f ${tarballQ}' EXIT`,
+        `mkdir -p ${shellQuote(root)}/tmp`,
+        // Fast 8s connection check so firewalled/offline hosts don't stall 300s before uploading.
+        `curl -fsS -m 8 -o /dev/null -r 0-0 ${shellQuote(url)}`,
+        `curl -fsSL --connect-timeout 8 -m 300 ${shellQuote(url)} -o ${tarballQ}`,
+        `[ "$(${sum} ${tarballQ} | cut -d' ' -f1)" = ${release.sha} ]`,
+        extract(tarballQ),
+      ].join('\n');
+      try { await runSsh(env, remote, { timeout: 360000 }); return `${dest}/bin/node`; } catch { /* try next mirror or upload */ }
+    }
   }
-  mkdirSync(cacheDir, { recursive: true });
-  const local = join(cacheDir, release.file);
-  if (!existsSync(local)) {
-    onProgress('Downloading Node.js…');
-    const body = Buffer.from(await (await fetch(release.url)).arrayBuffer());
-    if (createHash('sha256').update(body).digest('hex') !== release.sha) throw new Error('Node.js download failed its checksum');
-    writeFileSync(local + '.part', body); renameSync(local + '.part', local);
-  }
+  const local = await downloadLocalNode(release, cacheDir, onProgress);
   onProgress('Uploading Node.js…');
   await runSsh(env, `set -e\nmkdir -p ${shellQuote(root)}\n${extract('-')}`, { input: readFileSync(local), timeout: 600000 });
   return `${dest}/bin/node`;
@@ -194,8 +250,9 @@ export function piBundle(piPackageDir, cacheDir) {
   const paths = [...seen].map(dir => relative(top, dir)).sort();
   const roots = paths.filter(p => !paths.some(q => q !== p && p.startsWith(q + '/')));
   mkdirSync(cacheDir, { recursive: true });
-  execFileSync('tar', ['-czf', out + '.part', '--exclude', '.cache', '-C', top, ...roots.map(p => './' + p)], { env: { ...process.env, COPYFILE_DISABLE: '1' } });
-  renameSync(out + '.part', out);
+  const part = `${out}.${process.pid}.${Math.random().toString(36).slice(2)}.part`;
+  execFileSync('tar', ['-czf', part, '--exclude', '.cache', '-C', top, ...roots.map(p => './' + p)], { env: { ...process.env, COPYFILE_DISABLE: '1' } });
+  renameSync(part, out);
   return { path: out, version };
 }
 
@@ -205,7 +262,7 @@ async function uploadPi(env, root, bundle, onProgress) {
   onProgress(`Uploading Pi from this Mac (${size} MB)…`);
   const data = readFileSync(bundle.path);
   let last = -1;
-  await runSsh(env, `set -e; rm -rf ${q}/pi.new; mkdir -p ${q}/pi.new/node_modules; tar -xzf - -C ${q}/pi.new/node_modules 2>/dev/null || tar -xzf - -C ${q}/pi.new/node_modules; printf '{"private":true}\\n' > ${q}/pi.new/package.json; rm -rf ${q}/pi.old; [ -d ${q}/pi ] && mv ${q}/pi ${q}/pi.old; mv ${q}/pi.new ${q}/pi; rm -rf ${q}/pi.old`, {
+  await runSsh(env, `set -e; rm -rf ${q}/pi.new; mkdir -p ${q}/pi.new/node_modules; tar -xzf - -C ${q}/pi.new/node_modules; printf '{"private":true}\\n' > ${q}/pi.new/package.json; rm -rf ${q}/pi.old; [ -d ${q}/pi ] && mv ${q}/pi ${q}/pi.old; mv ${q}/pi.new ${q}/pi; rm -rf ${q}/pi.old`, {
     input: data, timeout: 1800000,
     onUpload: f => { const pct = Math.floor(f * 100 / 5) * 5; if (pct !== last) { last = pct; onProgress(`Uploading Pi from this Mac… ${pct}%`); } },
   });
@@ -269,7 +326,7 @@ export async function prepareRemote(env, { piVersion, piPackageDir, bridgePath, 
   }
   if (!node) {
     onProgress('Discovering remote environment…');
-    host = { ...(await probe(env)), label: env.label ?? env.host };
+    host = { ...(await probe(env, preferredRoot)), label: env.label ?? env.host };
     root = chooseRoot(host, preferredRoot);
     const suitable = host.nodes.filter(n => versionAtLeast(n.version, MIN_NODE)).sort((a, b) => (versionAtLeast(a.version, b.version) ? -1 : 1));
     node = suitable.find(n => n.path.startsWith(root + '/'))?.path ?? suitable[0]?.path;
@@ -335,12 +392,21 @@ for (const { name, content } of JSON.parse(fs.readFileSync(0, 'utf8'))) {
   if (providerHosts.length) {
     onProgress('Checking model access…');
     // All endpoints at once. Bound the whole curl process when timeout is available;
-    // a separate getent lookup would sit outside that deadline and repeat DNS work.
+    // when curl is absent, fall back to Node TCP connect so minimal containers still enable egress proxy.
     const checks = providerHosts.map(hp => {
-      return `( if $T curl -sS -m 4 -o /dev/null ${shellQuote(`https://${hp.replace(/:443$/, '')}/`)} 2>/dev/null; then echo ${shellQuote(`ok ${hp}`)}; else rc=$?; case $rc in 6|7|28|35|124) echo ${shellQuote(`no ${hp}`)};; *) echo ${shellQuote(`ok ${hp}`)};; esac; fi ) &`;
+      const scheme = hp.endsWith(':80') ? 'http' : 'https';
+      return `( if $T curl -sS -m 4 -o /dev/null ${shellQuote(`${scheme}://${hp.replace(/:(?:443|80)$/, '')}/`)} 2>/dev/null; then echo ${shellQuote(`ok ${hp}`)}; else rc=$?; case $rc in 6|7|28|35|124) echo ${shellQuote(`no ${hp}`)};; *) echo ${shellQuote(`ok ${hp}`)};; esac; fi ) &`;
     }).join(' ');
     const out = await run(env, `command -v curl >/dev/null || { echo nocurl; exit 0; }; T=; command -v timeout >/dev/null && T="timeout 5"; ${checks} wait`).catch(() => '');
-    for (const line of out.trim().split('\n')) if (line.startsWith('no ')) unreachable.push(line.slice(3));
+    const trimmed = out.trim();
+    if (trimmed === 'nocurl' || !trimmed) {
+      const nodeProbe = "const net=require('node:net');Promise.all(process.argv.slice(1).map(hp=>new Promise(res=>{const m=/^(\\[[^\\]]+\\]|[^:]+):(\\d+)$/.exec(hp);if(!m)return res('no '+hp);const s=net.connect(Number(m[2]),m[1].replace(/^\\[|\\]$/g,''),()=>{s.destroy();res('ok '+hp);});s.setTimeout(4000,()=>{s.destroy();res('no '+hp);});s.on('error',()=>res('no '+hp));}))).then(r=>console.log(r.join('\\n')));";
+      const nodeOut = await run(env, `${shellQuote(node)} -e ${shellQuote(nodeProbe)} ${providerHosts.map(shellQuote).join(' ')}`).catch(() => null);
+      if (nodeOut == null) unreachable.push(...providerHosts);
+      else for (const line of nodeOut.trim().split('\n')) if (line.startsWith('no ')) unreachable.push(line.slice(3));
+    } else {
+      for (const line of trimmed.split('\n')) if (line.startsWith('no ')) unreachable.push(line.slice(3));
+    }
   }
   onProgress('Ready');
   return {
@@ -357,9 +423,12 @@ for (const { name, content } of JSON.parse(fs.readFileSync(0, 'utf8'))) {
 }
 
 export async function listRemoteDir(env, path) {
-  const script = `cd ${path ? shellQuote(path) : '~'} 2>/dev/null || cd ~; pwd; ls -1pA 2>/dev/null | grep '/$' | head -500`;
+  const script = `printf '__PIDESK_DIR__\\n'; cd ${path ? shellQuote(path) : '~'} 2>/dev/null || cd ~; pwd; ls -1pA 2>/dev/null | grep '/$' | head -500`;
   const out = await runSsh(env, script, { timeout: 30000 });
-  const [cwd, ...entries] = out.split('\n').filter(Boolean);
+  const lines = out.split('\n');
+  const mark = lines.lastIndexOf('__PIDESK_DIR__');
+  const relevant = (mark >= 0 ? lines.slice(mark + 1) : lines).filter(Boolean);
+  const [cwd, ...entries] = relevant;
   return { path: cwd, entries: entries.map(e => e.replace(/\/$/, '')).filter(e => !e.startsWith('.')).sort((a, b) => a.localeCompare(b)) };
 }
 

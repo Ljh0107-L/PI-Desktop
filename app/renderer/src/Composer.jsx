@@ -6,17 +6,9 @@ import { api, captureComposerDraft, clearQueued, defaultFolder, getState, notify
 import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerDraft as takeDraft, restoreComposerDraft as restoreDraft, recoverComposerDraft as recoverDraft } from './composer-draft.js';
 import { createComposerSizer } from './composer-size.js';
 import { cachedDir, listDir, prefetchDir } from './dirs.js';
-import { isModelForEngine, modelsForEnvironment } from './model-catalog.js';
+import { clampEffort, claudeEffortsFor, effortsFor, isModelForEngine, modelsForEnvironment } from './model-catalog.js';
 
-const EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
-const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 export const effortLabel = level => ({ off: 'Off', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max' }[level] ?? level);
-// Levels a model offers, per Pi: a thinkingLevelMap value of null removes a level; unmapped levels use the
-// provider default up to high, and xhigh/max exist only when mapped.
-const effortsFor = model => {
-  const map = model?.thinkingLevelMap ?? {};
-  return EFFORTS.filter(l => map[l] === null ? false : ['xhigh', 'max'].includes(l) ? map[l] != null : true);
-};
 
 // ---------------------------------------------------------------- environment menu (Claude-style, with a "More" flyout)
 function EnvItem({ env, value, onPick, status }) {
@@ -627,18 +619,27 @@ export function ComposerBar({ session }) {
   const speeds = isClaude
     ? (modelInfo?.speeds ?? []).filter(s => s === 'standard' || s === 'fast')
     : (modelInfo?.speeds ?? []);
+  const effortLevels = isClaude
+    ? (hasValidModel ? claudeEffortsFor(modelInfo) : [])
+    : (modelInfo?.reasoning !== false ? effortsFor(modelInfo) : []);
+  const activeEffort = clampEffort(effortLevels, isClaude ? ccEffort : effort);
 
   return (
     <div className="composer-bar">
       <div className="composer-bar-left">
         {hasValidModel
           ? <Trigger width={320} placement="top-start" label="Model" title={modelTitle} className="model-trigger" menu={close => <ModelMenu value={model} environmentId={environmentId} engine={engine} onChange={changeModel} close={close} />}>
-              <span className="strong">{modelLabel(model, catalog)}</span>{!isClaude && modelInfo?.reasoning === false && <Icon name="chevronDown" size={11} />}
+              <span className="strong">{modelLabel(model, catalog)}</span>{effortLevels.length === 0 && <Icon name="chevronDown" size={11} />}
             </Trigger>
           : <button type="button" className="trigger attention" onClick={() => openSettings(true, 'providers')}><Icon name="key" size={14} /><span>{isClaude ? 'Add Anthropic model' : 'Add a model'}</span></button>}
-        {isClaude
-          ? (hasValidModel && <EffortTrigger levels={CLAUDE_EFFORTS.map(level => ({ value: level, label: effortLabel(level) }))} value={ccEffort} onChange={changeCcEffort} title={`Reasoning effort: ${effortLabel(ccEffort)}`} />)
-          : (modelInfo?.reasoning !== false && <EffortTrigger levels={effortsFor(modelInfo).map(level => ({ value: level, label: effortLabel(level) }))} value={effort} onChange={changeEffort} title={`Reasoning effort: ${effortLabel(effort)}`} />)}
+        {effortLevels.length > 0 && (
+          <EffortTrigger
+            levels={effortLevels.map(level => ({ value: level, label: effortLabel(level) }))}
+            value={activeEffort}
+            onChange={isClaude ? changeCcEffort : changeEffort}
+            title={`Reasoning effort: ${effortLabel(activeEffort)}`}
+          />
+        )}
         {!isNew && branch && <button type="button" className="trigger workspace-chip" onClick={() => setStore({ gitReviewOpen: true, filePaneOpen: false })} title="Review repository changes"><Icon name="branch" size={12.5} /><span>{branch}</span></button>}
       </div>
       <div className="composer-bar-right">

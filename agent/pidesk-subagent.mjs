@@ -286,6 +286,8 @@ export function worktreeArgs(name, args, worktree) {
   if (['grep', 'find', 'ls'].includes(name)) return { ...args, path: args.path ? worktreePath(args.path, worktree) : worktree.cwd };
   return args;
 }
+const isReadOnlyAgent = (type, tools = []) => type === 'explore' || type === 'review' || (tools.length > 0 && !tools.some(t => t.name === 'write' || t.name === 'edit'));
+
 const worktreeSummary = (w, c) => c?.changed
   ? `Worktree: ${w.path} (branch ${w.branch}, from ${w.base.slice(0, 7)}): ${c.files} changed file${c.files === 1 ? '' : 's'}, ${c.commits} commit${c.commits === 1 ? '' : 's'}. Review with \`git -C ${shellQuote(w.path)} status\` and \`git -C ${shellQuote(w.path)} diff ${w.base.slice(0, 7)}\`, then merge the branch or copy the changes; remove it with \`git worktree remove ${shellQuote(w.path)}\`.`
   : 'Worktree: no changes, removed.';
@@ -489,8 +491,8 @@ export function createSubagentTool({
       usage: emptyUsage(), provider: model.provider, model: model.id, startedAt: Date.now(), updatedAt: Date.now(), retained: true,
     };
     if (note) recordSubagentStep(record, { id: 'model-note', type: 'notice', text: note });
+    const wantsWorktree = task.isolation === 'worktree' || definition?.isolation === 'worktree';
     const entry = { record, ctx, model, cwd, listeners: new Set(), stop: new AbortController(), inputs: [],
-      isolation: task.isolation === 'worktree' || definition?.isolation === 'worktree' ? 'worktree' : undefined,
       thinkingLevel: definition?.effort ?? ctx.thinkingLevel ?? 'medium' };
     if (type === 'fork') {
       const fork = forkSetup(entry, ctx, callId, record.name, task.task);
@@ -499,6 +501,13 @@ export function createSubagentTool({
       const names = definition?.tools ?? (type === 'explore' || type === 'review' ? EXPLORE_TOOLS : CODING_TOOLS);
       Object.assign(entry, { systemPrompt: freshPrompt(type, cwd, definition), tools: childTools(entry, ctx, names), messages: [],
         start: { kind: 'prompt', message: `Context from the coordinating agent:\n${context?.trim() || '(none)'}\n\nYour task (${record.name}):\n${task.task}` } });
+    }
+    if (wantsWorktree) {
+      if (isReadOnlyAgent(type, entry.tools)) {
+        recordSubagentStep(record, { id: 'worktree-note', type: 'notice', text: 'Skipped worktree isolation: read-only agents inspect the workspace directly (including untracked/build files).' });
+      } else {
+        entry.isolation = 'worktree';
+      }
     }
     entries.set(id, entry);
     return entry;
@@ -607,8 +616,22 @@ export function createSubagentTool({
       release = await pool.acquire(state.signal);
       state.signal.throwIfAborted();
       if (entry.isolation === 'worktree' && !entry.worktree) {
-        entry.worktree = await createWorktree(entry.cwd, record.id);
-        record.worktree = { path: entry.worktree.path, branch: entry.worktree.branch, base: entry.worktree.base };
+        if (!findGitRoot(entry.cwd)) {
+          entry.isolation = undefined;
+          recordSubagentStep(record, { id: 'worktree-note', type: 'notice', text: `Skipped worktree isolation: ${entry.cwd} is not inside a git repository.` });
+        } else {
+          try {
+            entry.worktree = await createWorktree(entry.cwd, record.id);
+            record.worktree = { path: entry.worktree.path, branch: entry.worktree.branch, base: entry.worktree.base };
+          } catch (error) {
+            if (/not a git repository|ambiguous argument 'HEAD'|unknown revision|Needed a single revision/i.test(error?.message ?? '')) {
+              entry.isolation = undefined;
+              recordSubagentStep(record, { id: 'worktree-note', type: 'notice', text: `Skipped worktree isolation: ${error.message}` });
+            } else {
+              throw error;
+            }
+          }
+        }
       }
       entry.agent ??= createAgent(entry);
       Object.assign(record, { status: 'running', runStartedAt: Date.now() });
@@ -783,7 +806,7 @@ export function createSubagentTool({
         name: Type.String({ minLength: 1, maxLength: 80, description: 'What it does, in 3 to 6 words (for example "Find the retry logic")' }),
         task: Type.String({ minLength: 1, maxLength: 20000, description: 'The brief for one bounded question or change: goal, what you know or ruled out, paths, scope, applicable user instructions, and what to report' }),
         type: Type.Optional(Type.String({ maxLength: 64, description: 'general (default; coding tools), explore (read-only: finds code and answers where and how, with paths; doesn\'t review or judge, and skips project instruction files, so put what it needs in the brief), fork (a copy of you with this conversation and your tools; can\'t start agents or ask the user), or a custom type listed in your instructions' })),
-        isolation: Type.Optional(Type.Literal('worktree', { description: 'Work in a separate git worktree on its own branch, starting from the last commit. Otherwise agents share your working tree: give concurrent writers separate files or worktrees.' })),
+        isolation: Type.Optional(Type.Literal('worktree', { description: 'Work in a separate git worktree on its own branch, starting from the last commit (for writing tasks inside a git repo; ignored for read-only explore agents or non-git directories). Otherwise agents share your working tree: give concurrent writers separate files or worktrees.' })),
       }), { minItems: 1, maxItems: MAX_TASKS }),
       context: Type.Optional(Type.String({ maxLength: 24000, description: 'Facts and user instructions shared by every brief (a fork already has the conversation)' })),
       background: Type.Optional(Type.Boolean({ description: 'Default true: return at once; each report arrives as a message after your current step. false: wait for the reports, up to waitSeconds' })),

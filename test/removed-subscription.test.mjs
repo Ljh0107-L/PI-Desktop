@@ -71,4 +71,7 @@ test('Models retains exact token defaults and picker edits after subscription re
   const edited = { ...toRow(available[0]), contextWindow: '512000' };
   assert.equal(pickedRows([edited], available, new Set([edited.id]))[0], edited);
   assert.equal(parseTokens('128K'), 131072); assert.equal(parseTokens('272000'), 272000);
+  const customDefaults = fromRow(toRow({ id: 'custom-model' }));
+  assert.equal(customDefaults.contextWindow, 800000);
+  assert.equal(customDefaults.maxTokens, 32768);
 });

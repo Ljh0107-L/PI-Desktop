@@ -92,7 +92,8 @@ export function sshRelayTransport({ host, sshOptions = [], node, relayPath, egre
 
 export const egressEnv = remotePort => {
   const proxy = `http://127.0.0.1:${remotePort}`;
-  return { HTTPS_PROXY: proxy, HTTP_PROXY: proxy, NO_PROXY: 'localhost,127.0.0.1,::1' };
+  const noProxy = 'localhost,127.0.0.1,::1';
+  return { HTTPS_PROXY: proxy, HTTP_PROXY: proxy, NO_PROXY: noProxy, https_proxy: proxy, http_proxy: proxy, no_proxy: noProxy };
 };
 
 // OpenSSH connection sharing: the first connection to a host becomes a master that later ones reuse,
