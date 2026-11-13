@@ -2,6 +2,11 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.19 — 1-hour prompt cache TTL and built-in Anthropic-compatible providers for Claude Code
+
+- **1-hour prompt caching in Claude Code conversations.** Enabled `CLAUDE_CODE_PROMPT_CACHE_TTL=1h`, `CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL=1h` and `ENABLE_PROMPT_CACHING_1H=1` on the Claude Code adapter, matching Pi's `PI_CACHE_RETENTION=long` behavior so API-key and custom-gateway sessions use 1-hour `ephemeral` cache writes (`extended-cache-ttl-2025-04-11`) instead of Claude Code's 5-minute default.
+- **Built-in Claude Code compatible providers.** Built-in **DeepSeek**, **Moonshot (Kimi)**, **Z.ai (GLM)**, **OpenRouter**, **Fireworks**, **Together**, **xAI** and **Mistral** models are now available under Claude Code and route automatically to each provider's official Anthropic Messages endpoint (such as `https://api.deepseek.com/anthropic`, `https://api.moonshot.ai/anthropic`, `https://api.z.ai/api/anthropic`), while keeping non-Anthropic custom endpoints, OpenAI, Google Gemini and Groq filtered out.
+
 ## 0.2.18 — Claude Code engine and recessed workspace tray
 
 - **Claude Code conversations alongside Pi.** Start any conversation on **Claude Code** instead of Pi, on this Mac or on an SSH host. Pi Desktop installs a pinned, SHA-512-verified Claude Code binary into its own private directory with an isolated `CLAUDE_CONFIG_DIR` (never reading `claude` on `PATH` or a machine's `~/.claude` subscription state) and authenticates strictly with API keys from **Settings → Models**. SSH hosts without internet access automatically receive the verified package uploaded from this Mac with live progress.

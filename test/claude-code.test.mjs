@@ -11,7 +11,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { ClaudeAdapter, Transcript, claudeEnv, normalizeToolCall, piUsage, toolResultContent } from '../agent/pidesk-claude.mjs';
-import { CLAUDE_CODE_VERSION, CLAUDE_CODE_INTEGRITY, claudeEffort, claudeLayout, claudePlatform, claudeTarballUrl, downloadClaudeTarball, ensureLocalClaude, isClaudeCodeModel, prepareRemoteClaude, remoteClaudeProbeScript } from '../app/main/claude-code.mjs';
+import { CLAUDE_CODE_BUILTIN_BASE_URLS, CLAUDE_CODE_VERSION, CLAUDE_CODE_INTEGRITY, claudeBuiltinBaseUrl, claudeEffort, claudeLayout, claudePlatform, claudeTarballUrl, downloadClaudeTarball, ensureLocalClaude, isClaudeCodeModel, prepareRemoteClaude, remoteClaudeProbeScript } from '../app/main/claude-code.mjs';
 import { EXTENSION_FILES } from '../app/main/extensions.mjs';
 import { SessionManager } from '../app/main/session-manager.mjs';
 import { readHistory } from '../agent/pidesk-history.mjs';
@@ -60,14 +60,25 @@ test('Claude Code gets only its own credentials and a private config directory',
   assert.equal(env.ANTHROPIC_DEFAULT_HAIKU_MODEL, 'gw-model', 'a custom endpoint serves its own models for background work');
   assert.equal(env.HTTPS_PROXY, 'http://127.0.0.1:9', 'egress through the desktop still works');
   assert.equal(env.DISABLE_AUTOUPDATER, '1');
+  assert.equal(env.CLAUDE_CODE_PROMPT_CACHE_TTL, '1h');
+  assert.equal(env.CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL, '1h');
+  assert.equal(env.ENABLE_PROMPT_CACHING_1H, '1');
   const official = claudeEnv({}, { configDir: '/c', provider: { id: 'anthropic', apiKey: 'sk-a' }, model: { id: 'claude-x' } });
   assert.equal(official.ANTHROPIC_BASE_URL, undefined);
   assert.equal(official.ANTHROPIC_DEFAULT_HAIKU_MODEL, undefined, "Anthropic's API keeps Claude Code's own aliases");
 });
 
-test('only Anthropic Messages models run Claude Code; Pi thinking levels map to its effort', () => {
+test('Anthropic Messages models and compatible built-in providers run Claude Code; Pi thinking levels map to its effort', () => {
   assert.equal(isClaudeCodeModel({ api: 'anthropic-messages' }), true);
-  assert.equal(isClaudeCodeModel({ api: 'openai-completions' }), false);
+  assert.equal(isClaudeCodeModel({ provider: 'openai', api: 'openai-responses' }), false);
+  assert.equal(isClaudeCodeModel({ provider: 'deepseek', api: 'openai-completions' }, { id: 'deepseek', kind: 'builtin' }), true);
+  assert.equal(isClaudeCodeModel({ provider: 'moonshotai', api: 'openai-completions' }, { id: 'moonshotai', kind: 'builtin' }), true);
+  assert.equal(isClaudeCodeModel({ provider: 'zai', api: 'openai-completions' }, { id: 'zai', kind: 'builtin' }), true);
+  assert.equal(isClaudeCodeModel({ provider: 'deepseek', api: 'openai-completions' }, { id: 'deepseek', kind: 'custom' }), false, 'custom non-Anthropic endpoints stay blocked');
+  assert.equal(claudeBuiltinBaseUrl('anthropic', 'https://api.anthropic.com'), undefined);
+  assert.equal(claudeBuiltinBaseUrl('deepseek', 'https://api.deepseek.com'), CLAUDE_CODE_BUILTIN_BASE_URLS.deepseek);
+  assert.equal(claudeBuiltinBaseUrl('moonshotai', 'https://api.moonshot.ai/v1'), CLAUDE_CODE_BUILTIN_BASE_URLS.moonshotai);
+  assert.equal(claudeBuiltinBaseUrl('zai', 'https://api.z.ai/api/coding/paas/v4'), CLAUDE_CODE_BUILTIN_BASE_URLS.zai);
   assert.equal(claudeEffort('xhigh'), 'xhigh');
   assert.equal(claudeEffort('minimal'), 'low');
   assert.equal(claudeEffort('bogus'), null);
@@ -477,9 +488,9 @@ async function managerFixture(t) {
   const relayPath = join(dir, 'relay.mjs'); copyFileSync(resolve('agent/pidesk-relay.mjs'), relayPath);
   const work = join(dir, 'work'); mkdirSync(work);
   const log = join(dir, 'claude.log');
-  const keys = { gw: 'sk-gateway', anthropic: 'sk-ant' };
+  const keys = { gw: 'sk-gateway', anthropic: 'sk-ant', deepseek: 'sk-ds' };
   const store = {
-    sessions: [], settings: { providers: [{ id: 'gw', name: 'Gateway', kind: 'custom', api: 'anthropic-messages', baseUrl: 'https://gw.example/v1', headers: { 'X-Team': 'pd' }, models: [{ id: 'gw-claude' }] }, { id: 'openai', kind: 'builtin' }], environments: {}, defaults: {} },
+    sessions: [], settings: { providers: [{ id: 'gw', name: 'Gateway', kind: 'custom', api: 'anthropic-messages', baseUrl: 'https://gw.example/v1', headers: { 'X-Team': 'pd' }, models: [{ id: 'gw-claude' }] }, { id: 'deepseek', kind: 'builtin' }, { id: 'openai', kind: 'builtin' }], environments: {}, defaults: {} },
     saveSessions() {}, saveSettings() {}, touchRecent() {}, getKey: id => keys[id] ?? null,
   };
   const manager = new SessionManager({
@@ -492,6 +503,7 @@ async function managerFixture(t) {
   manager.catalog = async () => [
     { provider: 'gw', id: 'gw-claude', name: 'GW Claude', api: 'anthropic-messages', contextWindow: 200000, maxTokens: 32000, baseUrl: 'https://gw.example/v1', cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 } },
     { provider: 'gw', id: 'gw-claude-2', name: 'GW Claude 2', api: 'anthropic-messages', contextWindow: 200000, baseUrl: 'https://gw.example/v1' },
+    { provider: 'deepseek', id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', api: 'openai-completions', baseUrl: 'https://api.deepseek.com', engines: ['pi', 'claude-code'] },
     { provider: 'openai', id: 'gpt-x', name: 'GPT X', api: 'openai-responses' },
   ];
   t.after(async () => {
@@ -550,6 +562,10 @@ test('a Claude Code conversation runs through the relay with the Models settings
   assert.equal(restarted.env.ANTHROPIC_API_KEY, 'sk-rotated');
   assert.equal(restarted.args[restarted.args.indexOf('--model') + 1], 'gw-claude-2');
   assert.ok(restarted.args.includes('--resume'));
+  // Built-in providers with official Anthropic Messages endpoints (e.g. DeepSeek) map to their Anthropic URL.
+  const dsConfig = await f.manager.claudeConfig({ model: { provider: 'deepseek', id: 'deepseek-v4-pro' } });
+  assert.equal(dsConfig.provider.baseUrl, 'https://api.deepseek.com/anthropic');
+  assert.equal(dsConfig.provider.apiKey, 'sk-ds');
   // Fork keeps the engine and its own history.
   const forked = await f.manager.fork(view.id);
   assert.equal(forked.engine, 'claude-code');

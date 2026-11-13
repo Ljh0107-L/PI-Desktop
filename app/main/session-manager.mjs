@@ -15,7 +15,7 @@ import { isRetiredProvider, RETIRED_PROVIDER_MESSAGE } from '../../core/retired-
 import { SPEEDS, speedOptions } from '../../agent/pidesk-speed.mjs';
 import { readHistory } from '../../agent/pidesk-history.mjs';
 import { historyEvent } from '../../core/history-view.mjs';
-import { CLAUDE_CODE_VERSION, CLAUDE_EFFORTS, claudeEffort, ensureLocalClaude, isClaudeCodeModel, prepareRemoteClaude } from './claude-code.mjs';
+import { CLAUDE_CODE_VERSION, CLAUDE_EFFORTS, claudeBuiltinBaseUrl, claudeEffort, ensureLocalClaude, isClaudeCodeModel, prepareRemoteClaude } from './claude-code.mjs';
 
 // Conversation engines: Pi (default) and Claude Code (the pinned native binary driven by agent/pidesk-claude.mjs).
 export const CLAUDE_ENGINE = 'claude-code';
@@ -275,9 +275,10 @@ export class SessionManager extends EventEmitter {
         await session.start();
         const models = await session.request('get_available_models').then(d => d.models);
         // Built-in providers can be narrowed to the models the user picked in Settings.
+        const providerById = new Map(this.store.settings.providers.map(p => [p.id, p]));
         const enabled = Object.fromEntries(this.store.settings.providers.filter(p => p.enabledModels?.length).map(p => [p.id, new Set(p.enabledModels)]));
         return models.filter(m => configured.has(m.provider) && (!enabled[m.provider] || enabled[m.provider].has(m.id)))
-          .map(m => ({ provider: m.provider, id: m.id, name: m.name ?? m.id, api: m.api, reasoning: !!m.reasoning, thinkingLevelMap: m.thinkingLevelMap, contextWindow: m.contextWindow, maxTokens: m.maxTokens, baseUrl: m.baseUrl, input: m.input, cost: m.cost, speeds: speedOptions(m), engines: isClaudeCodeModel(m) ? ['pi', CLAUDE_ENGINE] : ['pi'], ...(m.environments ? { environments: m.environments } : {}) }));
+          .map(m => ({ provider: m.provider, id: m.id, name: m.name ?? m.id, api: m.api, reasoning: !!m.reasoning, thinkingLevelMap: m.thinkingLevelMap, contextWindow: m.contextWindow, maxTokens: m.maxTokens, baseUrl: m.baseUrl, input: m.input, cost: m.cost, speeds: speedOptions(m), engines: isClaudeCodeModel(m, providerById.get(m.provider)) ? ['pi', CLAUDE_ENGINE] : ['pi'], ...(m.environments ? { environments: m.environments } : {}) }));
       } finally { await session.stop(); }
     })();
     const cached = this.catalogCache;
@@ -305,19 +306,20 @@ export class SessionManager extends EventEmitter {
     if (!want?.provider || !want.id) throw new Error(CLAUDE_MODEL_ONLY);
     if (isRetiredProvider(want.provider)) throw new Error(RETIRED_PROVIDER_MESSAGE);
     const model = (await this.catalog()).find(m => m.provider === want.provider && m.id === want.id);
-    if (!model || !isClaudeCodeModel(model)) throw new Error(CLAUDE_MODEL_ONLY);
+    const saved = this.store.settings.providers.find(p => p.id === want.provider);
+    if (!model || !isClaudeCodeModel(model, saved)) throw new Error(CLAUDE_MODEL_ONLY);
     return model;
   }
   // The endpoint, key, model and Claude Code settings a conversation runs with (Settings → Models only:
-  // built-in Anthropic, or any provider or custom endpoint that speaks the Anthropic Messages API).
+  // built-in Anthropic, built-in providers with Anthropic Messages endpoints, or custom Anthropic endpoints).
   async claudeConfig(record) {
     const model = await this.#claudeModel(record.model);
     const saved = this.store.settings.providers.find(p => p.id === model.provider);
     const apiKey = this.store.getKey(model.provider);
     if (!apiKey) throw new Error(`Add an API key for ${saved?.name ?? model.provider} in Settings → Models to use it with Claude Code.`);
-    // Anthropic's own API is Claude Code's default endpoint; any other one is passed as its base URL.
-    const baseUrl = saved?.kind === 'custom' ? providerBaseUrl(saved.api, saved.baseUrl)
-      : model.provider === 'anthropic' ? undefined : model.baseUrl ? providerBaseUrl('anthropic-messages', model.baseUrl) : undefined;
+    // Anthropic's own API is Claude Code's default endpoint; any other one uses its Anthropic Messages base URL.
+    const rawBaseUrl = saved?.kind === 'custom' ? saved.baseUrl : claudeBuiltinBaseUrl(model.provider, model.baseUrl);
+    const baseUrl = rawBaseUrl ? providerBaseUrl('anthropic-messages', rawBaseUrl) : undefined;
     const headers = saved?.headers && typeof saved.headers === 'object' && Object.keys(saved.headers).length ? saved.headers : undefined;
     return {
       provider: { id: model.provider, kind: saved?.kind ?? 'builtin', api: 'anthropic-messages', apiKey, ...(baseUrl ? { baseUrl } : {}), ...(headers ? { headers } : {}) },

@@ -77,6 +77,10 @@ export function claudeEnv(base, { configDir, provider = {}, model = {}, extra = 
     CLAUDE_CONFIG_DIR: configDir,
     DISABLE_AUTOUPDATER: '1', DISABLE_TELEMETRY: '1', DISABLE_ERROR_REPORTING: '1', DISABLE_BUG_COMMAND: '1',
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1', CLAUDE_CODE_ENTRYPOINT: 'pi-desktop',
+    // Match Pi's PI_CACHE_RETENTION=long: keep 1-hour prompt caching active on API keys too.
+    CLAUDE_CODE_PROMPT_CACHE_TTL: '1h',
+    CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: '1h',
+    ENABLE_PROMPT_CACHING_1H: '1',
   });
   if (provider.apiKey) env.ANTHROPIC_API_KEY = provider.apiKey;
   if (provider.baseUrl) env.ANTHROPIC_BASE_URL = provider.baseUrl;

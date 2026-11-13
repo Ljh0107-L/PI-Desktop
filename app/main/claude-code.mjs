@@ -207,9 +207,32 @@ export async function prepareRemoteClaude(env, facts, { runSsh, cacheDir, onProg
 }
 
 // ------------------------------------------------------------------ models
-// Claude Code speaks only the Anthropic Messages API: other models are not offered for it.
+// Built-in providers whose models Pi runs via OpenAI/other protocols, but that also serve an
+// official Anthropic Messages endpoint for Claude Code (`ANTHROPIC_BASE_URL`).
+export const CLAUDE_CODE_BUILTIN_BASE_URLS = {
+  deepseek: 'https://api.deepseek.com/anthropic',
+  moonshotai: 'https://api.moonshot.ai/anthropic',
+  zai: 'https://api.z.ai/api/anthropic',
+  openrouter: 'https://openrouter.ai/api',
+  fireworks: 'https://api.fireworks.ai/inference',
+  together: 'https://api.together.ai',
+  xai: 'https://api.x.ai',
+  mistral: 'https://api.mistral.ai',
+};
+
+// Claude Code speaks the Anthropic Messages API: native `anthropic-messages` models (built-in
+// Anthropic or custom Anthropic-compatible endpoints) plus built-in providers with official
+// Anthropic Messages endpoints.
 export const ANTHROPIC_MESSAGES = 'anthropic-messages';
-export const isClaudeCodeModel = model => model?.api === ANTHROPIC_MESSAGES;
+export function isClaudeCodeModel(model, savedProvider) {
+  if (model?.api === ANTHROPIC_MESSAGES) return true;
+  if (savedProvider?.kind === 'custom') return false;
+  return Boolean(model?.provider && CLAUDE_CODE_BUILTIN_BASE_URLS[model.provider]);
+}
+export function claudeBuiltinBaseUrl(providerId, modelBaseUrl) {
+  if (providerId === 'anthropic') return undefined;
+  return CLAUDE_CODE_BUILTIN_BASE_URLS[providerId] ?? modelBaseUrl;
+}
 // Claude Code's effort levels (`--effort`, /effort). Pi's thinking levels map onto the nearest one.
 export const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 export function claudeEffort(level) {
