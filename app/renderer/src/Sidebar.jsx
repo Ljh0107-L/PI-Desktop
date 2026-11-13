@@ -27,7 +27,8 @@ function SessionRow({ session, active }) {
   const [title, setTitle] = useState(session.title);
   const rename = () => { setTitle(session.title); setEditing(true); };
   const asking = useStore(s => s.questions[session.id]?.length ?? 0);
-  const indicator = asking ? <span className="row-dot attention" title="Pi is waiting for your answer" />
+  const agentName = session.engine === 'claude-code' ? 'Claude Code' : 'Pi';
+  const indicator = asking ? <span className="row-dot attention" title={`${agentName} is waiting for your answer`} />
     : session.status === 'reconnecting' ? <span className="row-dot reconnecting" title="Reconnecting…" />
     : session.streaming ? <Spinner size={11} />
     : session.status === 'error' || session.status === 'disconnected' ? <span className="row-dot error" title={session.statusMessage ?? 'Disconnected'} /> : null;
@@ -39,6 +40,7 @@ function SessionRow({ session, active }) {
             onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); if (e.key === 'Escape') { setTitle(session.title); setEditing(false); } }} />
         : <button className="session-row-main" onClick={() => openSession(session.id)} onMouseEnter={() => warmSession(session.id)} onDoubleClick={() => { setTitle(session.title); setEditing(true); }} title={session.title}>
             <span className="session-title">{session.title}</span>
+            {session.engine === 'claude-code' && <span className="session-engine-badge" title="Claude Code">CC</span>}
             {indicator && <span className="session-indicator">{indicator}</span>}
           </button>}
       <button ref={anchor} className="row-more" onClick={() => setMenu(m => !m)} aria-label="Session actions"><Icon name="more" size={16} /></button>

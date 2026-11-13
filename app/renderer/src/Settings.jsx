@@ -467,43 +467,12 @@ function UsagePage() {
   </>;
 }
 
-// ---------------------------------------------------------------- agents
-const SUBAGENT_MODES = [
-  { id: 'off', label: 'Off' },
-  { id: 'limited', label: 'When asked, up to 2 per message', detail: 'Pi starts agents only when you, the project’s instructions or a skill ask for them.' },
-  { id: 'more', label: 'When useful, up to 5 per message', detail: 'Pi starts agents when it judges they help.' },
-];
-function AgentsPage() {
-  const mode = useStore(s => s.settings.defaults?.subagents) ?? 'limited';
-  const [error, setError] = useState(null);
-  const choose = async id => {
-    setError(null);
-    try { setSettings(await api('updateDefaults', { subagents: id })); }
-    catch (e) { setError(e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')); }
-  };
-  return (
-    <section className="section">
-      <div className="section-head"><h2 className="section-title">Subagents</h2></div>
-      <div className="grouped-list" role="radiogroup" aria-label="Subagents">
-        {SUBAGENT_MODES.map(m => (
-          <button key={m.id} type="button" role="radio" aria-checked={mode === m.id} className={`grouped-row selectable ${mode === m.id ? 'on' : ''}`} title={m.detail} onClick={() => choose(m.id)}>
-            <span className="grouped-main"><span className="grouped-title">{m.label}</span></span>
-            {mode === m.id && <Icon name="check" size={16} className="grouped-check" />}
-          </button>
-        ))}
-      </div>
-      {error && <div className="form-error"><Icon name="alert" size={14} /> {error}</div>}
-    </section>
-  );
-}
-
 // ---------------------------------------------------------------- page
 export function SettingsPage() {
   const tab = useStore(s => s.settingsTab);
   const pages = [
     { id: 'providers', label: 'Models', icon: 'sparkle', title: 'Models' },
     { id: 'connections', label: 'Connections', icon: 'server', title: 'Connections' },
-    { id: 'agents', label: 'Agents', icon: 'fork', title: 'Agents' },
     { id: 'usage', label: 'Usage', icon: 'gauge', title: 'Usage' },
   ];
   const page = pages.find(p => p.id === tab) ?? pages[0];
@@ -520,7 +489,7 @@ export function SettingsPage() {
         <div className="settings-drag drag" />
         <div className="settings-content">
           <h1 className="settings-title">{page.title}</h1>
-          {page.id === 'providers' ? <ModelsPage /> : page.id === 'usage' ? <UsagePage /> : page.id === 'agents' ? <AgentsPage /> : <ConnectionsPage />}
+          {page.id === 'providers' ? <ModelsPage /> : page.id === 'usage' ? <UsagePage /> : <ConnectionsPage />}
         </div>
       </main>
     </div>

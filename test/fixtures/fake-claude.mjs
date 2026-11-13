@@ -129,6 +129,22 @@ async function turn(content) {
     const u2 = await streamMessage([{ type: 'text', text: 'Edited.' }]);
     return result({ input_tokens: u1.input_tokens + u2.input_tokens, output_tokens: u1.output_tokens + u2.output_tokens });
   }
+  if (/\[\[ask-multi\]\]/.test(text)) {
+    const id = `toolu_${++n}`;
+    const input = {
+      questions: [
+        { question: 'Which features?', header: 'Features', description: 'Pick one or more', multiSelect: true, options: [{ label: 'Auth', description: 'JWT login' }, { label: 'Search, full-text', description: 'FTS5 index' }, { label: 'Cache', description: 'In-memory' }] },
+        { question: 'Which port?', header: 'Port', kind: 'number', min: 1024, max: 65535, defaultValue: 3000, unit: 'tcp' },
+      ],
+    };
+    await streamMessage([{ type: 'tool_use', id, name: 'AskUserQuestion', input }], { stop: 'tool_use' });
+    const decision = await ask({ subtype: 'can_use_tool', tool_name: 'AskUserQuestion', input, tool_use_id: id });
+    const answers = decision.behavior === 'allow' ? decision.updatedInput?.answers : null;
+    const summary = answers ? `${answers['Which features?']} @ ${answers['Which port?']}` : 'declined';
+    toolResult(id, `User answered: ${summary}`, answers ? {} : { is_error: true });
+    const u = await streamMessage([{ type: 'text', text: `Configured: ${summary}` }]);
+    return result(u);
+  }
   if (/\[\[ask\]\]/.test(text)) {
     const id = `toolu_${++n}`;
     const input = { questions: [{ question: 'Which color?', header: 'Color', multiSelect: false, options: [{ label: 'Red', description: 'warm' }, { label: 'Blue', description: 'cool' }] }] };

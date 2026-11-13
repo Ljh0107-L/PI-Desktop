@@ -53,21 +53,60 @@ try {
     ipcCalls.push({ method, args });
     if (method === 'appearance') { nativeAppearances.push(args[0]); return null; }
     if (method === 'bootstrap') return { settings, environments, sessions, home: profile };
-    if (method === 'catalog') return [{ provider: 'mock', id: 'mock', name: 'Offline fixture', input: ['text'], reasoning: true, speeds: ['standard', 'fast'] }, { provider: 'mock', id: 'alternate', name: 'Alternate fixture', reasoning: true, speeds: ['standard', 'fast'] }];
+    if (method === 'catalog') return [
+      { provider: 'mock', id: 'mock', name: 'Offline fixture', api: 'openai-responses', engines: ['pi'], input: ['text'], reasoning: true, speeds: ['standard', 'fast'] },
+      { provider: 'mock', id: 'alternate', name: 'Alternate fixture', api: 'anthropic-messages', engines: ['pi', 'claude-code'], reasoning: true, speeds: ['standard', 'fast'] },
+    ];
     if (method === 'listDir') return { path: args[1] || '/home/audit', entries: [] };
-    if (['setModel', 'setUltra'].includes(method)) {
+    if (['setModel', 'setUltra', 'setEffort', 'setUltracode'].includes(method)) {
       const target = sessions.find(s => s.id === args[0]);
       if (method === 'setModel') target.model = { provider: args[1], id: args[2] };
-      else target.ultra = args[1];
+      else if (method === 'setUltra') target.ultra = args[1];
+      else if (method === 'setEffort') target.effort = args[1];
+      else if (method === 'setUltracode') target.ultracode = args[1];
       await page.evaluate(payload => window.fixtureEvent({ channel: 'sessions', payload }), sessions);
-      return null;
+      return method === 'setUltracode' ? { ultracode: !!args[1] } : method === 'setEffort' ? { effort: args[1] } : null;
+    }
+    if (method === 'historyPage' && args[0] === 'cc-ui') {
+      return {
+        next: null,
+        messages: [
+          { __entryId: 'e1', timestamp: 1000, role: 'user', content: [{ type: 'text', text: 'Audit the repository with Claude Code.' }] },
+          {
+            __entryId: 'e2', timestamp: 2000, role: 'assistant',
+            content: [
+              { type: 'toolCall', id: 'cc-todo-1', name: 'TodoWrite', arguments: { todos: [{ content: 'Inspect parser module', status: 'completed' }, { content: 'Verify edge cases', status: 'in_progress', activeForm: 'Verifying edge cases' }] } },
+              { type: 'toolCall', id: 'cc-task-1', name: 'Task', arguments: { subagent_type: 'Explore', description: 'Inspect parser module', prompt: 'Read example.js and summarize.' } },
+            ],
+            stopReason: 'toolUse',
+          },
+          { __entryId: 'e3', timestamp: 2500, role: 'toolResult', toolCallId: 'cc-todo-1', toolName: 'TodoWrite', content: [{ type: 'text', text: 'Todos updated' }], details: { engine: 'claude-code' }, isError: false },
+          {
+            __entryId: 'e4', timestamp: 3000, role: 'toolResult', toolCallId: 'cc-task-1', toolName: 'Task',
+            content: [{ type: 'text', text: 'Inspected `example.js` — exports `answer = 42`.' }],
+            details: {
+              engine: 'claude-code', kind: 'claude-code-agent', stepCount: 2,
+              steps: [
+                { type: 'tool', id: 's1', name: 'read', arguments: { path: join(cwd, 'example.js') } },
+                { type: 'tool', id: 's2', name: 'grep', arguments: { pattern: 'answer', path: cwd } },
+              ],
+              agentRuns: [{ key: 'claude-agent:cc-task-1', turns: 2, usage: { input: 400, output: 80, totalTokens: 480 } }],
+            },
+            isError: false,
+          },
+          { __entryId: 'e5', timestamp: 4000, role: 'assistant', content: [{ type: 'text', text: 'Audit complete: `example.js` is clean.' }], usage: { input: 500, output: 40, cacheRead: 100, cacheWrite: 0, totalTokens: 640 }, stopReason: 'stop' },
+        ],
+      };
     }
     if (method === 'historyPage' && args[0] === 'empty-code') return { messages: [], next: null };
     if (method === 'historyPage') return { next: null, messages: [{ role: 'user', content: [{ type: 'text', text: 'Review the repository changes and explain what needs attention.' }] }, { role: 'assistant', content: [{ type: 'text', text: 'The changes are ready for review. The implementation is small, and there is one behavior worth checking before committing.\n\n### What changed\n\nThe default answer in `example.js` now returns **42**. The new `notes.txt` documents the expected behavior.\n\n- Confirm that existing callers expect the updated value.\n- Add a regression case for the previous boundary condition.\n- Keep the documentation with the implementation in the same commit.\n\nOpen **Review** to inspect the actual diff. You can select a line to add feedback to your next message.' }], stopReason: 'stop' }] };
     if (method === 'gitReview') return gitReview(cwd, args[1]);
     if (method === 'gitBranch') return 'main';
     if (method === 'searchFiles') return filePreview('search', cwd, args[1]);
-    if (method === 'commands') return [{ name: 'goal', description: 'Work autonomously toward a clear objective' }, { name: 'compact', description: 'Compact conversation context' }];
+    if (method === 'commands') {
+      if (args[0] === 'cc-ui') return [{ name: 'code-review', argumentHint: '[target]', description: 'Review the current diff for correctness bugs', source: 'claude-code' }, { name: 'context', description: 'Inspect current context usage', source: 'claude-code' }];
+      return [{ name: 'goal', description: 'Work autonomously toward a clear objective' }, { name: 'compact', description: 'Compact conversation context' }];
+    }
     if (method === 'agents') return [];
     if (method === 'updateStatus') return { state: 'idle' };
     if (method === 'prompt') {
@@ -148,8 +187,9 @@ try {
   await page.keyboard.press('Escape');
   assert.equal(await page.locator('.sidebar-nav button').count(), 1, 'sidebar keeps one primary action');
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
-  await page.getByRole('button', { name: 'Agents', exact: true }).click();
-  await page.getByRole('heading', { name: 'Agents', exact: true }).waitFor();
+  assert.equal(await page.locator('.settings-sidebar .nav-item', { hasText: 'Agents' }).count(), 0, 'Settings → Agents page is removed');
+  await page.getByRole('button', { name: 'Connections', exact: true }).click();
+  await page.getByRole('heading', { name: 'Connections', exact: true }).waitFor();
   await page.getByRole('button', { name: 'Models', exact: true }).click();
   await page.getByRole('heading', { name: 'Models', exact: true }).waitFor();
   await page.getByRole('button', { name: 'Back to app', exact: true }).click();
@@ -298,6 +338,62 @@ try {
   await page.getByRole('button', { name: 'Alternate fixture', exact: true }).click();
   assert.equal(await page.evaluate(() => window.__pideskState().draft.model.id), 'alternate');
   await page.screenshot({ path: join(screenshots, 'ssh-model-selection.png') });
+
+  // Claude Code engine: engine selector, Anthropic-only model menu, 5-level effort, Ultracode, upload progress, tool & question cards.
+  await page.getByRole('button', { name: 'Engine', exact: true }).click();
+  await page.getByRole('button', { name: 'Claude Code', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__pideskState().draft.engine), 'claude-code');
+  assert.equal(await page.evaluate(() => window.__pideskState().draft.model.id), 'alternate', 'Claude Code picks an Anthropic Messages model');
+  assert.equal(await page.locator('.ultra-trigger').count(), 0, 'Pi Ultra stays out of Claude Code');
+  assert.equal(await page.locator('.ultracode-trigger').count(), 1, 'Claude Code offers Ultracode');
+  await page.getByRole('button', { name: 'Model', exact: true }).click();
+  assert.equal(await page.locator('.model-menu .menu-item', { hasText: 'Offline fixture' }).count(), 0, 'non-Anthropic models are hidden for Claude Code');
+  assert.equal(await page.locator('.model-menu .menu-item', { hasText: 'Alternate fixture' }).count(), 1);
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Effort', exact: true }).click();
+  const effortItems = await page.locator('.popover .menu-item .menu-label').allTextContents();
+  assert.deepEqual(effortItems, ['Low', 'Medium', 'High', 'Extra high', 'Max']);
+  await page.getByRole('button', { name: 'Max', exact: true }).click();
+  assert.equal(await page.evaluate(() => window.__pideskState().draft.effort), 'max');
+  await page.evaluate(() => window.fixtureEvent({ channel: 'claude-code', payload: { id: 'ssh:audit', status: 'preparing', message: 'Uploading Claude Code from this Mac… 60%' } }));
+  await page.locator('.bar-status', { hasText: 'Uploading Claude Code from this Mac… 60%' }).waitFor();
+  await page.evaluate(() => window.fixtureEvent({ channel: 'claude-code', payload: { id: 'ssh:audit', status: 'ready', version: '2.1.322' } }));
+
+  const ccSession = { ...session, id: 'cc-ui', title: 'Audit parser with Claude Code', engine: 'claude-code', model: { provider: 'mock', id: 'alternate' }, effort: 'high', ultracode: false };
+  sessions.unshift(ccSession);
+  await page.evaluate(payload => window.fixtureEvent({ channel: 'sessions', payload }), sessions);
+  await page.locator('.session-row', { hasText: 'Audit parser with Claude Code' }).locator('.session-engine-badge', { hasText: 'CC' }).waitFor();
+  await page.getByRole('button', { name: 'Audit parser with Claude Code' }).click();
+  await page.locator('.header-engine-badge', { hasText: 'Claude Code' }).waitFor();
+  await page.locator('.cc-todo-card', { hasText: '1/2' }).waitFor();
+  await page.locator('.cc-task-card', { hasText: 'Inspect parser module' }).waitFor();
+  await page.locator('.cc-task-head', { hasText: 'Inspect parser module' }).click();
+  await page.locator('.cc-task-step', { hasText: 'example.js' }).waitFor();
+  await page.getByRole('button', { name: 'Ultracode', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.ultracode-trigger')?.getAttribute('aria-pressed') === 'true');
+  const ccInput = page.getByRole('textbox', { name: 'Message', exact: true });
+  await ccInput.fill('/');
+  await page.locator('.slash-menu .slash-hint', { hasText: '[target]' }).waitFor();
+  await ccInput.fill('');
+  await page.evaluate(() => window.fixtureEvent({
+    channel: 'question',
+    payload: {
+      id: 'cc-ui',
+      question: {
+        requestId: 'cc-q1', method: 'select', header: 'Features', title: 'Which checks should run?',
+        multiSelect: true, options: ['Types', 'Security'],
+        optionDetails: [{ label: 'Types', description: 'Verify TypeScript types' }, { label: 'Security', description: 'Audit shell quoting' }],
+      },
+    },
+  }));
+  await page.locator('.question-header-chip', { hasText: 'Features' }).waitFor();
+  await page.locator('.question-option-desc', { hasText: 'Verify TypeScript types' }).waitFor();
+  await page.locator('.question-option', { hasText: 'Types' }).click();
+  await page.locator('.question-option', { hasText: 'Security' }).click();
+  await page.getByRole('button', { name: 'Submit (2)', exact: true }).click();
+  assert.ok(ipcCalls.some(c => c.method === 'answer' && c.args[0] === 'cc-ui' && c.args[1] === 'cc-q1' && JSON.stringify(c.args[2]) === JSON.stringify({ value: ['Types', 'Security'] })));
+  await page.screenshot({ path: join(screenshots, 'claude-code-session.png') });
+
   await page.getByRole('button', { name: 'Model', exact: true }).click();
   await page.getByRole('button', { name: 'Manage models…', exact: true }).click();
   await page.getByRole('button', { name: 'Add provider', exact: true }).click();

@@ -356,7 +356,11 @@ export function displayBlocks(t) {
       flush();
       blocks.push(message.toolName === 'report_progress'
         ? { kind: 'progress', key: `progress:${message.toolCallId}`, call: { id: message.toolCallId, name: message.toolName } }
-        : { kind: 'orphanResult', key: `result:${mk}`, message, historyRef: ref });
+        : message.toolName === 'Task' || message.details?.kind === 'claude-code-agent'
+          ? { kind: 'ccTask', key: `cc-task:${message.toolCallId}`, call: { id: message.toolCallId, name: message.toolName ?? 'Task', arguments: {} } }
+          : message.toolName === 'TodoWrite'
+            ? { kind: 'ccTodo', key: `cc-todo:${message.toolCallId}`, call: { id: message.toolCallId, name: 'TodoWrite', arguments: {} } }
+            : { kind: 'orphanResult', key: `result:${mk}`, message, historyRef: ref });
       return;
     }
     if (message.role === 'bashExecution') { flush(); blocks.push({ kind: 'bash', key: `b${mk}`, message, historyRef: ref }); return; }
@@ -371,6 +375,8 @@ export function displayBlocks(t) {
       if (block.type === 'toolCall' && historyRef) block = { ...block, __historyTruncated: true, __historyRef: historyRef };
       if (block.type === 'toolCall' && block.name === 'ask_user') { flush(); blocks.push({ kind: 'ask', key: `q${mk}-${bi}`, call: block }); return; }
       if (block.type === 'toolCall' && block.name === 'subagent') { flush(); blocks.push({ kind: 'subagents', key: `subagents:${block.id}`, call: block }); return; }
+      if (block.type === 'toolCall' && (block.name === 'Task' || t.tools[block.id]?.result?.details?.kind === 'claude-code-agent')) { flush(); blocks.push({ kind: 'ccTask', key: `cc-task:${block.id}`, call: block }); return; }
+      if (block.type === 'toolCall' && block.name === 'TodoWrite') { flush(); blocks.push({ kind: 'ccTodo', key: `cc-todo:${block.id}`, call: block }); return; }
       // Files handed to the user are cards in the conversation, not a folded tool step.
       if (block.type === 'toolCall' && block.name === 'report_progress') { flush(); blocks.push({ kind: 'progress', key: `progress:${block.id}`, call: block }); return; }
       if (block.type === 'toolCall' && block.name === 'present_files') { flush(); blocks.push({ kind: 'files', key: `files:${block.id}`, call: block }); return; }
@@ -476,13 +482,13 @@ export function outputs(t) {
     }
     if (message.role !== 'assistant') continue;
     for (const block of message.content ?? []) {
-      if (block?.type !== 'toolCall' || !['write', 'edit'].includes(block.name)) continue;
-      const path = block.arguments?.path ?? block.arguments?.file_path;
+      if (block?.type !== 'toolCall' || !['write', 'edit', 'NotebookEdit'].includes(block.name)) continue;
+      const path = block.arguments?.path ?? block.arguments?.file_path ?? block.arguments?.notebook_path;
       if (!path) continue;
       const status = t.tools[block.id]?.status;
       if (status === 'error') continue;
       seen.delete(path);
-      seen.set(path, { path, tool: block.name });
+      seen.set(path, { path, tool: block.name === 'NotebookEdit' ? 'edit' : block.name });
     }
   }
   return [...seen.values()].reverse();
@@ -492,20 +498,29 @@ export function toolSummary(calls) {
   const skipped = calls.filter(call => call.__trace?.status === 'skipped').length;
   calls = calls.filter(call => call.__trace?.status !== 'skipped');
   const counts = {};
-  for (const call of calls) counts[call.name] = (counts[call.name] ?? 0) + 1;
+  let mcpCount = 0;
+  for (const call of calls) {
+    if (call.name?.startsWith('mcp__')) mcpCount += 1;
+    else counts[call.name] = (counts[call.name] ?? 0) + 1;
+  }
   const parts = [];
   const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
   if (counts.bash) parts.push(`Ran ${plural(counts.bash, 'command', 'commands')}`);
-  const edited = (counts.edit ?? 0) + (counts.write ?? 0);
-  const editedPaths = [...new Set(calls.filter(c => c.name === 'edit' || c.name === 'write').map(c => c.arguments?.path ?? c.arguments?.file_path).filter(Boolean))];
+  const edited = (counts.edit ?? 0) + (counts.write ?? 0) + (counts.NotebookEdit ?? 0);
+  const editedPaths = [...new Set(calls.filter(c => c.name === 'edit' || c.name === 'write' || c.name === 'NotebookEdit').map(c => c.arguments?.path ?? c.arguments?.file_path ?? c.arguments?.notebook_path).filter(Boolean))];
   const editedLabel = editedPaths.length === 1 ? editedPaths[0].split('/').pop() : plural(edited, 'file', 'files');
   if (edited) parts.push(`${parts.length ? 'edited' : 'Edited'} ${editedLabel}`);
   const readPaths = [...new Set(calls.filter(c => c.name === 'read').map(c => c.arguments?.path ?? c.arguments?.file_path).filter(Boolean))];
   if (counts.read) parts.push(`${parts.length ? 'read' : 'Read'} ${readPaths.length === 1 ? readPaths[0].split('/').pop() : plural(counts.read, 'file', 'files')}`);
   const searched = (counts.grep ?? 0) + (counts.find ?? 0) + (counts.ls ?? 0);
   if (searched) parts.push(`${parts.length ? 'searched' : 'Searched'} ${plural(searched, 'time', 'times')}`);
+  if (counts.WebSearch) parts.push(`${parts.length ? 'searched' : 'Searched'} the web${counts.WebSearch > 1 ? ` (${counts.WebSearch})` : ''}`);
+  if (counts.WebFetch) parts.push(`${parts.length ? 'fetched' : 'Fetched'} ${plural(counts.WebFetch, 'page', 'pages')}`);
+  if (counts.Skill) parts.push(`${parts.length ? 'used' : 'Used'} ${plural(counts.Skill, 'skill', 'skills')}`);
+  if (mcpCount) parts.push(`${parts.length ? 'called' : 'Called'} ${plural(mcpCount, 'MCP tool', 'MCP tools')}`);
   if (counts.subagent) parts.push(`Delegated ${plural(calls.filter(c => c.name === 'subagent').reduce((n, c) => n + (c.arguments?.tasks?.length ?? 0), 0), 'subtask', 'subtasks')}`);
-  const other = calls.length - (counts.bash ?? 0) - edited - (counts.read ?? 0) - searched - (counts.subagent ?? 0);
+  const accounted = (counts.bash ?? 0) + edited + (counts.read ?? 0) + searched + (counts.WebSearch ?? 0) + (counts.WebFetch ?? 0) + (counts.Skill ?? 0) + mcpCount + (counts.subagent ?? 0);
+  const other = calls.length - accounted;
   if (other) parts.push(`${parts.length ? 'used' : 'Used'} ${plural(other, 'tool', 'tools')}`);
   if (skipped) parts.push(`${plural(skipped, 'tool call', 'tool calls')} not executed`);
   return parts.join(', ');

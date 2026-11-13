@@ -62,6 +62,23 @@ export function Mascot({ size = 7, className }) {
   );
 }
 
+// Crisp architectural Claude Code emblem matching Mascot's obsidian-glass geometry.
+export function ClaudeMascot({ size = 7, className }) {
+  const px = size * 7;
+  return (
+    <svg className={className} width={px} height={px} viewBox="0 0 48 48" fill="none" aria-hidden="true">
+      <defs>
+        <linearGradient id="cc-emblem-bg" x1="24" y1="4" x2="24" y2="44" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#fb923c" stopOpacity="0.18" />
+          <stop offset="100%" stopColor="#ea580c" stopOpacity="0.04" />
+        </linearGradient>
+      </defs>
+      <rect x="4" y="4" width="40" height="40" rx="12" fill="url(#cc-emblem-bg)" stroke="#fb923c" strokeOpacity="0.32" strokeWidth="1" />
+      <path d="M15.5 18.5L21.5 24L15.5 29.5M24.5 29.5H32.5" stroke="currentColor" strokeWidth="2.35" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 // Pi mark: a small "π" glyph used as the app's logo.
 export function PiMark({ size = 28 }) {
   return (

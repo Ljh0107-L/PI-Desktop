@@ -332,9 +332,17 @@ export class SessionManager extends EventEmitter {
   prepareClaude(environmentId, onProgress = () => {}) {
     const env = this.env(environmentId);
     const cached = this.claudeInstalls.get(env.id);
-    if (cached) { cached.listeners.add(onProgress); return cached.promise; }
+    if (cached) {
+      if (!cached.done) {
+        cached.listeners.add(onProgress);
+        if (cached.lastMessage) onProgress(cached.lastMessage);
+      }
+      return cached.promise;
+    }
     const listeners = new Set([onProgress]);
+    const entry = { promise: null, listeners, lastMessage: null, done: false };
     const progress = message => {
+      entry.lastMessage = message;
       for (const listener of listeners) listener(message);
       this.emit('claude-code', { id: env.id, status: 'preparing', message, version: CLAUDE_CODE_VERSION });
     };
@@ -343,12 +351,15 @@ export class SessionManager extends EventEmitter {
       const facts = await this.prepare(env.id);
       return this.claudeRemote(env, facts, { runSsh, cacheDir: this.cacheDir, onProgress: progress });
     })();
-    const entry = { promise, listeners };
+    entry.promise = promise;
     this.claudeInstalls.set(env.id, entry);
     promise.then(() => {
+      entry.done = true;
+      entry.lastMessage = null;
       listeners.clear();
       this.emit('claude-code', { id: env.id, status: 'ready', version: CLAUDE_CODE_VERSION });
     }, error => {
+      entry.done = true;
       listeners.clear();
       if (this.claudeInstalls.get(env.id) === entry) this.claudeInstalls.delete(env.id);
       this.emit('claude-code', { id: env.id, status: 'error', message: error.message, version: CLAUDE_CODE_VERSION });
@@ -865,7 +876,13 @@ export class SessionManager extends EventEmitter {
     if (record.spare && request.method === 'notify') return;
     if (['select', 'input', 'confirm', 'editor'].includes(request.method)) {
       if (runtime.questions.has(request.id)) return; // re-delivered by the relay after a reconnect
-      const question = { requestId: request.id, method: request.method, title: request.title, message: request.message, options: request.options, placeholder: request.placeholder, prefill: request.prefill };
+      const question = {
+        requestId: request.id, method: request.method, title: request.title, message: request.message,
+        options: request.options, placeholder: request.placeholder, prefill: request.prefill,
+        ...(request.header ? { header: request.header } : {}),
+        ...(request.multiSelect ? { multiSelect: true } : {}),
+        ...(Array.isArray(request.optionDetails) ? { optionDetails: request.optionDetails } : {}),
+      };
       runtime.questions.set(request.id, question);
       this.emit('question', { id: record.id, question });
       return;

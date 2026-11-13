@@ -74,13 +74,13 @@ api('prewarm', { environmentId, cwd, model, engine: 'claude-code' }) // installs
 
 Session view: `session.engine === 'claude-code'`, plus `session.effort`, `session.ultracode`. API: `setEffort(id, level)`, `setUltracode(id, on)`, `setModel` (Anthropic Messages models only), `setSpeed`, `commands(id)`, `claudeCodeInfo()` → `{ version, efforts }`, `prepareClaudeCode(environmentId)` → `{ ok, version } | { ok: false, error }`. Events: the `claude-code` channel above; `status` with `phase: 'preparing'` and `statusMessage` during installation.
 
-UI work left to do:
+UI integration (`app/renderer/src/`):
 
-1. An engine choice for new conversations (Pi / Claude Code) and a Claude Code badge on its conversations.
-2. Model menus filtered by `model.engines.includes('claude-code')` for Claude Code conversations.
-3. A Claude Code composer: effort (5 levels) and an Ultracode switch instead of Pi's thinking levels, Ultra and Subagents; Claude Code's slash commands with their `argumentHint`.
-4. Cards for Claude Code's own tools (`Task` steps, `TodoWrite`, `WebFetch`/`WebSearch`, `Skill`, `Workflow`, `mcp__*`), and installation progress (“Downloading Claude Code… 35%”, “Uploading Claude Code from this Mac… 60%”) instead of “Preparing remote environment…”.
-5. Remove Settings → Agents (the Subagents mode stays at its saved value).
+1. Top recessed composer tray on New Conversation (`Folder`, `Environment`, and `Engine`: `Pi` / `Claude Code`), plus `CC` / `Claude Code` badges in the sidebar, header and `⌘K` palette.
+2. Model menus filtered by `model.engines.includes('claude-code')` (Anthropic Messages protocol models, built-in or custom endpoints) for Claude Code conversations.
+3. Claude Code composer controls: 5-level Effort (`low` … `max`) and Ultracode toggle instead of Pi's thinking levels and Ultra; Claude Code slash commands with `argumentHint`.
+4. Dedicated cards for Claude Code's `Task` subagent runs, `TodoWrite` checklists, `WebFetch`/`WebSearch`, `Skill`/`Workflow`/`mcp__*`, multi-select `AskUserQuestion` with option descriptions, Markdown `ExitPlanMode` plan approval, and live installation/SSH upload progress.
+5. Removed the obsolete Settings → Agents tab (saved `defaults.subagents` stays intact for Pi).
 
 ## Tests
 

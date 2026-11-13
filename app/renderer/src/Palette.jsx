@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Icon } from './Icons.jsx';
 import { baseName } from './ui.jsx';
-import { defaultFolder, newSession, openPalette, openSession, openSettings, pickRecent, useStore } from './store.js';
+import { defaultFolder, newSession, openPalette, openSession, openSettings, pickRecent, setDraft, useStore } from './store.js';
 
 const TABS = ['All', 'Sessions', 'Projects', 'Environments'];
 
@@ -24,8 +24,8 @@ export function Palette() {
     const out = [];
     const kind = TABS[tab];
     if (kind === 'All' || kind === 'Sessions') {
-      const items = sessions.filter(s => match(`${s.title} ${s.project} ${s.environmentLabel}`)).slice(0, kind === 'All' ? 6 : 50)
-        .map(s => ({ key: s.id, icon: s.environmentId === 'local' ? 'laptop' : 'terminal', label: s.title, detail: `${s.project} · ${s.environmentLabel}`, run: () => openSession(s.id) }));
+      const items = sessions.filter(s => match(`${s.title} ${s.project} ${s.environmentLabel} ${s.engine === 'claude-code' ? 'claude code cc' : 'pi'}`)).slice(0, kind === 'All' ? 6 : 50)
+        .map(s => ({ key: s.id, icon: s.engine === 'claude-code' ? 'console' : s.environmentId === 'local' ? 'laptop' : 'terminal', label: s.title, detail: `${s.project} · ${s.environmentLabel}${s.engine === 'claude-code' ? ' · Claude Code' : ''}`, run: () => openSession(s.id) }));
       if (items.length) out.push({ title: q ? 'Sessions' : 'Recents', items });
     }
     if (kind === 'All' || kind === 'Projects') {
@@ -41,7 +41,8 @@ export function Palette() {
     }
     if (kind === 'All') {
       const actions = [
-        { key: 'new', icon: 'plus', label: 'New session', run: newSession },
+        { key: 'new', icon: 'plus', label: 'New session', run: () => { newSession(); setDraft({ engine: 'pi' }); } },
+        { key: 'new-cc', icon: 'console', label: 'New Claude Code session', run: () => { newSession(); setDraft({ engine: 'claude-code' }); } },
         { key: 'models', icon: 'key', label: 'Models & API keys', run: () => openSettings(true, 'providers') },
         { key: 'envs', icon: 'server', label: 'SSH connections', run: () => openSettings(true, 'connections') },
       ].filter(a => match(a.label));

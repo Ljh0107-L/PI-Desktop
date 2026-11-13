@@ -6,9 +6,10 @@ import { api, captureComposerDraft, clearQueued, defaultFolder, getState, notify
 import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerDraft as takeDraft, restoreComposerDraft as restoreDraft, recoverComposerDraft as recoverDraft } from './composer-draft.js';
 import { createComposerSizer } from './composer-size.js';
 import { cachedDir, listDir, prefetchDir } from './dirs.js';
-import { modelsForEnvironment } from './model-catalog.js';
+import { isModelForEngine, modelsForEnvironment } from './model-catalog.js';
 
 const EFFORTS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+const CLAUDE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 export const effortLabel = level => ({ off: 'Off', minimal: 'Minimal', low: 'Low', medium: 'Medium', high: 'High', xhigh: 'Extra high', max: 'Max' }[level] ?? level);
 // Levels a model offers, per Pi: a thinkingLevelMap value of null removes a level; unmapped levels use the
 // provider default up to high, and xhigh/max exist only when mapped.
@@ -120,8 +121,8 @@ function FolderMenu({ environmentId, value, onChange, close, onBrowse }) {
 }
 
 // ---------------------------------------------------------------- models
-export function ModelMenu({ value, environmentId, onChange, close }) {
-  const catalog = useStore(s => modelsForEnvironment(s.catalog, environmentId));
+export function ModelMenu({ value, environmentId, engine = 'pi', onChange, close }) {
+  const catalog = useStore(s => modelsForEnvironment(s.catalog, environmentId, engine));
   const catalogError = useStore(s => s.catalogError);
   const providers = useStore(s => s.settings?.providers ?? []);
   const builtin = useStore(s => s.settings?.builtinProviders ?? {});
@@ -137,12 +138,15 @@ export function ModelMenu({ value, environmentId, onChange, close }) {
     return [...out.entries()];
   }, [catalog, q]);
   const providerName = id => providers.find(p => p.id === id)?.name ?? builtin[id] ?? id;
+  const emptyText = engine === 'claude-code'
+    ? 'No Anthropic Messages models — add Anthropic or an Anthropic-compatible endpoint in Settings → Models.'
+    : 'No models for this environment — add a provider in Settings → Models.';
   return (
     <div className="model-menu">
       <input className="menu-search" autoFocus placeholder="Search models…" value={query} onChange={e => setQuery(e.target.value)} />
       <div className="menu-scroll">
         {catalogError && <div className="menu-empty error">{catalogError}</div>}
-        {!catalog.length && !catalogError && <div className="menu-empty">No models for this environment — add a provider in Settings → Models.</div>}
+        {!catalog.length && !catalogError && <div className="menu-empty">{emptyText}</div>}
         {groups.map(([provider, models]) => (
           <MenuSection key={provider} title={providerName(provider)}>
             {models.map(m => <MenuItem key={m.id} label={m.name} title={`${m.provider}/${m.id}`} checked={value?.provider === m.provider && value?.id === m.id}
@@ -260,8 +264,9 @@ function SlashMenu({ items, index, onPick }) {
     <div className="slash-menu" ref={ref} role="listbox" aria-label="Slash commands">
       <div className="slash-menu-list">
         {items.map((c, i) => (
-          <button key={c.name} type="button" role="option" aria-selected={i === index} className={`slash-item ${i === index ? 'on' : ''}`} title={c.description || undefined} onMouseDown={e => { e.preventDefault(); onPick(c); }}>
+          <button key={c.name} type="button" role="option" aria-selected={i === index} className={`slash-item ${i === index ? 'on' : ''}`} title={[c.argumentHint && `/${c.name} ${c.argumentHint}`, c.description].filter(Boolean).join(' — ') || undefined} onMouseDown={e => { e.preventDefault(); onPick(c); }}>
             <span className="slash-name">/{c.name}</span>
+            {c.argumentHint && <span className="slash-hint">{c.argumentHint}</span>}
             {c.description && <span className="slash-desc">{c.description}</span>}
             {i === index && <Icon name="enter" size={13} className="slash-enter" />}
           </button>
@@ -360,13 +365,18 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   }, []);
   useLayoutEffect(() => { size.current?.update(); }, [text]);
   // Slash commands: shown while the message is a single "/word" being typed.
+  const activeEngine = (session ? session.engine : draftTarget?.engine) === 'claude-code' ? 'claude-code' : 'pi';
   const slashQuery = /^\/[\w:.-]*$/.test(text) ? text.slice(1).toLowerCase() : null;
+  useEffect(() => { setPi([]); }, [session?.id, activeEngine]);
   useEffect(() => { if (slashQuery !== null && session?.id) api('commands', session.id).then(setPi).catch(() => {}); }, [slashQuery !== null, session?.id]);
   const mergedCommands = useMemo(() => {
-    const byName = new Map(BUILTIN_COMMANDS.filter(c => session || c.name === 'goal').map(c => [c.name, c]));
+    const builtins = activeEngine === 'claude-code'
+      ? BUILTIN_COMMANDS.filter(c => session && c.name !== 'goal')
+      : BUILTIN_COMMANDS.filter(c => session || c.name === 'goal');
+    const byName = new Map(builtins.map(c => [c.name, c]));
     for (const c of pi) byName.set(c.name, { ...byName.get(c.name), ...c });
     return [...byName.values()];
-  }, [Boolean(session), pi]);
+  }, [Boolean(session), activeEngine, pi]);
   const commands = slashQuery === null ? [] : mergedCommands.filter(c => c.name.toLowerCase().includes(slashQuery)).slice(0, 12);
   useEffect(() => setSlashIndex(0), [slashQuery]);
   const pickCommand = c => { setText(`/${c.name} `); ref.current?.focus(); };
@@ -494,7 +504,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
               if (e.key === 'ArrowUp') { e.preventDefault(); setSlashIndex(i => (i - 1 + commands.length) % commands.length); return; }
               if ((e.key === 'Tab' || e.key === 'Enter') && !e.nativeEvent.isComposing) {
                 const c = commands[slashIndex];
-                if (c && (e.key === 'Tab' || c.args || text.slice(1) !== c.name)) { e.preventDefault(); pickCommand(c); return; }
+                if (c && (e.key === 'Tab' || c.args || c.argumentHint?.startsWith('<') || text.slice(1) !== c.name)) { e.preventDefault(); pickCommand(c); return; }
               }
             }
             if (showMentionMenu && mentionFiles.length) {
@@ -521,14 +531,67 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   );
 }
 
-// A compact version of an environment error for the bar under the composer (full text in the tooltip).
-const shortError = (message = '', label) => /disk .* is full/i.test(message) ? `${label}: disk full`
-  : /could not connect/i.test(message) ? `Can’t reach ${label}` : `${label} unavailable`;
-
 // Faster processing where the model's provider sells it (agent/pidesk-speed.mjs), priced per reply.
 const SPEED_LABELS = { standard: 'Standard', fast: 'Fast', ultrafast: 'Ultrafast' };
 
-// Antigravity-style composer toolbar: model + effort + workspace context on the left; mode toggles on the right.
+const shortError = (message = '', label) => /disk .* is full/i.test(message) ? `${label}: disk full`
+  : /could not connect/i.test(message) ? `Can’t reach ${label}` : `${label} unavailable`;
+
+// Antigravity-style recessed top tray bar for New Conversation: Folder, Environment, Engine, and setup progress.
+export function NewSessionTrayHead() {
+  const draft = useStore(s => s.draft);
+  const environments = useStore(s => s.environments);
+  const prep = useStore(s => s.envStatus[draft.environmentId]);
+  const ccPrep = useStore(s => s.claudeStatus[draft.environmentId]);
+  const home = useStore(s => s.home);
+  const [browsing, setBrowsing] = useState(false);
+  const environmentId = draft.environmentId;
+  const env = environments.find(e => e.id === environmentId) ?? { id: environmentId, label: 'This computer', kind: environmentId?.startsWith('ssh:') ? 'ssh' : 'local' };
+  const cwd = draft.cwd;
+  const isClaude = draft.engine === 'claude-code';
+  const changeEnv = id => {
+    setDraft({ environmentId: id, cwd: defaultFolder(getState().settings, id) });
+    if (id !== 'local') api('prepareEnvironment', id);
+  };
+  return (
+    <div className="composer-tray-head">
+      <div className="composer-tray-left">
+        <Trigger className="folder-trigger" width={300} placement="top-start" label="Folder" title={cwd ? shortPath(cwd, home) : 'No folder'}
+          menu={close => <FolderMenu environmentId={environmentId} value={cwd} onChange={path => setDraft({ cwd: path })} close={close} onBrowse={() => setBrowsing(true)} />}>
+          <Icon name={cwd ? 'folder' : 'chat'} size={13.5} /><span>{cwd ? baseName(cwd) : 'No folder'}</span><Icon name="chevronDown" size={11} className="tray-caret" />
+        </Trigger>
+        <Trigger className="env-trigger" title={env.label} width={330} placement="top-start" label="Environment" menu={close => <EnvironmentMenu value={environmentId} onChange={changeEnv} close={close} />}>
+          <Icon name={envIcon(env)} size={13.5} /><span>{env.kind === 'local' ? 'Local' : env.label}</span><Icon name="chevronDown" size={11} className="tray-caret" />
+        </Trigger>
+        <Trigger width={210} placement="top-start" label="Engine" title={`Engine: ${isClaude ? 'Claude Code' : 'Pi'}`} className={`engine-trigger ${isClaude ? 'cc' : ''}`}
+          menu={close => (
+            <MenuSection title="Agent engine">
+              <MenuItem icon="sparkle" label="Pi" checked={!isClaude} onClick={() => { setDraft({ engine: 'pi' }); close(); }} />
+              <MenuItem icon="console" label="Claude Code" checked={isClaude} onClick={() => { setDraft({ engine: 'claude-code' }); close(); }} />
+            </MenuSection>
+          )}>
+          <Icon name={isClaude ? 'console' : 'sparkle'} size={13} /><span>{isClaude ? 'Claude Code' : 'Pi'}</span><Icon name="chevronDown" size={11} className="tray-caret" />
+        </Trigger>
+      </div>
+      {isClaude && ccPrep?.status === 'preparing' ? (
+        <span className="bar-status"><Spinner size={11.5} /><span>{ccPrep.message || 'Preparing Claude Code…'}</span></span>
+      ) : isClaude && ccPrep?.status === 'error' ? (
+        <button type="button" className="bar-status error" title={ccPrep.message} onClick={() => api('prepareClaudeCode', environmentId)}>
+          <Icon name="alert" size={13} /><span>Claude Code unavailable</span><span className="bar-retry">Retry</span>
+        </button>
+      ) : prep?.status === 'preparing' ? (
+        <span className="bar-status"><Spinner size={11.5} /><span>{prep.message}</span></span>
+      ) : prep?.status === 'error' ? (
+        <button type="button" className="bar-status error" title={prep.message} onClick={() => api('prepareEnvironment', environmentId, true)}>
+          <Icon name="alert" size={13} /><span>{shortError(prep.message, env.label)}</span><span className="bar-retry">Retry</span>
+        </button>
+      ) : null}
+      {browsing && <RemoteBrowser environmentId={environmentId} start={cwd ?? undefined} onPick={path => setDraft({ cwd: path })} onClose={() => setBrowsing(false)} />}
+    </div>
+  );
+}
+
+// Antigravity-style inner composer toolbar: Model + Effort on the left; Ultra / Ultracode + Speed on the right.
 export function ComposerBar({ session }) {
   const [branch, setBranch] = useState('');
   useEffect(() => {
@@ -540,65 +603,58 @@ export function ComposerBar({ session }) {
   }, [session?.id, session?.cwd]);
   const draft = useStore(s => s.draft);
   const catalog = useStore(s => s.catalog);
-  const environments = useStore(s => s.environments);
-  const envStatus = useStore(s => s.envStatus);
-  const home = useStore(s => s.home);
-  const [browsing, setBrowsing] = useState(false);
   const isNew = !session;
+  const engine = (isNew ? draft.engine : session.engine) === 'claude-code' ? 'claude-code' : 'pi';
+  const isClaude = engine === 'claude-code';
   const environmentId = isNew ? draft.environmentId : session.environmentId;
-  const env = environments.find(e => e.id === environmentId) ?? { id: environmentId, label: session?.environmentLabel ?? 'This computer', kind: environmentId?.startsWith('ssh:') ? 'ssh' : 'local' };
+  const availableModels = useMemo(() => modelsForEnvironment(catalog, environmentId, engine), [catalog, environmentId, engine]);
   const model = isNew ? draft.model : session.model;
   const effort = (isNew ? draft.thinkingLevel : session.thinkingLevel) ?? 'medium';
+  const ccEffort = (isNew ? draft.effort : session.effort) || 'medium';
   const speed = (isNew ? draft.speed : session.speed) ?? 'standard';
-  const cwd = isNew ? draft.cwd : session.cwd;
   const modelInfo = catalog.find(m => m.provider === model?.provider && m.id === model?.id);
+  const hasValidModel = availableModels.length > 0 || (model && (!isClaude || isModelForEngine(modelInfo ?? model, 'claude-code')));
   const modelTitle = model ? `${model.provider}/${model.id}` : undefined;
-  const prep = envStatus[environmentId];
 
-  const changeEnv = id => {
-    setDraft({ environmentId: id, cwd: defaultFolder(getState().settings, id) });
-    if (id !== 'local') api('prepareEnvironment', id);
-  };
   const changeModel = m => isNew ? setDraft({ model: m }) : api('setModel', session.id, m.provider, m.id).catch(e => notify(e.message, 'error'));
   const changeEffort = l => isNew ? setDraft({ thinkingLevel: l }) : api('setThinking', session.id, l).catch(e => notify(e.message, 'error'));
+  const changeCcEffort = l => isNew ? setDraft({ effort: l }) : api('setEffort', session.id, l).catch(e => notify(e.message, 'error'));
   const changeSpeed = s => isNew ? setDraft({ speed: s }) : api('setSpeed', session.id, s).catch(e => notify(e.message, 'error'));
   const ultraOn = isNew ? !!draft.ultra : !!session.ultra;
   const toggleUltra = () => isNew ? setDraft({ ultra: !ultraOn }) : api('setUltra', session.id, !ultraOn).catch(e => notify(e.message, 'error'));
-  const speeds = modelInfo?.speeds ?? [];
+  const ultracodeOn = isNew ? !!draft.ultracode : !!session.ultracode;
+  const toggleUltracode = () => isNew ? setDraft({ ultracode: !ultracodeOn }) : api('setUltracode', session.id, !ultracodeOn).catch(e => notify(e.message, 'error'));
+  const speeds = isClaude
+    ? (modelInfo?.speeds ?? []).filter(s => s === 'standard' || s === 'fast')
+    : (modelInfo?.speeds ?? []);
 
   return (
     <div className="composer-bar">
       <div className="composer-bar-left">
-        {catalog.length || model
-          ? <Trigger width={320} placement="top-start" label="Model" title={modelTitle} className="model-trigger" menu={close => <ModelMenu value={model} environmentId={environmentId} onChange={changeModel} close={close} />}>
-              <span className="strong">{modelLabel(model, catalog)}</span>{modelInfo?.reasoning === false && <Icon name="chevronDown" size={11} />}
+        {hasValidModel
+          ? <Trigger width={320} placement="top-start" label="Model" title={modelTitle} className="model-trigger" menu={close => <ModelMenu value={model} environmentId={environmentId} engine={engine} onChange={changeModel} close={close} />}>
+              <span className="strong">{modelLabel(model, catalog)}</span>{!isClaude && modelInfo?.reasoning === false && <Icon name="chevronDown" size={11} />}
             </Trigger>
-          : <button type="button" className="trigger attention" onClick={() => openSettings(true, 'providers')}><Icon name="key" size={14} /><span>Add a model</span></button>}
-        {modelInfo?.reasoning !== false && <EffortTrigger levels={effortsFor(modelInfo).map(level => ({ value: level, label: effortLabel(level) }))} value={effort} onChange={changeEffort} title={`Reasoning effort: ${effortLabel(effort)}`} />}
-        {isNew ? <>
-          <span className="bar-divider" aria-hidden="true" />
-          <Trigger className="env-trigger" title={env.label} width={330} placement="top-start" label="Environment" menu={close => <EnvironmentMenu value={environmentId} onChange={changeEnv} close={close} />}>
-            <Icon name={envIcon(env)} size={13} /><span>{env.kind === 'local' ? 'Local' : env.label}</span>
-          </Trigger>
-          <Trigger className="folder-trigger" width={300} placement="top-start" label="Folder" title={cwd ? shortPath(cwd, home) : 'No folder'}
-            menu={close => <FolderMenu environmentId={environmentId} value={cwd} onChange={path => setDraft({ cwd: path })} close={close} onBrowse={() => setBrowsing(true)} />}>
-            <Icon name={cwd ? 'folder' : 'chat'} size={13} /><span>{cwd ? baseName(cwd) : 'No folder'}</span>
-          </Trigger>
-          {prep?.status === 'preparing' && <span className="bar-status"><Spinner size={12} /> {prep.message}</span>}
-          {prep?.status === 'error' && <button type="button" className="bar-status error" title={prep.message} onClick={() => api('prepareEnvironment', environmentId, true)}>
-            <Icon name="alert" size={14} /> <span>{shortError(prep.message, env.label)}</span> <span className="bar-retry">Retry</span></button>}
-        </> : <>
-          {branch && <button type="button" className="trigger workspace-chip" onClick={() => setStore({ gitReviewOpen: true, filePaneOpen: false })} title="Review repository changes"><Icon name="branch" size={12.5} /><span>{branch}</span></button>}
-        </>}
+          : <button type="button" className="trigger attention" onClick={() => openSettings(true, 'providers')}><Icon name="key" size={14} /><span>{isClaude ? 'Add Anthropic model' : 'Add a model'}</span></button>}
+        {isClaude
+          ? (hasValidModel && <EffortTrigger levels={CLAUDE_EFFORTS.map(level => ({ value: level, label: effortLabel(level) }))} value={ccEffort} onChange={changeCcEffort} title={`Reasoning effort: ${effortLabel(ccEffort)}`} />)
+          : (modelInfo?.reasoning !== false && <EffortTrigger levels={effortsFor(modelInfo).map(level => ({ value: level, label: effortLabel(level) }))} value={effort} onChange={changeEffort} title={`Reasoning effort: ${effortLabel(effort)}`} />)}
+        {!isNew && branch && <button type="button" className="trigger workspace-chip" onClick={() => setStore({ gitReviewOpen: true, filePaneOpen: false })} title="Review repository changes"><Icon name="branch" size={12.5} /><span>{branch}</span></button>}
       </div>
       <div className="composer-bar-right">
-        <button type="button" className={`trigger ultra-trigger ${ultraOn ? 'on' : ''}`} aria-label="Ultra mode" aria-pressed={ultraOn} onClick={toggleUltra}
-          title={ultraOn ? 'Ultra is on: Pi works on each request on its own until it is done' : 'Ultra mode: keep working autonomously until the task is done'}>
-          <Icon name={ultraOn ? 'shield' : 'infinity'} size={13.5} /><span>Ultra</span>
-        </button>
+        {isClaude ? (
+          <button type="button" className={`trigger ultracode-trigger ${ultracodeOn ? 'on' : ''}`} aria-label="Ultracode" aria-pressed={ultracodeOn} onClick={toggleUltracode}
+            title={ultracodeOn ? 'Ultracode is on: Claude Code coordinates multi-agent workflows where supported' : 'Ultracode: enable Claude Code’s native multi-agent mode'}>
+            <Icon name="layers" size={13.5} /><span>Ultracode</span>
+          </button>
+        ) : (
+          <button type="button" className={`trigger ultra-trigger ${ultraOn ? 'on' : ''}`} aria-label="Ultra mode" aria-pressed={ultraOn} onClick={toggleUltra}
+            title={ultraOn ? 'Ultra is on: Pi works on each request on its own until it is done' : 'Ultra mode: keep working autonomously until the task is done'}>
+            <Icon name={ultraOn ? 'shield' : 'infinity'} size={13.5} /><span>Ultra</span>
+          </button>
+        )}
         {speeds.length > 1 && <SpeedTrigger speeds={speeds.map(value => ({ value, label: SPEED_LABELS[value] }))} value={effectiveSpeed(speed, speeds)} onChange={changeSpeed} />}
       </div>
-      {browsing && <RemoteBrowser environmentId={environmentId} start={cwd ?? undefined} onPick={path => setDraft({ cwd: path })} onClose={() => setBrowsing(false)} />}
     </div>
   );
 }

@@ -201,7 +201,8 @@ export class ClaudeAdapter {
     this.lastContext = null;
     this.controls = new Map(); // request id -> { resolve, reject }
     this.controlSeq = 0;
-    this.ui = new Map();       // extension_ui_request id -> resolver
+    this.ui = new Map();       // extension_ui_request id -> { resolve, requestId }
+    this.controlUi = new Map(); // Claude Code control request_id -> active extension_ui_request id
     this.claudeSessionId = null;
     this.turnError = null;
   }
@@ -210,8 +211,25 @@ export class ClaudeAdapter {
   emit(event) { this.write(event); }
   respond(id, type, data, error) { this.write(error ? { type: 'response', id, command: type, success: false, error: String(error?.message ?? error) } : { type: 'response', id, command: type, success: true, data: data ?? null }); }
 
+  #resolveUi(idOrRequestId, payload) {
+    const direct = this.ui.get(idOrRequestId);
+    if (direct) {
+      this.ui.delete(idOrRequestId);
+      if (this.controlUi.get(direct.requestId) === idOrRequestId) this.controlUi.delete(direct.requestId);
+      direct.resolve(payload);
+      return;
+    }
+    const activeId = this.controlUi.get(idOrRequestId);
+    if (activeId) {
+      const entry = this.ui.get(activeId);
+      this.controlUi.delete(idOrRequestId);
+      this.ui.delete(activeId);
+      entry?.resolve(payload);
+    }
+  }
+
   async handle(request) {
-    if (request.type === 'extension_ui_response') { this.ui.get(request.id)?.(request); this.ui.delete(request.id); return; }
+    if (request.type === 'extension_ui_response') { this.#resolveUi(request.id, request); return; }
     const { id, type } = request;
     try { this.respond(id, type, await this.#command(request)); }
     catch (error) { this.respond(id, type, null, error); }
@@ -239,7 +257,15 @@ export class ClaudeAdapter {
       case 'get_messages': return { messages: this.transcript?.messages() ?? [] };
       case 'get_entries': return { entries: this.transcript?.entries ?? [], leafId: this.transcript?.leafId ?? null };
       case 'get_session_stats': return this.stats();
-      case 'get_commands': return { commands: this.commandList.map(c => ({ name: c.name, description: c.description ?? '', source: 'claude-code', ...(c.argumentHint ? { argumentHint: c.argumentHint } : {}) })) };
+      case 'get_commands': {
+        if (!this.commandList.length && !this.child && this.bin && this.config.provider?.apiKey) await this.#startChild().catch(() => {});
+        return { commands: this.commandList.map(c => ({
+          name: c.name,
+          description: String(c.description ?? '').split('\n')[0].trim().slice(0, 280),
+          source: 'claude-code',
+          ...(c.argumentHint ? { argumentHint: c.argumentHint } : {}),
+        })) };
+      }
       case 'compact': return this.compact();
       case 'clone': return this.clone();
       case 'switch_session': return this.switchSession(request.sessionPath);
@@ -368,6 +394,9 @@ export class ClaudeAdapter {
       this.childReady = null;
       for (const pending of this.controls.values()) pending.reject(new Error('Claude Code exited'));
       this.controls.clear();
+      for (const pending of this.ui.values()) pending.resolve({ cancelled: true });
+      this.ui.clear();
+      this.controlUi.clear();
       if (this.streaming) {
         const detail = stderr.split('\n').filter(l => l.trim() && !/unrecognized_model/.test(l)).slice(-3).join(' ').trim();
         this.#failTurn(`Claude Code exited (${signal ?? `code ${code}`})${detail ? `: ${detail}` : ''}`);
@@ -375,7 +404,8 @@ export class ClaudeAdapter {
     });
     this.childReady = (async () => {
       const init = await this.control({ subtype: 'initialize', hooks: null }, { timeout: 120000 });
-      this.commandList = (init?.commands ?? []).filter(c => c?.name && !c.name.startsWith('__'));
+      const tuiOnly = new Set(['color', 'focus', 'heapdump', 'output-style', 'workflow-launch-exec', 'auto-mode-setup']);
+      this.commandList = (init?.commands ?? []).filter(c => c?.name && !c.name.startsWith('__') && c.userInvocable !== false && !tuiOnly.has(c.name));
       this.models = init?.models ?? [];
       this.account = init?.account ?? null;
       this.version = init?.claude_code_version ?? null;
@@ -501,7 +531,7 @@ export class ClaudeAdapter {
         return;
       }
       case 'control_request': return this.#onControlRequest(record);
-      case 'control_cancel_request': { this.ui.get(record.request_id)?.({ cancelled: true }); return; }
+      case 'control_cancel_request': { this.#resolveUi(record.request_id, { cancelled: true }); return; }
       case 'system': return this.#onSystem(record);
       case 'stream_event': if (!record.parent_tool_use_id) this.#onStream(record.event ?? {}); return;
       case 'assistant': return this.#onAssistant(record);
@@ -716,6 +746,7 @@ export class ClaudeAdapter {
     const details = { engine: 'claude-code', ...(pending?.ccName ? { ccTool: pending.ccName } : {}), ...(structured && typeof structured === 'object' ? { claude: structured } : {}) };
     if (pending?.steps?.length || pending?.agentUsage) {
       details.kind = 'claude-code-agent';
+      details.stepCount = pending.steps.length;
       details.steps = pending.steps.slice(-200);
       if (pending.agentUsage) {
         const usage = piUsage(pending.agentUsage, this.config.model?.cost);
@@ -745,7 +776,7 @@ export class ClaudeAdapter {
     }
     const last = parent.steps.at(-1);
     const summary = last?.type === 'tool' ? `${last.name} ${JSON.stringify(last.arguments ?? {}).slice(0, 200)}` : last?.text?.split('\n')[0] ?? '';
-    this.emit({ type: 'tool_execution_update', toolCallId: parentId, toolName: parent.name, args: {}, partialResult: { content: [{ type: 'text', text: summary }], details: { kind: 'claude-code-agent', engine: 'claude-code', steps: parent.steps.slice(-50) } } });
+    this.emit({ type: 'tool_execution_update', toolCallId: parentId, toolName: parent.name, args: {}, partialResult: { content: [{ type: 'text', text: summary }], details: { kind: 'claude-code-agent', engine: 'claude-code', stepCount: parent.steps.length, steps: parent.steps.slice(-50) } } });
   }
 
   #onResult(record) {
@@ -814,19 +845,41 @@ export class ClaudeAdapter {
     try {
       if (req.tool_name === 'AskUserQuestion' && Array.isArray(input.questions)) {
         const answers = {};
-        for (const q of input.questions) {
-          const options = (q.options ?? []).map(o => o.label);
-          const answer = await this.#ask(record.request_id, options.length
-            ? { method: 'select', title: q.question ?? q.header ?? 'Question', options: q.multiSelect ? options : [...options] }
-            : { method: 'input', title: q.question ?? 'Question', placeholder: '' });
+        const formatAnswer = value => Array.isArray(value)
+          ? value.map(v => String(v)).filter(Boolean).map(v => (v.includes(', ') || v.includes('"')) ? JSON.stringify(v) : v).join(', ')
+          : String(value ?? '');
+        for (const [index, q] of input.questions.entries()) {
+          const rawOptions = Array.isArray(q.options) ? q.options.filter(o => o?.label) : [];
+          const options = rawOptions.map(o => o.label);
+          const isChoice = options.length > 0 && q.kind !== 'text' && q.kind !== 'number';
+          const rangeHint = q.kind === 'number' && q.min != null && q.max != null ? `${q.min}–${q.max}${q.unit ? ` ${q.unit}` : ''}` : '';
+          const dialogId = index === 0 ? `cc-${record.request_id}` : `cc-${record.request_id}-${index}`;
+          const answer = await this.#ask(record.request_id, isChoice
+            ? {
+                method: 'select',
+                title: q.question ?? q.header ?? 'Question',
+                ...(q.header ? { header: q.header } : {}),
+                ...(q.description ? { message: q.description } : {}),
+                options: [...options],
+                ...(q.multiSelect ? { multiSelect: true } : {}),
+                optionDetails: rawOptions.map(o => ({ label: o.label, ...(o.description ? { description: o.description } : {}) })),
+              }
+            : {
+                method: 'input',
+                title: q.question ?? q.header ?? 'Question',
+                ...(q.header ? { header: q.header } : {}),
+                ...(q.description ? { message: q.description } : {}),
+                placeholder: q.placeholder ?? rangeHint,
+                ...(q.defaultValue != null ? { prefill: String(q.defaultValue) } : {}),
+              }, dialogId);
           if (answer.cancelled) { reply({ behavior: 'deny', message: 'The user dismissed the question.' }); return; }
-          answers[q.question] = answer.value;
+          answers[q.question] = formatAnswer(answer.value);
         }
         reply({ behavior: 'allow', updatedInput: { ...input, answers } });
         return;
       }
       if (req.tool_name === 'ExitPlanMode') {
-        const answer = await this.#ask(record.request_id, { method: 'confirm', title: 'Approve the plan?', message: String(input.plan ?? '').slice(0, 20000) });
+        const answer = await this.#ask(record.request_id, { method: 'confirm', header: 'Plan approval', title: 'Approve the plan?', message: String(input.plan ?? '').slice(0, 20000) });
         if (answer.confirmed) reply({ behavior: 'allow', updatedInput: input });
         else reply({ behavior: 'deny', message: answer.cancelled ? 'The user dismissed the plan.' : 'The user did not approve the plan. Ask what to change.' });
         return;
@@ -835,11 +888,10 @@ export class ClaudeAdapter {
       reply({ behavior: 'allow', updatedInput: input });
     } catch (error) { fail(error.message); }
   }
-  #ask(requestId, dialog) {
-    const id = `cc-${requestId}`;
+  #ask(requestId, dialog, id = `cc-${requestId}`) {
     return new Promise(resolve => {
-      this.ui.set(id, resolve);
-      this.ui.set(requestId, resolve);
+      this.ui.set(id, { resolve, requestId });
+      this.controlUi.set(requestId, id);
       this.emit({ type: 'extension_ui_request', id, ...dialog });
     });
   }

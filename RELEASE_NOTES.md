@@ -2,6 +2,13 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.18 — Claude Code engine and recessed workspace tray
+
+- **Claude Code conversations alongside Pi.** Start any conversation on **Claude Code** instead of Pi, on this Mac or on an SSH host. Pi Desktop installs a pinned, SHA-512-verified Claude Code binary into its own private directory with an isolated `CLAUDE_CONFIG_DIR` (never reading `claude` on `PATH` or a machine's `~/.claude` subscription state) and authenticates strictly with API keys from **Settings → Models**. SSH hosts without internet access automatically receive the verified package uploaded from this Mac with live progress.
+- **Anthropic Messages models and custom gateways.** Claude Code conversations filter model menus to providers speaking the Anthropic Messages API (`anthropic-messages`), including built-in Anthropic, compatible aggregators and custom Anthropic-protocol endpoints with custom headers and base URLs.
+- **Native Claude Code controls and cards.** Claude Code conversations expose 5-level **Effort** (`Low` through `Max`), native **Ultracode** and **Fast** mode, Claude Code slash commands and skills with parameter hints, dedicated **Task** subagent step cards, **TodoWrite** checklist cards, multi-select **AskUserQuestion** dialogs with option descriptions, and Markdown **ExitPlanMode** plan approvals—while keeping Request TPS, Usage, Context telemetry, Git review, `@file` mentions, fork and message editing intact, without leaking Pi-only Ultra or Subagents UI.
+- **Recessed composer tray and inline code accuracy.** Moved New Conversation folder, environment and engine selectors into the top recessed tray above the composer input, removed the obsolete **Settings → Agents** tab, and tightened inline file-pill detection so Git branch refs (`origin/main`, `feature/*`) render as plain inline code instead of clickable file links.
+
 ## 0.2.17 — Calibrated high-luminance typography and anodized surface luster
 
 - **High-luminance prose and UI chrome.** Calibrated dark-mode body prose (`#f8f9fc`), headings and emphasis (`#ffffff` with `Display-P3` peak white on wide-gamut Mac displays), inline code text (`#fcfdff`), composer placeholders (`#a2a3ae`), toolbar controls (`#c6c8d4`) and sidebar navigation (`#dfe0e8`) to match Antigravity's pixel-level stroke brightness without anti-aliasing greyness.

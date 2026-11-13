@@ -2,7 +2,7 @@ import { createContext, useCallback, useContext, useEffect, useLayoutEffect, use
 import { Icon } from './Icons.jsx';
 import { Markdown, Spinner, fileBadgeKind, looksLikePath } from './ui.jsx';
 import { changesOf, displayBlocks, formatTokens, isAbortText, retainWorkKeys, toolSummary, ultraProgress } from './transcript.js';
-import { api, editMessage, isPendingSession, loadEarlierHistory, loadHistoryEntry, notify, openChanges, openFile } from './store.js';
+import { api, editMessage, isPendingSession, loadEarlierHistory, loadHistoryEntry, notify, openChanges, openFile, useStore } from './store.js';
 import { VirtualHistory } from './VirtualHistory.jsx';
 import { historyBookmark, restoreHistoryBookmark } from './history-scroll.js';
 import { ImagePreview } from './ImagePreview.jsx';
@@ -57,16 +57,48 @@ function FadeText({ className = '', children, title }) {
   return <span ref={ref} className={`fade-text ${clipped ? 'clipped' : ''} ${className}`} title={title}>{children}</span>;
 }
 
+const urlLabel = url => {
+  try {
+    const u = new URL(url);
+    const tail = u.pathname && u.pathname !== '/' ? u.pathname : '';
+    return (u.hostname + tail).slice(0, 96);
+  } catch { return String(url ?? '').slice(0, 96); }
+};
+
 // How a step reads in a row: an icon, a short sentence, and (for files) the folder in grey.
 function describeCall(call) {
   if (call.__trace?.status === 'skipped') return { subject: `${call.name} — not executed`, title: 'Output token limit: incomplete tool arguments were not executed.' };
   const a = call.arguments ?? {};
-  const path = a.path ?? a.file_path ?? '';
-  if (call.name.startsWith('cursor_')) return { subject: a.description || call.name.slice(7), title: path || JSON.stringify(a) };
+  const path = a.path ?? a.file_path ?? a.notebook_path ?? '';
+  if (call.name?.startsWith('cursor_')) return { subject: a.description || call.name.slice(7), title: path || JSON.stringify(a) };
+  if (call.name?.startsWith('mcp__')) {
+    const [, server, method] = /^mcp__([^_]+(?:_[^_]+)*?)__(.+)$/.exec(call.name) ?? [null, 'MCP', call.name.slice(5)];
+    const hint = Object.values(a).find(v => typeof v === 'string' && v.trim());
+    return { verb: `MCP · ${server}`, subject: method, detail: hint ? String(hint).split('\n')[0].slice(0, 64) : '', title: `${server} / ${method}` };
+  }
   switch (call.name) {
     case 'subagent': return { verb: 'Subagents', subject: (a.tasks ?? []).map(t => t.name).join(' · '), title: 'Delegated tasks on this session’s machine' };
     case 'subagent_message': return { verb: 'Messaged agent', subject: a.message ?? '', detail: a.id, title: a.message };
     case 'subagent_stop': return { verb: 'Stopped agent', subject: a.id ?? '' };
+    case 'Task': return { verb: a.subagent_type ? `Agent · ${a.subagent_type}` : 'Agent', subject: a.description || String(a.prompt ?? '').split('\n')[0].slice(0, 90) || 'Delegated task', title: a.prompt };
+    case 'TodoWrite': return { verb: 'Updated tasks', subject: `${(a.todos ?? []).length} ${(a.todos ?? []).length === 1 ? 'item' : 'items'}` };
+    case 'WebSearch': return { verb: 'Searched web', subject: a.query ?? '', detail: Array.isArray(a.allowed_domains) && a.allowed_domains[0] ? a.allowed_domains[0] : '' };
+    case 'WebFetch': return { verb: 'Fetched', subject: urlLabel(a.url), detail: a.prompt ? String(a.prompt).split('\n')[0].slice(0, 60) : '', title: a.url };
+    case 'Skill': return { verb: 'Used skill', subject: a.skill ? `/${String(a.skill).replace(/^\//, '')}` : 'skill', detail: a.args ?? '' };
+    case 'Workflow': return { verb: 'Workflow', subject: a.description || a.name || String(a.prompt ?? '').split('\n')[0].slice(0, 80) || 'Run workflow' };
+    case 'NotebookEdit': return { verb: 'Edited notebook', subject: baseOf(path), detail: a.edit_mode ?? '', title: path };
+    case 'EnterPlanMode': return { verb: 'Entered plan mode', subject: '' };
+    case 'ExitPlanMode': return { verb: 'Proposed plan', subject: String(a.plan ?? '').split('\n').map(l => l.replace(/^#+\s*/, '').trim()).find(Boolean) || '' };
+    case 'EnterWorktree': return { verb: 'Entered worktree', subject: a.name ?? a.path ?? '' };
+    case 'ExitWorktree': return { verb: 'Exited worktree', subject: a.action ?? '' };
+    case 'ToolSearch': return { verb: 'Loaded tools', subject: a.query ?? '' };
+    case 'CronCreate': case 'ScheduleWakeup': return { verb: 'Scheduled', subject: String(a.prompt ?? a.reason ?? a.cron ?? '').split('\n')[0].slice(0, 80) };
+    case 'CronDelete': return { verb: 'Cancelled schedule', subject: a.id ?? '' };
+    case 'CronList': return { verb: 'Listed schedules', subject: '' };
+    case 'Monitor': return { verb: 'Monitored', subject: a.description || shortCommand(a.command), title: a.command };
+    case 'ListAgents': return { verb: 'Listed agents', subject: '' };
+    case 'SendMessage': return { verb: 'Messaged', subject: a.to ?? a.recipient ?? 'agent', detail: String(a.message ?? a.content ?? '').split('\n')[0].slice(0, 60) };
+    case 'ReportFindings': return { verb: 'Reported findings', subject: String(a.summary ?? a.findings ?? '').split('\n')[0].slice(0, 80) };
     case 'bash': return a.description?.trim() ? { subject: a.description.trim(), title: a.command } : { subject: shortCommand(a.command), title: a.command, raw: true };
     case 'read': return { verb: 'Read', subject: baseOf(path), title: path };
     case 'write': return { verb: 'Wrote', subject: baseOf(path), title: path };
@@ -99,7 +131,7 @@ const outputText = text => text.length > 8000 ? text.slice(0, 8000) + '\n…' : 
 
 function ToolCall({ call, tool }) {
   const [open, setOpen] = useDisclosure(`tool:${call.id}`);
-  const { onOpenFile } = useContext(DisclosureContext);
+  const { onOpenFile, sessionId } = useContext(DisclosureContext);
   const detailState = useHistoryDetails([call.__historyRef, tool?.historyRef], open);
   const trace = call.__trace;
   const { verb, subject, detail, mono, title } = describeCall(call);
@@ -107,10 +139,12 @@ function ToolCall({ call, tool }) {
   const failed = ['error', 'cancelled', 'timed_out'].includes(status);
   const output = textOf(tool?.result);
   const shownOutput = tool?.fullHistory ? output : outputText(output);
-  const filePath = call.__historyTruncated ? null : trace?.path ?? (['read', 'edit', 'write', 'cursor_edit'].includes(call.name) && !failed ? (call.arguments?.path ?? call.arguments?.file_path) : null);
-  const hunks = trace || call.__historyTruncated ? [] : call.name === 'edit' ? editHunks(call.arguments) : call.name === 'write' ? [{ oldText: null, newText: String(call.arguments?.content ?? '') }] : [];
+  const filePath = call.__historyTruncated ? null : trace?.path ?? (['read', 'edit', 'write', 'cursor_edit', 'NotebookEdit'].includes(call.name) && !failed ? (call.arguments?.path ?? call.arguments?.file_path ?? call.arguments?.notebook_path) : null);
+  const hunks = trace || call.__historyTruncated ? [] : call.name === 'edit' ? editHunks(call.arguments) : call.name === 'write' ? [{ oldText: null, newText: String(call.arguments?.content ?? '') }] : call.name === 'NotebookEdit' && call.arguments?.new_source != null ? [{ oldText: null, newText: String(call.arguments.new_source) }] : [];
   const stats = hunks.length && status !== 'error' ? changeStats({ hunks }) : null;
   const openTarget = path => onOpenFile ? onOpenFile(path) : window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: path }));
+  const a = call.arguments ?? {};
+  const isMcp = call.name?.startsWith('mcp__');
   return (
     <div className={`step tool-call ${status} ${open ? 'open' : ''}`} data-tool-id={call.id}>
       <div className="step-head tool-call-head" role="button" tabIndex={0} aria-expanded={open}
@@ -142,8 +176,24 @@ function ToolCall({ call, tool }) {
             {!output && status === 'running' && <div className="tool-running">Running…</div>}
           </> : call.name === 'bash'
             ? <div className={`tool-console ${status === 'error' ? 'error' : ''}`}>
-                <pre className="tool-command"><span className="prompt">$</span> {call.arguments?.command}</pre>
+                <pre className="tool-command"><span className="prompt">$</span> {a.command}</pre>
                 {output && <pre className="tool-output">{shownOutput}</pre>}
+                {!output && status === 'running' && <div className="tool-running">Running…</div>}
+              </div>
+            : call.name === 'WebFetch' || call.name === 'WebSearch'
+            ? <div className="cc-web-detail">
+                {a.url && <button type="button" className="cc-web-link" onClick={() => api('openExternal', a.url)} title={a.url}><Icon name="globe" size={13} /><span>{a.url}</span><Icon name="externalLink" size={12} /></button>}
+                {a.query && <div className="cc-meta-line"><span className="cc-meta-key">Query</span><span>{a.query}</span></div>}
+                {a.prompt && <div className="cc-meta-line"><span className="cc-meta-key">Prompt</span><span>{a.prompt}</span></div>}
+                {output && (status === 'error' ? <pre className="tool-output boxed error">{shownOutput}</pre> : <div className="step-markdown"><Markdown text={shownOutput} sessionId={sessionId} documentPath="" /></div>)}
+                {!output && status === 'running' && <div className="tool-running">Fetching…</div>}
+              </div>
+            : call.name === 'ExitPlanMode' && a.plan
+            ? <div className="step-markdown"><Markdown text={String(a.plan)} sessionId={sessionId} documentPath="" /></div>
+            : isMcp || call.name === 'Skill' || call.name === 'Workflow'
+            ? <div className="cc-structured-detail">
+                {Object.keys(a).length > 0 && <pre className="tool-command">{JSON.stringify(a, null, 2)}</pre>}
+                {output && <pre className={`tool-output boxed ${status === 'error' ? 'error' : ''}`}>{shownOutput}</pre>}
                 {!output && status === 'running' && <div className="tool-running">Running…</div>}
               </div>
             : <>
@@ -228,8 +278,8 @@ function WorkGroup({ items, tools, live }) {
   const edits = useMemo(() => groupChanges.map(changeStats).reduce((t, c) => ({ added: t.added + c.added, removed: t.removed + c.removed }), { added: 0, removed: 0 }), [groupChanges]);
   const only = calls.length === 1 ? describeCall(calls[0]) : null;
   const onlyCall = calls.length === 1 ? calls[0] : null;
-  const onlyFile = onlyCall && !onlyCall.__historyTruncated && ['read', 'edit', 'write', 'cursor_edit'].includes(onlyCall.name) && tools[onlyCall.id]?.status !== 'error'
-    ? (onlyCall.__trace?.path ?? onlyCall.arguments?.path ?? onlyCall.arguments?.file_path) : null;
+  const onlyFile = onlyCall && !onlyCall.__historyTruncated && ['read', 'edit', 'write', 'cursor_edit', 'NotebookEdit'].includes(onlyCall.name) && tools[onlyCall.id]?.status !== 'error'
+    ? (onlyCall.__trace?.path ?? onlyCall.arguments?.path ?? onlyCall.arguments?.file_path ?? onlyCall.arguments?.notebook_path) : null;
   const summary = (only && !only.mono && !only.raw ? [only.verb, only.subject].filter(Boolean).join(' ') : toolSummary(calls)) || (running ? '' : thoughtLabel(thinkMs));
   const latest = items.at(-1);
   const thinkingNow = running && latest?.kind === 'thinking' && latest.streaming;
@@ -301,34 +351,180 @@ function Thinking({ text, streaming, redacted, hidden, durationMs, blockKey, tok
   );
 }
 
-// A question from Pi (ask_user or another extension dialog), answered right in the conversation.
+// Claude Code's native subagent card (`Task` tool): live steps, file pills, token count, and final report.
+function ClaudeTaskCard({ call, tool, sessionId }) {
+  const [open, setOpen] = useDisclosure(`cc-task:${call.id}`);
+  const { onOpenFile } = useContext(DisclosureContext);
+  const detailState = useHistoryDetails([call.__historyRef, tool?.historyRef], open);
+  const a = call.arguments ?? {};
+  const status = tool?.status ?? 'running';
+  const running = status === 'running' || status === 'pending';
+  const failed = ['error', 'cancelled', 'timed_out'].includes(status);
+  const details = tool?.result?.details ?? {};
+  const steps = Array.isArray(details.steps) ? details.steps.filter(s => s && (s.type === 'tool' || (s.type === 'text' && s.text?.trim()))) : [];
+  const toolStepCount = steps.filter(s => s.type === 'tool').length;
+  const stepCount = toolStepCount || details.stepCount || 0;
+  const agentRun = details.agentRuns?.[0];
+  const agentType = a.subagent_type || 'Agent';
+  const title = a.description?.trim() || firstLine(a.prompt) || 'Delegated task';
+  const output = textOf(tool?.result);
+  const latestStep = steps.at(-1);
+  const liveLine = running
+    ? (latestStep?.type === 'tool'
+        ? (() => { const d = describeCall({ name: latestStep.name, arguments: latestStep.arguments }); return [d.verb, d.subject].filter(Boolean).join(' '); })()
+        : firstLine(latestStep?.text || output))
+    : '';
+  const openTarget = path => onOpenFile ? onOpenFile(path) : window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: path }));
+  return (
+    <section className={`cc-task-card ${status} ${open ? 'open' : ''}`} data-tool-id={call.id} aria-label={`Agent task: ${title}`}>
+      <button type="button" className="cc-task-head" aria-expanded={open} onClick={() => setOpen(o => !o)}>
+        <span className="cc-task-status">
+          {running ? <Spinner size={13} /> : failed ? <Icon name="alert" size={14} className="cc-task-err" /> : <Icon name="check" size={14} className="cc-task-ok" />}
+        </span>
+        <span className="cc-task-badge">{agentType}</span>
+        <FadeText className="cc-task-title" title={a.prompt || title}>{title}</FadeText>
+        {stepCount > 0 && <span className="cc-task-meta">{stepCount} {stepCount === 1 ? 'step' : 'steps'}</span>}
+        {agentRun?.usage?.totalTokens > 0 && <span className="cc-task-meta">{formatTokens(agentRun.usage.totalTokens)} tok</span>}
+        {tool?.durationMs != null && <span className="cc-task-meta">{tool.durationMs < 1000 ? '<1s' : seconds(tool.durationMs)}</span>}
+        <Caret open={open} />
+      </button>
+      {running && !open && liveLine && (
+        <div className="cc-task-live"><span className="shimmer">{liveLine}</span></div>
+      )}
+      {open && (
+        <div className="cc-task-body">
+          {detailState.pending ? <HistoryLoading {...detailState} /> : <>
+            {a.prompt && <div className="cc-task-prompt"><span className="cc-meta-key">Brief</span><span>{a.prompt}</span></div>}
+            {steps.length > 0 && (
+              <div className="cc-task-steps">
+                {steps.map((step, idx) => {
+                  if (step.type === 'text') {
+                    return <div key={idx} className="cc-task-step note"><FadeText>{firstLine(step.text)}</FadeText></div>;
+                  }
+                  const d = describeCall({ name: step.name, arguments: step.arguments });
+                  const stepPath = ['read', 'edit', 'write', 'NotebookEdit'].includes(step.name)
+                    ? (step.arguments?.path ?? step.arguments?.file_path ?? step.arguments?.notebook_path)
+                    : null;
+                  return (
+                    <div key={step.id ?? idx} className="cc-task-step">
+                      {d.verb && <span className="step-verb">{d.verb}</span>}
+                      {stepPath ? (
+                        <button type="button" className="file-ref-inline cc-step-file" data-kind={fileBadgeKind(stepPath)} title={stepPath} onClick={() => openTarget(stepPath)}>
+                          {d.subject}
+                        </button>
+                      ) : (
+                        <span className="step-subject">{d.subject}</span>
+                      )}
+                      {d.detail && <span className="step-dir">{d.detail}</span>}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+            {!running && output && (failed
+              ? <pre className="tool-output boxed error">{outputText(output)}</pre>
+              : <div className="cc-task-report"><Markdown text={output} sessionId={sessionId} documentPath="" /></div>)}
+          </>}
+        </div>
+      )}
+    </section>
+  );
+}
+
+// Claude Code's `TodoWrite` checklist card.
+function ClaudeTodoCard({ call, tool, live }) {
+  const detailState = useHistoryDetails([call.__historyRef, tool?.historyRef]);
+  const todos = Array.isArray(call.arguments?.todos) ? call.arguments.todos.filter(Boolean) : [];
+  if (detailState.pending && !todos.length) return <HistoryLoading {...detailState} />;
+  if (!todos.length) return null;
+  const doneCount = todos.filter(t => t.status === 'completed').length;
+  const pct = Math.round((doneCount / todos.length) * 100);
+  return (
+    <section className="cc-todo-card" data-tool-id={call.id} aria-label="Task checklist">
+      <div className="cc-todo-head">
+        <Icon name="list" size={14} className="cc-todo-icon" />
+        <span className="cc-todo-title">Tasks</span>
+        <span className="cc-todo-count">{doneCount}/{todos.length}</span>
+        <span className="meter"><span style={{ width: `${pct}%` }} /></span>
+      </div>
+      <ul className="cc-todo-list">
+        {todos.map((item, i) => {
+          const state = item.status === 'completed' ? 'completed' : item.status === 'in_progress' ? 'in_progress' : 'pending';
+          const label = state === 'in_progress' && item.activeForm ? item.activeForm : item.content;
+          return (
+            <li key={item.id ?? i} className={`cc-todo-item ${state}`}>
+              <span className="cc-todo-mark" aria-hidden="true">
+                {state === 'completed'
+                  ? <Icon name="check" size={12} />
+                  : state === 'in_progress'
+                    ? (live ? <Spinner size={11} /> : <span className="cc-todo-dot active" />)
+                    : <span className="cc-todo-dot" />}
+              </span>
+              <span className="cc-todo-text">{label}</span>
+            </li>
+          );
+        })}
+      </ul>
+    </section>
+  );
+}
+
+// A question from Pi or Claude Code (ask_user, AskUserQuestion, ExitPlanMode), answered right in the conversation.
 function QuestionCard({ sessionId, question }) {
   const [busy, setBusy] = useState(false);
   const [text, setText] = useState(question.prefill ?? '');
+  const [selected, setSelected] = useState([]);
   const send = async payload => {
     setBusy(true);
     try { await api('answer', sessionId, question.requestId, payload); } catch (e) { notify(e.message, 'error'); setBusy(false); }
   };
   const options = question.method === 'select' ? question.options ?? [] : [];
+  const detailsByLabel = useMemo(() => new Map((question.optionDetails ?? []).map(o => [o.label, o.description])), [question.optionDetails]);
+  const multi = question.method === 'select' && !!question.multiSelect;
   const freeText = question.method !== 'confirm';
+  const toggleOption = option => setSelected(prev => prev.includes(option) ? prev.filter(x => x !== option) : [...prev, option]);
+  const submitMulti = () => {
+    const extra = text.trim();
+    const values = extra ? [...selected, extra] : selected;
+    if (values.length) send({ value: values });
+  };
   return (
-    <div className="question-card" role="group" aria-label="Question from Pi">
+    <div className="question-card" role="group" aria-label="Question from agent">
+      {question.header && <div className="question-header-chip">{question.header}</div>}
       <div className="question-title">{question.title}</div>
-      {question.message && <div className="question-message">{question.message}</div>}
+      {question.message && (question.method === 'confirm'
+        ? <div className="question-message question-plan"><Markdown text={question.message} sessionId={sessionId} documentPath="" /></div>
+        : <div className="question-message">{question.message}</div>)}
       {options.length > 0 && <div className="question-options">
-        {options.map((option, i) => (
-          <button key={option} className="question-option" disabled={busy} onClick={() => send({ value: option })}>
-            <span className="question-key">{i + 1}</span><span>{option}</span>
-          </button>
-        ))}
+        {options.map((option, i) => {
+          const desc = detailsByLabel.get(option);
+          const checked = multi && selected.includes(option);
+          return (
+            <button key={option} type="button" className={`question-option ${checked ? 'checked' : ''}`} disabled={busy}
+              aria-pressed={multi ? checked : undefined}
+              onClick={() => multi ? toggleOption(option) : send({ value: option })}>
+              <span className={`question-key ${multi ? 'checkbox' : ''}`}>{multi ? (checked ? <Icon name="check" size={12} /> : '') : i + 1}</span>
+              <span className="question-option-body">
+                <span className="question-option-label">{option}</span>
+                {desc && <span className="question-option-desc">{desc}</span>}
+              </span>
+            </button>
+          );
+        })}
       </div>}
-      {freeText && <form className="question-input" onSubmit={e => { e.preventDefault(); if (text.trim()) send({ value: text.trim() }); }}>
-        <input value={text} onChange={e => setText(e.target.value)} placeholder={options.length ? 'Something else…' : question.placeholder || 'Type your answer…'} disabled={busy} autoFocus={!options.length} />
-        <button type="submit" className="button primary small" disabled={busy || !text.trim()}>Send</button>
+      {freeText && <form className="question-input" onSubmit={e => {
+        e.preventDefault();
+        if (multi) submitMulti();
+        else if (text.trim()) send({ value: text.trim() });
+      }}>
+        <input value={text} onChange={e => setText(e.target.value)} placeholder={multi ? 'Other (optional)…' : options.length ? 'Something else…' : question.placeholder || 'Type your answer…'} disabled={busy} autoFocus={!options.length} />
+        {multi
+          ? <button type="submit" className="button primary small" disabled={busy || (!selected.length && !text.trim())}>Submit{selected.length ? ` (${selected.length})` : ''}</button>
+          : <button type="submit" className="button primary small" disabled={busy || !text.trim()}>Send</button>}
       </form>}
       <div className="question-actions">
         {question.method === 'confirm'
-          ? <><button className="button ghost" disabled={busy} onClick={() => send({ confirmed: false })}>No</button><button className="button primary" disabled={busy} onClick={() => send({ confirmed: true })}>Yes</button></>
+          ? <><button className="button ghost" disabled={busy} onClick={() => send({ confirmed: false })}>No</button><button className="button primary" disabled={busy} onClick={() => send({ confirmed: true })}>Approve</button></>
           : <button className="button ghost small" disabled={busy} onClick={() => send({ cancelled: true })}>Skip</button>}
       </div>
     </div>
@@ -454,12 +650,23 @@ function AskBlock({ call, tool }) {
   );
 }
 
-// While Pi works: what it is doing, for how long, and how many tokens it has produced this turn.
+// While Pi or Claude Code works: what it is doing, for how long, and how many tokens it has produced this turn.
 function WorkingRow({ session, transcript }) {
   const [, tick] = useState(0);
+  const envPrep = useStore(s => session?.environmentId ? s.envStatus[session.environmentId] : null);
+  const ccPrep = useStore(s => session?.environmentId ? s.claudeStatus[session.environmentId] : null);
   useEffect(() => { const t = setInterval(() => tick(n => n + 1), 1000); return () => clearInterval(t); }, []);
   if (session?.status === 'connecting') {
-    const phase = { preparing: 'Preparing remote environment…', starting: 'Starting Pi…', configuring: 'Restoring session…' }[session.phase] ?? 'Connecting…';
+    const isClaude = session.engine === 'claude-code';
+    const preparingText = session.statusMessage
+      || (isClaude && ccPrep?.status === 'preparing' ? ccPrep.message : null)
+      || (envPrep?.status === 'preparing' ? envPrep.message : null)
+      || (isClaude ? 'Preparing Claude Code…' : 'Preparing remote environment…');
+    const phase = {
+      preparing: preparingText,
+      starting: isClaude ? 'Starting Claude Code…' : 'Starting Pi…',
+      configuring: 'Restoring session…',
+    }[session.phase] ?? 'Connecting…';
     return <div className="working"><span className="working-dot" /><span className="shimmer">{phase}</span></div>;
   }
   const messages = transcript.messages;
@@ -675,6 +882,8 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             case 'work': return <WorkGroup key={block.key} items={block.items} tools={transcript.tools} live={!!transcript.live} />;
             case 'tools': return <ToolGroup key={block.key} calls={block.calls} tools={transcript.tools} live={!!transcript.live} />;
             case 'subagents': return renderSubagents?.(block);
+            case 'ccTask': return <ClaudeTaskCard key={block.key} call={block.call} tool={transcript.tools[block.call.id]} sessionId={session?.id} />;
+            case 'ccTodo': return <ClaudeTodoCard key={block.key} call={block.call} tool={transcript.tools[block.call.id]} live={working} />;
             case 'progress': return <ProgressReport key={block.key} call={block.call} tool={transcript.tools[block.call.id]} sessionId={session?.id} live={!!transcript.live} />;
             case 'files': return <FileCards key={block.key} sessionId={readOnly ? null : session?.id} call={block.call} tool={transcript.tools[block.call.id]} />;
             case 'agentReports': return renderAgentReport?.(block) ?? null;

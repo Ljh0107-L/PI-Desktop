@@ -47,6 +47,7 @@ let state = {
   filePaneMax: false,                            // session id -> [question waiting for an answer]
   stats: {},                                // session id -> stats
   envStatus: {},                            // environment id -> { status, message }
+  claudeStatus: {},                         // environment id -> { status, message, version }
   notices: [],
   rightPanel: (() => { try { return localStorage.getItem('pidesk.rightPanel') === 'true'; } catch { return false; } })(),
   subagentSelection: {},                    // session id -> { callId, taskIndex }; changes only on user navigation
@@ -55,7 +56,7 @@ let state = {
   paletteOpen: false,
   history: [], future: [],                  // back / forward navigation
   composerDrafts: {},                       // in-memory text/images per conversation; never written to settings
-  draft: { environmentId: 'local', cwd: null, model: null, thinkingLevel: 'medium', speed: 'standard', ultra: false },
+  draft: { environmentId: 'local', cwd: null, model: null, engine: 'pi', thinkingLevel: 'medium', effort: 'medium', speed: 'standard', ultra: false, ultracode: false },
 };
 
 const set = patch => { state = { ...state, ...(typeof patch === 'function' ? patch(state) : patch) }; for (const l of listeners) l(); };
@@ -195,6 +196,9 @@ window.pidesk.subscribe(({ channel, payload }) => {
       set(s => ({ envStatus: { ...s.envStatus, [payload.id]: payload } }));
       if (payload.status === 'ready') import('./dirs.js').then(d => d.prefetchDir(payload.id)); // the folder browser opens instantly
       break;
+    case 'claude-code':
+      set(s => ({ claudeStatus: { ...s.claudeStatus, [payload.id]: payload } }));
+      break;
   }
 });
 
@@ -205,7 +209,17 @@ export async function bootstrap() {
   set({
     ready: true, settings: boot.settings, environments: boot.environments, sessions: boot.sessions, home: boot.home, piVersion: boot.piVersion,
     questions: Object.fromEntries(boot.sessions.map(s => [s.id, s.pendingQuestions ?? []])),
-    draft: { environmentId: d.environmentId ?? 'local', cwd: defaultFolder(boot.settings, d.environmentId ?? 'local'), model: d.model, thinkingLevel: d.thinkingLevel, speed: d.speed ?? 'standard', ultra: false },
+    draft: {
+      environmentId: d.environmentId ?? 'local',
+      cwd: defaultFolder(boot.settings, d.environmentId ?? 'local'),
+      model: d.model,
+      engine: d.engine === 'claude-code' ? 'claude-code' : 'pi',
+      thinkingLevel: d.thinkingLevel ?? 'medium',
+      effort: d.effort ?? 'medium',
+      speed: d.speed ?? 'standard',
+      ultra: false,
+      ultracode: false,
+    },
   });
   loadCatalog();
   api('resumeRemote').catch(() => {}); // re-attach SSH sessions still running on their hosts
@@ -306,7 +320,7 @@ export async function loadCatalog() {
     const catalog = await api('catalog');
     set(s => {
       const draft = { ...s.draft };
-      draft.model = modelForEnvironment(catalog, draft.environmentId, draft.model);
+      draft.model = modelForEnvironment(catalog, draft.environmentId, draft.model, draft.engine);
       return { catalog, catalogError: null, draft };
     });
   } catch (error) { set({ catalogError: error.message }); }
@@ -314,7 +328,9 @@ export async function loadCatalog() {
 
 export const setDraft = patch => set(s => {
   const draft = { ...s.draft, ...patch };
-  if (Object.hasOwn(patch, 'environmentId')) draft.model = modelForEnvironment(s.catalog, draft.environmentId, draft.model);
+  if (Object.hasOwn(patch, 'environmentId') || Object.hasOwn(patch, 'engine')) {
+    draft.model = modelForEnvironment(s.catalog, draft.environmentId, draft.model, draft.engine);
+  }
   return { draft };
 });
 // Retain empty entries as lifetime/revision guards. Only session deletion removes them.
@@ -422,7 +438,14 @@ export function goForward() {
   set(s => ({ future: s.future.slice(1), history: [...s.history, here()] }));
   next.view === 'session' && next.activeId ? openSession(next.activeId, { record: false }) : set({ view: 'new', activeId: null });
 }
-export function pickRecent(environmentId, cwd) { set(s => ({ draft: { ...s.draft, environmentId, cwd } })); if (environmentId !== 'local') api('prepareEnvironment', environmentId); }
+export function pickRecent(environmentId, cwd) {
+  set(s => {
+    const draft = { ...s.draft, environmentId, cwd };
+    draft.model = modelForEnvironment(s.catalog, environmentId, draft.model, draft.engine);
+    return { draft };
+  });
+  if (environmentId !== 'local') api('prepareEnvironment', environmentId);
+}
 export const setSettings = settings => set({ settings });
 export const setEnvironments = environments => set({ environments });
 
@@ -440,14 +463,17 @@ export async function openSession(id, { record = true } = {}) {
   // Once it is open, keep a spare Pi in its folder so Fork (or a new session there) needn't start one.
   setTimeout(() => { if (state.activeId === id) api('warmFolder', id).catch(() => {}); }, 1500);
   const t = transcriptOf(id);
-  refreshJobs(id);
+  const isClaude = state.sessions.find(s => s.id === id)?.engine === 'claude-code';
+  if (!isClaude) refreshJobs(id);
   if (t.loaded) { api('focusSession', id).catch(() => {}); prefetchHistory(id); return; } // the sweep never stops the open conversation
   try {
     await reloadTranscript(id);
     refreshStats(id);
-    api('goal', id).then(goal => set(s => ({ goals: { ...s.goals, [id]: goal ?? s.goals[id] ?? null } }))).catch(() => {});
-    api('ultra', id).then(ultra => set(s => ({ ultra: { ...s.ultra, [id]: ultra ?? s.ultra[id] ?? null } }))).catch(() => {});
-    api('agents', id).then(list => { if (list?.length) set(s => ({ agents: { ...s.agents, [id]: { ...Object.fromEntries(list.map(agent => [agent.id, agent])), ...s.agents[id] } } })); }).catch(() => {});
+    if (!isClaude) {
+      api('goal', id).then(goal => set(s => ({ goals: { ...s.goals, [id]: goal ?? s.goals[id] ?? null } }))).catch(() => {});
+      api('ultra', id).then(ultra => set(s => ({ ultra: { ...s.ultra, [id]: ultra ?? s.ultra[id] ?? null } }))).catch(() => {});
+      api('agents', id).then(list => { if (list?.length) set(s => ({ agents: { ...s.agents, [id]: { ...Object.fromEntries(list.map(agent => [agent.id, agent])), ...s.agents[id] } } })); }).catch(() => {});
+    }
   } catch (error) {
     setTranscript(id, { ...transcriptOf(id), loaded: true, error: error.message });
   }
@@ -474,21 +500,24 @@ function scheduleStats(id) {
 
 export async function startSession(text, attachments = []) {
   const { draft } = state;
-  if (!draft.model) throw new Error('Choose a model in Settings → Models first.');
+  const claude = draft.engine === 'claude-code';
+  if (!draft.model) throw new Error(claude ? 'Choose an Anthropic Messages model in Settings → Models first.' : 'Choose a model in Settings → Models first.');
   if (isRetiredProvider(draft.model.provider)) throw new Error(RETIRED_PROVIDER_MESSAGE);
   const pendingId = `pending:${++nextPendingId}`;
   set({ view: 'session', activeId: pendingId, transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: [{ role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] } } });
   try {
-    const session = await api('createSession', { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel, speed: draft.speed, ultra: draft.ultra, prompt: text });
+    const session = await api('createSession', claude
+      ? { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, engine: 'claude-code', effort: draft.effort, ultracode: draft.ultracode, speed: draft.speed, prompt: text }
+      : { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel, speed: draft.speed, ultra: draft.ultra, prompt: text });
     set(s => ({ ...(s.activeId === pendingId ? { activeId: session.id } : {}),
-      ...(draft.ultra && s.draft === draft ? { draft: { ...draft, ultra: false } } : {}),
+      ...(draft.ultra && !claude && s.draft === draft ? { draft: { ...draft, ultra: false } } : {}),
       transcripts: { ...s.transcripts, [session.id]: s.transcripts[session.id] ?? { ...emptyTranscript(), loaded: true }, [pendingId]: undefined },
       history: s.history.map(v => v.activeId === pendingId ? { ...v, activeId: session.id } : v),
       future: s.future.map(v => v.activeId === pendingId ? { ...v, activeId: session.id } : v),
       sessions: s.sessions.some(x => x.id === session.id) ? s.sessions : [session, ...s.sessions] }));
     warnIfNoImages(draft.model, attachments);
     await api('prompt', session.id, text, attachments);
-    api('updateDefaults', { environmentId: draft.environmentId, model: draft.model, thinkingLevel: draft.thinkingLevel, speed: draft.speed }).then(setSettings).catch(() => {});
+    api('updateDefaults', { environmentId: draft.environmentId, model: draft.model, engine: draft.engine, thinkingLevel: draft.thinkingLevel, effort: draft.effort, speed: draft.speed }).then(setSettings).catch(() => {});
   } catch (error) {
     set(s => ({ ...(s.activeId === pendingId ? { view: 'new', activeId: null } : {}), transcripts: { ...s.transcripts, [pendingId]: undefined },
       history: s.history.filter(v => v.activeId !== pendingId), future: s.future.filter(v => v.activeId !== pendingId) }));
@@ -499,7 +528,7 @@ export async function startSession(text, attachments = []) {
 // Text sent while Pi is waiting on a question answers that question instead of starting a new turn.
 export async function sendPrompt(id, text, attachments = []) {
   const pending = state.questions[id]?.find(q => q.method === 'select' || q.method === 'input' || q.method === 'editor');
-  if (pending && text && !attachments.length) { await api('answer', id, pending.requestId, { value: text }); return; }
+  if (pending && text && !attachments.length) { await api('answer', id, pending.requestId, { value: pending.multiSelect ? [text] : text }); return; }
   // Desktop commands; anything else starting with "/" (goal, skills, prompt templates) goes to Pi.
   const command = /^\/(\w+)\s*$/.exec(text)?.[1];
   if (command === 'compact') { await api('compact', id); return; }

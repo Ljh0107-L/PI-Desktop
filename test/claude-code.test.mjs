@@ -186,11 +186,33 @@ test('AskUserQuestion becomes a question card and its answer goes back to Claude
   await f.request('prompt', { message: 'pick [[ask]]' });
   const q = await question;
   assert.equal(q.title, 'Which color?');
+  assert.equal(q.header, 'Color');
   assert.deepEqual(q.options, ['Red', 'Blue']);
+  assert.deepEqual(q.optionDetails, [{ label: 'Red', description: 'warm' }, { label: 'Blue', description: 'cool' }]);
   f.adapter.handle({ type: 'extension_ui_response', id: q.id, value: 'Blue' });
   await settled;
   const reply = f.events.filter(e => e.type === 'message_end' && e.message.role === 'assistant').at(-1).message;
   assert.equal(reply.content[0].text, 'You chose Blue');
+
+  // Multi-question + multi-select + numeric input: distinct dialog IDs and properly quoted comma-joined answers.
+  const settled2 = f.next(r => r.type === 'agent_settled');
+  const q1Promise = f.next(r => r.type === 'extension_ui_request' && r.title === 'Which features?');
+  await f.request('prompt', { message: 'setup [[ask-multi]]' });
+  const q1 = await q1Promise;
+  assert.equal(q1.multiSelect, true);
+  assert.equal(q1.message, 'Pick one or more');
+  assert.equal(q1.optionDetails.length, 3);
+  const q2Promise = f.next(r => r.type === 'extension_ui_request' && r.title === 'Which port?');
+  f.adapter.handle({ type: 'extension_ui_response', id: q1.id, value: ['Auth', 'Search, full-text'] });
+  const q2 = await q2Promise;
+  assert.notEqual(q2.id, q1.id, 'each question in a batch gets a distinct UI request ID');
+  assert.equal(q2.method, 'input');
+  assert.equal(q2.placeholder, '1024–65535 tcp');
+  assert.equal(q2.prefill, '3000');
+  f.adapter.handle({ type: 'extension_ui_response', id: q2.id, value: '8080' });
+  await settled2;
+  const reply2 = f.events.filter(e => e.type === 'message_end' && e.message.role === 'assistant').at(-1).message;
+  assert.equal(reply2.content[0].text, 'Configured: Auth, "Search, full-text" @ 8080');
 });
 
 test("Claude Code's agents fold into the Task call, with their usage counted once", { timeout: 20000 }, async t => {
@@ -230,9 +252,9 @@ test('Stop interrupts the reply without an error; an API error is shown as one',
 
 test("Claude Code's slash commands: listed, run, and their output shown; /compact leaves a summary", { timeout: 20000 }, async t => {
   const f = adapterFixture(t);
-  await f.turn('hello');
   const { commands } = await f.request('get_commands');
-  assert.deepEqual(commands.map(c => c.name), ['compact', 'review', 'goal'], 'internal commands are hidden; /goal is Claude Code’s own');
+  assert.deepEqual(commands.map(c => c.name), ['compact', 'review', 'goal'], 'available even before the first prompt; internal commands are hidden');
+  await f.turn('hello');
   assert.equal(commands[1].argumentHint, '[target]');
   await f.turn('/context');
   const local = f.events.filter(e => e.type === 'message_end' && e.message.role === 'assistant').at(-1).message;

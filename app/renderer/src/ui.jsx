@@ -130,6 +130,8 @@ renderer.code = ({ text, lang }) => {
 };
 // Inline code that looks like a file path (`src/app.ts`, `README.md`) opens in the file preview, with a subtle file-type glyph.
 const FILE_EXT = /\.(md|mdx|txt|rst|py|js|mjs|cjs|jsx|ts|tsx|json|ya?ml|toml|ini|cfg|sh|bash|zsh|c|h|cc|cpp|hpp|cu|cuh|rs|go|java|kt|swift|rb|php|css|scss|html|xml|sql|lua|r|pl|diff|patch|cmake|f90|f|png|jpe?g|gif|svg|webp|csv|tsv|pdf|log|lock|env)$/i;
+const KNOWN_FILES = /^(Makefile|Dockerfile|LICENSE|CMakeLists\.txt|Gemfile|Procfile|Justfile)$/i;
+const GIT_REF_PREFIX = /^(origin|upstream|refs)\//i;
 export function fileBadgeKind(path = '') {
   const clean = String(path).replace(/\/$/, '');
   if (String(path).endsWith('/')) return 'folder';
@@ -140,8 +142,14 @@ export function fileBadgeKind(path = '') {
   if (['png', 'jpg', 'jpeg', 'gif', 'svg', 'webp'].includes(ext)) return 'image';
   return 'code';
 }
-export const looksLikePath = text => text.length < 240 && !/\s/.test(text) && !/^[a-z]+:\/\//i.test(text) && !text.startsWith('-')
-  && /^(~|\.{1,2})?\/?[\w.@+-]+(\/[\w.@+-]+)*\/?$/.test(text) && (text.includes('/') ? /[\w-]/.test(text.split('/').pop() || 'x') : FILE_EXT.test(text) || /^(Makefile|Dockerfile|LICENSE|CMakeLists\.txt)$/.test(text));
+export function looksLikePath(text) {
+  if (!text || text.length >= 240 || /\s/.test(text) || /^[a-z]+:\/\//i.test(text) || text.startsWith('-')) return false;
+  if (!/^(~|\.{1,2})?\/?[\w.@+-]+(\/[\w.@+-]+)*\/?$/.test(text)) return false;
+  if (GIT_REF_PREFIX.test(text)) return false;
+  if (text.endsWith('/')) return text.length > 1;
+  const last = text.split('/').filter(Boolean).pop() ?? '';
+  return FILE_EXT.test(last) || KNOWN_FILES.test(last) || /^\.[a-z][a-z0-9._-]*$/i.test(last);
+}
 renderer.codespan = ({ text }) => {
   const raw = text.replace(/&amp;/g, '&');
   if (!looksLikePath(raw)) return `<code>${text}</code>`;

@@ -942,19 +942,14 @@ try {
   console.log(error.stack);
   await S('zz-restore-failure').catch(() => {});
 }
-// ---- Settings → Agents: how many new agents Pi may start for one message
+// ---- Settings: Agents page removed (Models, Connections, Usage only)
 try {
   await page.click('.settings-button');
-  await page.click('.settings-sidebar .nav-item:has-text("Agents")');
-  await page.click('.grouped-row.selectable:has-text("Off")');
-  await page.locator('.grouped-row.selectable.on', { hasText: 'Off' }).waitFor();
-  const saved = JSON.parse(readFileSync(join(profile, 'settings.json'), 'utf8')).defaults?.subagents;
-  check('Settings → Agents saves how many agents Pi may start', saved === 'off', saved);
-  await page.click('.grouped-row.selectable:has-text("When asked, up to 2 per message")');
-  await page.locator('.grouped-row.selectable.on', { hasText: 'When asked, up to 2 per message' }).waitFor();
-  check('Settings → Agents explains each choice on hover', await page.locator('.grouped-row.selectable.on').getAttribute('title') === 'Pi starts agents only when you, the project’s instructions or a skill ask for them.');
+  await page.locator('.settings-sidebar .nav-item:has-text("Models")').waitFor();
+  const agentsCount = await page.locator('.settings-sidebar .nav-item:has-text("Agents")').count();
+  check('Settings removes the obsolete Agents page', agentsCount === 0, agentsCount);
   await page.click('.settings-sidebar .nav-item.back');
-} catch (error) { check('Settings → Agents', false, error.message.split('\n')[0]); }
+} catch (error) { check('Settings navigation', false, error.message.split('\n')[0]); }
 const secretsFile = readFileSync(join(profile, 'secrets.json'), 'utf8');
 check('settings never store the key in settings.json', !readFileSync(join(profile, 'settings.json'), 'utf8').includes('sk-e2e-secret') && !secretsFile.includes('sk-e2e-secret') && !readFileSync(join(profile, 'settings.json'), 'utf8').includes('sk-e2e-rotated') && !secretsFile.includes('sk-e2e-rotated'));
 await app.close();
