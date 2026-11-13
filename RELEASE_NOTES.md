@@ -2,6 +2,13 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.21 — Large single-line file preview protection, inline context-menu downloads, and Markdown escaping
+
+- **Large and minified file preview protection.** `FilePane` now inspects text length and maximum line length before rendering: files over `150 KB` or with lines over `4,000` characters skip `highlight.js` DOM tokenization, long single-line files (such as multi-megabyte minified JSON traces) automatically wrap and open an initial `64 KB` slice (`300 KB` for large multi-line files) with a banner offering **Show … preview** and one-click **Download**, a toolbar line-wrap toggle, and suppressed background auto-refreshes for already-truncated previews unless manually refreshed.
+- **Directory link navigation.** Clicking a folder link in conversation Markdown or inside the file preview now opens a navigable directory listing (`DirectoryPreview`) instead of failing with `not a regular file`.
+- **Right-click Download & Open menus across the conversation.** Added a shared context menu (`Open`, `Download`, `Copy path`) for Markdown file links, inline file badges (`code.file-ref`), inline Markdown images, `@file` mentions, attached file chips, `present_files` cards, and tool/`Task` file references, allowing large files on local or SSH machines to be downloaded directly without opening a preview first.
+- **HTML escaping for inline Markdown code spans.** Escaped raw inline code text in `marked` `codespan` rendering (and added a `150 KB` highlighting guard on fenced code blocks) so backticked HTML tags like `` `<pre>` `` or `` `<span>` `` stay escaped inline code instead of corrupting list layout and horizontal wrapping.
+
 ## 0.2.20 — Claude Desktop warm theme, 800K/32K model defaults, and Claude Code/SSH fixes
 
 - **Soft Claude Desktop theme and prose typography.** Restyled light (`#faf9f5` warm parchment) and dark (`#22211f` warm charcoal) appearances with terracotta coral accents (`#da7756` / `#c96442`), matte cards and bubbles, restored `antialiased` macOS font smoothing, comfortable `14.5px` / `710px` reading prose, quiet inline code pills, and constrained inline Markdown images (`max-width: 100%`, `max-height: 520px`).

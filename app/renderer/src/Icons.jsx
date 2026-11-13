@@ -6,7 +6,7 @@ import {
   Folder, FolderOpen, GitBranch, GitFork, Globe, Gauge, KeyRound, Laptop, Layers, ListChecks, ListTree,
   Maximize2, MessageCircleQuestion, MessageSquare, Minimize2, Moon, PanelLeft, PanelRight, Paperclip,
   Pencil, Plus, RefreshCw, Search, Server, Settings, ShieldAlert, ShieldCheck, SlidersHorizontal, Sparkles,
-  SquareTerminal, StickyNote, Sun, Target, Terminal, Timer, Trash2, TriangleAlert, Unplug, Wifi, Wrench,
+  SquareTerminal, StickyNote, Sun, Target, Terminal, Timer, Trash2, TriangleAlert, Unplug, Wifi, WrapText, Wrench,
   X, Zap, Infinity as InfinityIcon,
 } from 'lucide-react';
 
@@ -23,7 +23,7 @@ const LUCIDE = {
   arrowDown: ArrowDown, timer: Timer, fileText: FileText, fileCode: FileCode, fileImage: FileImage, listTree: ListTree,
   externalLink: ExternalLink, code: Code, fileAny: File, maximize: Maximize2, minimize: Minimize2, paperclip: Paperclip,
   target: Target, fork: GitFork, fileDiff: FileDiff, terminalPanel: SquareTerminal, download: Download, chat: MessageSquare,
-  console: Terminal, wrench: Wrench, bolt: Zap, infinity: InfinityIcon,
+  console: Terminal, wrench: Wrench, wrap: WrapText, bolt: Zap, infinity: InfinityIcon,
   atom: Atom, braces: Braces, clock: Clock, activity: Activity, layers: Layers, sliders: SlidersHorizontal,
 };
 

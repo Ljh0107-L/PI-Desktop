@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
-import { Markdown, Spinner, fileBadgeKind, looksLikePath } from './ui.jsx';
+import { FileContextMenu, Markdown, Spinner, fileBadgeKind, looksLikePath, pointAnchor } from './ui.jsx';
 import { changesOf, displayBlocks, formatTokens, isAbortText, retainWorkKeys, toolSummary, ultraProgress } from './transcript.js';
 import { api, editMessage, isPendingSession, loadEarlierHistory, loadHistoryEntry, notify, openChanges, openFile, useStore } from './store.js';
 import { VirtualHistory } from './VirtualHistory.jsx';
@@ -131,7 +131,7 @@ const outputText = text => text.length > 8000 ? text.slice(0, 8000) + '\n…' : 
 
 function ToolCall({ call, tool }) {
   const [open, setOpen] = useDisclosure(`tool:${call.id}`);
-  const { onOpenFile, sessionId } = useContext(DisclosureContext);
+  const { onOpenFile, onFileContextMenu, sessionId } = useContext(DisclosureContext);
   const detailState = useHistoryDetails([call.__historyRef, tool?.historyRef], open);
   const trace = call.__trace;
   const { verb, subject, detail, mono, title } = describeCall(call);
@@ -154,7 +154,7 @@ function ToolCall({ call, tool }) {
         <FadeText className="step-text" title={title ?? filePath ?? undefined}>
           {verb && <span className="step-verb">{verb}</span>}
           {filePath ? (
-            <span className="step-subject file-ref-inline" data-kind={fileBadgeKind(filePath)}>{subject}</span>
+            <span className="step-subject file-ref-inline" data-kind={fileBadgeKind(filePath)} onContextMenu={e => onFileContextMenu?.(e, filePath)}>{subject}</span>
           ) : (
             <span className={`step-subject ${mono ? 'mono' : ''}`}>{subject}</span>
           )}
@@ -201,7 +201,7 @@ function ToolCall({ call, tool }) {
                 {output && call.name !== 'write' && (call.name !== 'edit' || status === 'error') && <pre className={`tool-output boxed ${status === 'error' ? 'error' : ''}`}>{shownOutput}</pre>}
                 {!output && status === 'running' && <div className="tool-running">Running…</div>}
               </>}
-          {filePath && <button className="step-open" onClick={() => openTarget(filePath)}>Open {baseOf(filePath)}</button>}
+          {filePath && <button className="step-open" onClick={() => openTarget(filePath)} onContextMenu={e => onFileContextMenu?.(e, filePath)}>Open {baseOf(filePath)}</button>}
           </>}
         </div>
       )}
@@ -251,6 +251,7 @@ const thoughtLabel = ms => ms > 800 ? `Thought for ${seconds(ms)}` : 'Thought';
 const ReasoningTokens = ({ tokens }) => tokens > 0 ? <span className="reasoning-tokens" title="Reasoning tokens reported by the provider">{formatTokens(tokens)} tokens</span> : null;
 function WorkNote({ item }) {
   const [open, setOpen] = useDisclosure(`note:${item.key}`);
+  const { sessionId } = useContext(DisclosureContext) ?? {};
   if (item.hidden || item.redacted || !item.text) return <div className="step static"><div className="step-head"><span className="step-text">{thoughtLabel(item.durationMs)}</span><ReasoningTokens tokens={item.tokens} /></div></div>;
   return (
     <div className={`step thought ${open ? 'open' : ''}`}>
@@ -260,7 +261,7 @@ function WorkNote({ item }) {
         <ReasoningTokens tokens={item.tokens} />
         <Caret open={open} />
       </div>
-      {open && <div className="step-detail step-markdown"><HistoryContent historyRef={item.historyRef}><Markdown text={item.text} /></HistoryContent></div>}
+      {open && <div className="step-detail step-markdown"><HistoryContent historyRef={item.historyRef}><Markdown text={item.text} sessionId={sessionId} documentPath="" /></HistoryContent></div>}
     </div>
   );
 }
@@ -269,7 +270,7 @@ function WorkNote({ item }) {
 // with one row per step.
 function WorkGroup({ items, tools, live }) {
   const [open, setOpen] = useDisclosure(groupIds(items));
-  const { onOpenFile, sessionId } = useContext(DisclosureContext);
+  const { onOpenFile, onFileContextMenu, sessionId } = useContext(DisclosureContext);
   const calls = items.flatMap(i => i.kind === 'tools' ? i.calls : []);
   const running = items.some(i => i.streaming) || calls.some(c => tools[c.id]?.status === 'running' || (!tools[c.id] && live));
   const failed = calls.filter(c => tools[c.id]?.status === 'error').length;
@@ -294,7 +295,7 @@ function WorkGroup({ items, tools, live }) {
           {thinkingNow ? (firstLine(latest.text) || 'Thinking')
             : onlyFile && only?.verb ? <>
                 <span>{only.verb} </span>
-                <span className="file-ref-inline" data-kind={fileBadgeKind(onlyFile)}>{only.subject}</span>
+                <span className="file-ref-inline" data-kind={fileBadgeKind(onlyFile)} onContextMenu={e => onFileContextMenu?.(e, onlyFile)}>{only.subject}</span>
               </>
             : (summary || 'Working')}
         </FadeText>
@@ -308,7 +309,7 @@ function WorkGroup({ items, tools, live }) {
         <Caret open={open} />
       </div>
       {onlyFile && sessionId && (
-        <button type="button" className="work-quick-open" onClick={() => openTarget(onlyFile)}
+        <button type="button" className="work-quick-open" onClick={() => openTarget(onlyFile)} onContextMenu={e => onFileContextMenu?.(e, onlyFile)}
           title={`Open ${onlyFile}`} aria-label={`Open ${only?.subject ?? onlyFile}`}>
           <Icon name="arrowUpRight" size={12} />
         </button>
@@ -334,6 +335,7 @@ const seconds = ms => ms < 60000 ? `${Math.max(1, Math.round(ms / 1000))}s` : `$
 // entirely (billed but never sent). Only the first two have text to open.
 function Thinking({ text, streaming, redacted, hidden, durationMs, blockKey, tokens, historyRef }) {
   const [open, setOpen] = useDisclosure([`group:${blockKey}`, `note:${blockKey}`]);
+  const { sessionId } = useContext(DisclosureContext) ?? {};
   const label = durationMs > 800 ? `Thought for ${seconds(durationMs)}` : 'Thought';
   if (hidden || redacted || !text) {
     return <div className="thinking"><div className="tool-group-head static">{streaming ? <span className="shimmer">Thinking</span> : <span>{label}</span>}<ReasoningTokens tokens={tokens} /></div></div>;
@@ -346,7 +348,7 @@ function Thinking({ text, streaming, redacted, hidden, durationMs, blockKey, tok
         <ReasoningTokens tokens={tokens} />
         <Icon name={open ? 'caretDown' : 'caretRight'} size={14} />
       </button>
-      {open && <div className="thinking-body"><HistoryContent historyRef={historyRef}><Markdown text={text} /></HistoryContent></div>}
+      {open && <div className="thinking-body"><HistoryContent historyRef={historyRef}><Markdown text={text} sessionId={sessionId} documentPath="" /></HistoryContent></div>}
     </div>
   );
 }
@@ -354,7 +356,7 @@ function Thinking({ text, streaming, redacted, hidden, durationMs, blockKey, tok
 // Claude Code's native subagent card (`Task` tool): live steps, file pills, token count, and final report.
 function ClaudeTaskCard({ call, tool, sessionId }) {
   const [open, setOpen] = useDisclosure(`cc-task:${call.id}`);
-  const { onOpenFile } = useContext(DisclosureContext);
+  const { onOpenFile, onFileContextMenu } = useContext(DisclosureContext);
   const detailState = useHistoryDetails([call.__historyRef, tool?.historyRef], open);
   const a = call.arguments ?? {};
   const status = tool?.status ?? 'running';
@@ -409,7 +411,7 @@ function ClaudeTaskCard({ call, tool, sessionId }) {
                     <div key={step.id ?? idx} className="cc-task-step">
                       {d.verb && <span className="step-verb">{d.verb}</span>}
                       {stepPath ? (
-                        <button type="button" className="file-ref-inline cc-step-file" data-kind={fileBadgeKind(stepPath)} title={stepPath} onClick={() => openTarget(stepPath)}>
+                        <button type="button" className="file-ref-inline cc-step-file" data-kind={fileBadgeKind(stepPath)} title={stepPath} onClick={() => openTarget(stepPath)} onContextMenu={e => onFileContextMenu?.(e, stepPath)}>
                           {d.subject}
                         </button>
                       ) : (
@@ -556,7 +558,7 @@ function GoalMarker({ objective }) {
 // Your text as typed, with list items ("1. …", "- …") given a hanging indent and @file mentions clickable.
 const LIST_ITEM = /^(\s*)(\d+[.)]|[-*\u2022])\s+(.*)$/;
 const MENTION_TOKEN = /(^|\s)@([\w./-]+(?:\/[\w./-]*)?)/g;
-function renderInlineMentions(str) {
+function renderInlineMentions(str, onFileContextMenu) {
   if (!str || !str.includes('@')) return str;
   const parts = [];
   let last = 0, match;
@@ -570,7 +572,8 @@ function renderInlineMentions(str) {
       const shortLabel = partsOfPath.length >= 2 && !candidate.endsWith('/') ? partsOfPath.at(-1) : candidate;
       parts.push(
         <span key={tokenStart} className="user-mention" data-kind={fileBadgeKind(candidate)} title={`Open ${candidate}`}
-          onClick={() => window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: candidate }))}>@{shortLabel}</span>
+          onClick={() => window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: candidate }))}
+          onContextMenu={e => onFileContextMenu?.(e, candidate)}>@{shortLabel}</span>
       );
       last = tokenStart + 1 + candidate.length;
     }
@@ -580,16 +583,17 @@ function renderInlineMentions(str) {
   return parts;
 }
 function UserText({ text }) {
+  const { onFileContextMenu } = useContext(DisclosureContext) ?? {};
   const lines = text.split('\n');
   const width = m => m[1].replace(/\t/g, '   ').length;
   const items = lines.map(l => LIST_ITEM.exec(l));
-  if (!items.some(Boolean)) return renderInlineMentions(text);
+  if (!items.some(Boolean)) return renderInlineMentions(text, onFileContextMenu);
   const base = Math.min(...items.filter(Boolean).map(width)); // the shallowest item is the top level
   return lines.map((line, i) => {
     const m = items[i];
-    if (!m) return <div key={i} className="ub-line">{line ? renderInlineMentions(line) : '\u00a0'}</div>;
+    if (!m) return <div key={i} className="ub-line">{line ? renderInlineMentions(line, onFileContextMenu) : '\u00a0'}</div>;
     const depth = Math.floor((width(m) - base) / 3);
-    return <div key={i} className="ub-li" style={{ '--depth': depth }}><span className="ub-marker">{/\d/.test(m[2]) ? m[2] : '•'}</span>{renderInlineMentions(m[3])}</div>;
+    return <div key={i} className="ub-li" style={{ '--depth': depth }}><span className="ub-marker">{/\d/.test(m[2]) ? m[2] : '•'}</span>{renderInlineMentions(m[3], onFileContextMenu)}</div>;
   });
 }
 
@@ -597,6 +601,7 @@ function UserText({ text }) {
 function UserMessage({ block, sessionId, editable }) {
   const [editing, setEditing] = useState(false);
   const [copied, setCopied] = useState(false);
+  const { onFileContextMenu } = useContext(DisclosureContext) ?? {};
   if (editing) {
     return (
       <div className="user-row editing">
@@ -614,7 +619,7 @@ function UserMessage({ block, sessionId, editable }) {
     <div className="user-row">
       <div className="user-stack">
         {block.images?.length > 0 && <div className="user-images">{block.images.map((img, i) => <ImagePreview key={i} src={`data:${img.mimeType};base64,${img.data}`} alt={`Attached image ${i + 1}`} />)}</div>}
-        {block.files?.length > 0 && <div className="user-files">{block.files.map(path => <button key={path} className="attachment file" title={path} onClick={() => window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: path }))}><Icon name="fileAny" size={15} /><span>{path.split('/').pop()}</span></button>)}</div>}
+        {block.files?.length > 0 && <div className="user-files">{block.files.map(path => <button key={path} className="attachment file" title={path} onClick={() => window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: path }))} onContextMenu={e => onFileContextMenu?.(e, path)}><Icon name="fileAny" size={15} /><span>{path.split('/').pop()}</span></button>)}</div>}
         {block.text && <div className="user-bubble"><UserText text={block.text} /></div>}
         <div className="user-actions">
           <button className="turn-action" aria-label="Copy message" title={copied ? 'Copied' : 'Copy'} onClick={() => { navigator.clipboard.writeText(block.text); setCopied(true); setTimeout(() => setCopied(false), 1200); }}><Icon name={copied ? 'check' : 'copy'} size={14} /></button>
@@ -628,6 +633,7 @@ function UserMessage({ block, sessionId, editable }) {
 // Where Pi summarized the earlier conversation (automatically, on return after the cache expired, or by hand).
 function CompactionMarker({ summary, tokensBefore, blockKey, historyRef }) {
   const [open, setOpen] = useDisclosure(`compaction:${blockKey}`);
+  const { sessionId } = useContext(DisclosureContext) ?? {};
   return (
     <div className="compaction">
       <button className="compaction-line" onClick={() => setOpen(o => !o)}>
@@ -635,7 +641,7 @@ function CompactionMarker({ summary, tokensBefore, blockKey, historyRef }) {
         <span className="compaction-label"><Icon name="compact" size={14} /> Conversation compacted{tokensBefore ? ` · ${formatTokens(tokensBefore)} → summary` : ''}<Icon name={open ? 'caretDown' : 'caretRight'} size={13} /></span>
         <span className="compaction-rule" />
       </button>
-      {open && <div className="compaction-body"><HistoryContent historyRef={historyRef}><Markdown text={summary ?? ''} /></HistoryContent></div>}
+      {open && <div className="compaction-body"><HistoryContent historyRef={historyRef}><Markdown text={summary ?? ''} sessionId={sessionId} documentPath="" /></HistoryContent></div>}
     </div>
   );
 }
@@ -698,6 +704,7 @@ const NO_QUESTIONS = [];
 // Files the agent handed over with present_files: open one in the file pane, or save it to this Mac.
 function FileCards({ sessionId, call, tool }) {
   const detailState = useHistoryDetails([call.__historyRef, tool?.historyRef]);
+  const { onFileContextMenu } = useContext(DisclosureContext) ?? {};
   const details = tool?.result?.details;
   const files = details?.kind === 'pidesk-files' && Array.isArray(details.files) ? details.files : null;
   if (tool?.status === 'error') {
@@ -714,7 +721,7 @@ function FileCards({ sessionId, call, tool }) {
       {shown.map(file => (
         <div key={file.path} className="file-card">
           {!file.pending && sessionId && iconFor(file.name) === 'fileImage' && <PresentedImage sessionId={sessionId} file={file} />}
-          <button className="file-card-main" disabled={file.pending || !sessionId} onClick={() => openFile(sessionId, file.path)} title={file.path}>
+          <button className="file-card-main" disabled={file.pending || !sessionId} onClick={() => openFile(sessionId, file.path)} onContextMenu={e => { if (!file.pending) onFileContextMenu?.(e, file.path); }} title={file.path}>
             <Icon name={iconFor(file.name)} size={18} className="file-card-icon" />
             <span className="file-card-text"><span className="file-card-name">{file.name}</span><span className="file-card-meta">{file.pending ? 'Preparing…' : sizeLabel(file.size)}</span></span>
           </button>
@@ -771,6 +778,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
   const initialFill = useRef(0);
   const [following, setFollowing] = useState(true);
   const [expanded, setExpanded] = useState({});
+  const [fileMenu, setFileMenu] = useState(null);
   // "Latest" appears only when there is unseen content below — not merely because you opened a step.
   const updateLatest = () => {
     const el = scroller.current;
@@ -839,7 +847,13 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
       void loadEarlierHistory(session.id, { background: true });
     }
   }, [blocks, transcript.history, transcript.loaded, session?.id, readOnly]);
-  const disclosure = useMemo(() => ({ expanded, setExpanded, pauseFollowing, onOpenFile, sessionId: session?.id }), [expanded, pauseFollowing, onOpenFile, session?.id]);
+  const onFileContextMenu = useCallback((e, path) => {
+    if (!path) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setFileMenu({ path, dir: String(path).endsWith('/'), anchor: pointAnchor(e.clientX, e.clientY) });
+  }, []);
+  const disclosure = useMemo(() => ({ expanded, setExpanded, pauseFollowing, onOpenFile, onFileContextMenu, sessionId: session?.id }), [expanded, pauseFollowing, onOpenFile, onFileContextMenu, session?.id]);
   const working = session?.streaming || session?.compacting || transcript.compacting || session?.status === 'connecting';
   // Only while there is nothing to show yet: history now comes from the session file while Pi starts, and
   // a new conversation already shows your message.
@@ -914,6 +928,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
     {!following && <button className="transcript-follow" aria-label="Jump to latest" onClick={followLatest}><Icon name="arrowDown" size={15} /> Latest</button>}
     {loading && <div className="transcript-loading" role="status" aria-label="Loading conversation"><Spinner size={26} /></div>}
     </div>
+    <FileContextMenu menu={fileMenu} sessionId={readOnly ? null : session?.id} onOpen={onOpenFile} onClose={() => setFileMenu(null)} />
     </DisclosureContext.Provider>
   );
 }

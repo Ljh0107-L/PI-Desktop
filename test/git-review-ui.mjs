@@ -94,12 +94,29 @@ try {
             },
             isError: false,
           },
-          { __entryId: 'e5', timestamp: 4000, role: 'assistant', content: [{ type: 'text', text: 'Audit complete: `example.js` is clean.' }], usage: { input: 500, output: 40, cacheRead: 100, cacheWrite: 0, totalTokens: 640 }, stopReason: 'stop' },
+          {
+            __entryId: 'e5', timestamp: 4000, role: 'assistant',
+            content: [{ type: 'text', text: 'Audit complete: `example.js` is clean.\n\n1. Escaped inline code `<pre>` and `<span>` inside lists wraps normally.\n   - Check [unordered trace](trace-unordered.json) or folder [trace dir](trace-dir).' }],
+            usage: { input: 500, output: 40, cacheRead: 100, cacheWrite: 0, totalTokens: 640 }, stopReason: 'stop',
+          },
         ],
       };
     }
     if (method === 'historyPage' && args[0] === 'empty-code') return { messages: [], next: null };
     if (method === 'historyPage') return { next: null, messages: [{ role: 'user', content: [{ type: 'text', text: 'Review the repository changes and explain what needs attention.' }] }, { role: 'assistant', content: [{ type: 'text', text: 'The changes are ready for review. The implementation is small, and there is one behavior worth checking before committing.\n\n### What changed\n\nThe default answer in `example.js` now returns **42**. The new `notes.txt` documents the expected behavior.\n\n- Confirm that existing callers expect the updated value.\n- Add a regression case for the previous boundary condition.\n- Keep the documentation with the implementation in the same commit.\n\nOpen **Review** to inspect the actual diff. You can select a line to add feedback to your next message.' }], stopReason: 'stop' }] };
+    if (method === 'listFiles') {
+      if (args[1] === 'trace-dir') return { path: join(cwd, 'trace-dir'), entries: [{ name: 'rank0.json', dir: false }] };
+      return { path: cwd, entries: [{ name: 'trace-dir', dir: true }, { name: 'example.js', dir: false }, { name: 'trace-unordered.json', dir: false }] };
+    }
+    if (method === 'readFile') {
+      if (args[1] === 'trace-dir') throw new Error(`${join(cwd, 'trace-dir')} is not a regular file`);
+      if (args[1] === 'trace-unordered.json') {
+        const content = `{"traceEvents":[${'{"ph":"X","pid":1,"name":"kernel"},'.repeat(40000)}`.slice(0, 1 << 20);
+        return { path: join(cwd, 'trace-unordered.json'), size: 6 * 1048576, kind: 'text', truncated: true, content };
+      }
+      return filePreview('read', cwd, args[1]);
+    }
+    if (method === 'downloadFile') return { path: join(profile, String(args[1]).split('/').pop()), size: 6 * 1048576 };
     if (method === 'gitReview') return gitReview(cwd, args[1]);
     if (method === 'gitBranch') return 'main';
     if (method === 'searchFiles') return filePreview('search', cwd, args[1]);
@@ -383,6 +400,42 @@ try {
   await page.locator('.right-panel .job[data-job-id="bmon00001"]').waitFor({ state: 'detached' });
   await page.getByRole('button', { name: 'Session details', exact: true }).click();
   await page.locator('.cc-todo-card', { hasText: '1/2' }).waitFor();
+  // Escaped inline `<pre>`/`<span>` inside Markdown lists must stay inline code, never swallow list items into a <pre> block.
+  const ccMd = await page.locator('.markdown', { hasText: 'Audit complete:' }).evaluate(el => ({
+    preCount: el.querySelectorAll('pre').length,
+    olScrollW: el.querySelector('ol')?.scrollWidth ?? 0,
+    olClientW: el.querySelector('ol')?.clientWidth ?? 0,
+    text: el.textContent,
+  }));
+  assert.equal(ccMd.preCount, 0, 'inline `<pre>` must stay escaped inline code');
+  assert.ok(ccMd.olScrollW <= ccMd.olClientW + 1, `list must wrap inside column: ${JSON.stringify(ccMd)}`);
+  assert.ok(ccMd.text.includes('<pre>') && ccMd.text.includes('<span>'));
+
+  // Right-click file links and inline file refs in messages to download without opening preview.
+  await page.getByRole('link', { name: 'unordered trace' }).click({ button: 'right' });
+  await page.locator('.popover .menu-item', { hasText: 'Download' }).click();
+  await page.locator('.markdown code.file-ref', { hasText: 'example.js' }).click({ button: 'right' });
+  await page.locator('.popover .menu-item', { hasText: 'Download' }).click();
+  assert.deepEqual(ipcCalls.filter(c => c.method === 'downloadFile').map(c => c.args), [['cc-ui', 'trace-unordered.json'], ['cc-ui', 'example.js']]);
+
+  // Left-clicking a 1 MiB single-line trace JSON opens a bounded, wrapped preview without syntax-highlight freeze.
+  await page.getByRole('link', { name: 'unordered trace' }).click();
+  await page.locator('.fp-notice', { hasText: 'Long single-line file' }).waitFor();
+  const traceLayout = await page.locator('.file-pane').evaluate(() => {
+    const content = document.querySelector('.fp-content');
+    const src = document.querySelector('.fp-source');
+    return { spans: src?.querySelectorAll('span').length ?? -1, len: src?.textContent.length ?? 0, scrollW: content?.scrollWidth ?? 0, clientW: content?.clientWidth ?? 0 };
+  });
+  assert.equal(traceLayout.spans, 0, 'minified trace JSON skips syntax highlighting');
+  assert.equal(traceLayout.len, 65536, 'minified trace JSON bounds initial preview size');
+  assert.ok(traceLayout.scrollW <= traceLayout.clientW + 2, `wrapped trace must fit pane: ${JSON.stringify(traceLayout)}`);
+
+  // Clicking a directory link in Markdown opens a clickable directory listing instead of failing.
+  await page.getByRole('link', { name: 'trace dir' }).click();
+  await page.locator('.fp-dir-row', { hasText: 'rank0.json' }).waitFor();
+  await page.getByRole('button', { name: 'Close files', exact: true }).click();
+  await page.locator('.file-pane').waitFor({ state: 'detached' });
+
   await page.locator('.cc-task-card', { hasText: 'Inspect parser module' }).waitFor();
   await page.locator('.cc-task-head', { hasText: 'Inspect parser module' }).click();
   await page.locator('.cc-task-step', { hasText: 'example.js' }).waitFor();

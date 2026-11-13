@@ -10,6 +10,7 @@ import { promisify } from 'node:util';
 import test from 'node:test';
 import { pdfFixture } from './pdf-fixture.mjs';
 import { decodeRemoteFilePreview, filePreview, remoteFilePreviewScript } from '../app/main/file-preview.mjs';
+import { HIGHLIGHT_MAX_CHARS, LARGE_TEXT_PREVIEW_CHARS, LONG_LINE_PREVIEW_CHARS, inspectPreviewText, prepareCodePreview, shouldAutoRefreshPreview, sliceUtf16Safe } from '../app/renderer/src/file-preview-view.js';
 
 const exec = promisify(execFile);
 const TEXT_LIMIT = 1 << 20;
@@ -245,4 +246,55 @@ test('workspace search ranks matching files locally and over SSH while skipping 
   assert.ok(paths.includes('src/components/ComposerBar.jsx'));
   assert.ok(!paths.some(p => p.includes('node_modules') || p.includes('.git')));
   assert.equal(local.files[0].path, 'src/Composer.jsx', 'shorter basename prefix match ranks first');
+});
+
+test('code preview bounds single-line and oversized text while keeping normal multi-line sources intact', () => {
+  const small = 'const a = 1;\nconst b = 2;\n';
+  const smallView = prepareCodePreview(small);
+  assert.equal(smallView.highlight, true);
+  assert.equal(smallView.wrapped, false);
+  assert.equal(smallView.previewLimited, false);
+  assert.equal(smallView.displayedText, small);
+
+  // Matches the 245 KB multi-line file in test/file-preview-ui.mjs: intact and un-highlighted.
+  const multiLine = `${'Unknown extension plain text line.\n'.repeat(7000)}TAIL\n`;
+  const multiView = prepareCodePreview(multiLine);
+  assert.equal(multiView.highlight, false);
+  assert.equal(multiView.wrapped, false);
+  assert.equal(multiView.previewLimited, false);
+  assert.equal(multiView.displayedText, multiLine);
+
+  // A 1 MiB single-line minified JSON trace: auto-wrapped, bounded to 64 KB initially, no syntax highlighting.
+  const singleLine = `{"traceEvents":[${'{"ph":"X","pid":1},'.repeat(55188)}`.slice(0, 1 << 20);
+  const stats = inspectPreviewText(singleLine);
+  assert.equal(stats.lineCount, 1);
+  assert.equal(stats.maxLineLength, 1 << 20);
+  const traceView = prepareCodePreview(singleLine);
+  assert.equal(traceView.highlight, false);
+  assert.equal(traceView.wrapped, true);
+  assert.equal(traceView.longLines, true);
+  assert.equal(traceView.previewLimited, true);
+  assert.equal(traceView.displayedText.length, LONG_LINE_PREVIEW_CHARS);
+  const expandedTrace = prepareCodePreview(singleLine, { expanded: true });
+  assert.equal(expandedTrace.previewLimited, false);
+  assert.equal(expandedTrace.displayedText.length, 1 << 20);
+  assert.equal(expandedTrace.highlight, false);
+  assert.equal(expandedTrace.wrapped, true);
+
+  // Multi-line file larger than LARGE_TEXT_PREVIEW_CHARS caps initial render cleanly.
+  const bigLog = 'line of log output\n'.repeat(25000);
+  const bigView = prepareCodePreview(bigLog);
+  assert.equal(bigView.previewLimited, true);
+  assert.equal(bigView.displayedText.length, LARGE_TEXT_PREVIEW_CHARS);
+  assert.equal(bigView.wrapped, false);
+
+  // Surrogate pair boundary is never split.
+  const prefix = 'a'.repeat(5) + '😀' + 'b';
+  assert.equal(sliceUtf16Safe(prefix, 6), 'aaaaa');
+
+  // Auto-refresh skips truncated text/binary files unless manually refreshed.
+  assert.equal(shouldAutoRefreshPreview({ kind: 'text', truncated: true }, false), false);
+  assert.equal(shouldAutoRefreshPreview({ kind: 'text', truncated: true }, true), true);
+  assert.equal(shouldAutoRefreshPreview({ kind: 'text', truncated: false }, false), true);
+  assert.ok(HIGHLIGHT_MAX_CHARS < LARGE_TEXT_PREVIEW_CHARS);
 });

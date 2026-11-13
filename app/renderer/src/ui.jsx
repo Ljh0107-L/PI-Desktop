@@ -6,7 +6,7 @@ import hljs from 'highlight.js/lib/common';
 import 'katex/dist/katex.min.css';
 import { mathExtension, withMath } from './markdown-math.js';
 import { Icon } from './Icons.jsx';
-import { api, openFile } from './store.js';
+import { api, downloadFile, notify, openFile } from './store.js';
 import { resolveMarkdownReference } from './file-paths.js';
 import { loadMarkdownImages, prepareFileMarkdown, scrollMarkdownAnchor } from './markdown-files.js';
 
@@ -121,11 +121,34 @@ export function Chip({ icon, label, title, children, width = 300, placement = 't
 
 // ---------------------------------------------------------------- markdown
 const escapeHtml = text => text.replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+export const pointAnchor = (x, y) => ({
+  current: { getBoundingClientRect: () => ({ left: x, right: x, top: y, bottom: y, width: 0, height: 0 }), contains: () => false },
+});
+
+export function FileContextMenu({ menu, sessionId, onOpen, onClose }) {
+  if (!menu) return null;
+  const open = () => {
+    onClose();
+    if (onOpen) onOpen(menu.path);
+    else if (sessionId) openFile(sessionId, menu.path);
+    else window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: menu.path }));
+  };
+  const canOpen = Boolean(onOpen || sessionId);
+  const canDownload = Boolean(sessionId && !menu.dir);
+  return (
+    <Popover anchor={menu.anchor} open onClose={onClose} width={200} placement="bottom-start">
+      {canOpen && <MenuItem icon={menu.dir ? 'folder' : 'fileText'} label="Open" onClick={open} />}
+      {canDownload && <MenuItem icon="download" label="Download" onClick={() => { onClose(); downloadFile(sessionId, menu.path); }} />}
+      <MenuItem icon="copy" label="Copy path" onClick={() => { onClose(); navigator.clipboard.writeText(menu.path); notify('Path copied'); }} />
+    </Popover>
+  );
+}
+
 const renderer = new marked.Renderer();
 renderer.code = ({ text, lang }) => {
   const language = (lang ?? '').split(/\s/)[0].toLowerCase();
   const known = language && hljs.getLanguage(language);
-  const body = known ? hljs.highlight(text, { language, ignoreIllegals: true }).value : escapeHtml(text);
+  const body = known && text.length <= 150000 ? hljs.highlight(text, { language, ignoreIllegals: true }).value : escapeHtml(text);
   return `<div class="code-block"><div class="code-head"><span>${escapeHtml(language || 'text')}</span><button type="button" class="code-copy" data-copy="1">Copy</button></div><pre><code class="hljs">${body}</code></pre></div>`;
 };
 // Inline code that looks like a file path (`src/app.ts`, `README.md`) opens in the file preview, with a subtle file-type glyph.
@@ -151,12 +174,11 @@ export function looksLikePath(text) {
   return FILE_EXT.test(last) || KNOWN_FILES.test(last) || /^\.[a-z][a-z0-9._-]*$/i.test(last);
 }
 renderer.codespan = ({ text }) => {
-  const raw = text.replace(/&amp;/g, '&');
-  if (!looksLikePath(raw)) return `<code>${text}</code>`;
-  const parts = raw.split('/').filter(Boolean);
-  const label = parts.length >= 3 && !raw.endsWith('/') ? escapeHtml(parts.at(-1)) : text;
-  const escaped = text.replace(/"/g, '&quot;');
-  return `<code class="file-ref" data-kind="${fileBadgeKind(raw)}" data-path="${escaped}" title="${escaped}">${label}</code>`;
+  const escaped = escapeHtml(text);
+  if (!looksLikePath(text)) return `<code>${escaped}</code>`;
+  const parts = text.split('/').filter(Boolean);
+  const label = escapeHtml(parts.length >= 3 && !text.endsWith('/') ? parts.at(-1) : text);
+  return `<code class="file-ref" data-kind="${fileBadgeKind(text)}" data-path="${escaped}" title="${escaped}">${label}</code>`;
 };
 marked.setOptions({ gfm: true, breaks: false, renderer });
 marked.use(mathExtension);
@@ -164,6 +186,7 @@ DOMPurify.addHook('afterSanitizeAttributes', node => { if (node.tagName === 'A')
 
 export function Markdown({ text, streaming, sessionId, documentPath, refreshKey }) {
   const root = useRef(null);
+  const [menu, setMenu] = useState(null);
   const html = useMemo(() => {
     const clean = withMath(() => marked.parse(text ?? ''), html => DOMPurify.sanitize(html, { USE_PROFILES: { html: true }, FORBID_ATTR: ['srcset'] }));
     return documentPath !== undefined ? prepareFileMarkdown(clean, documentPath) : clean;
@@ -172,6 +195,25 @@ export function Markdown({ text, streaming, sessionId, documentPath, refreshKey 
     if (!sessionId || documentPath === undefined || !root.current) return;
     return loadMarkdownImages(root.current, path => api('readFile', sessionId, path));
   }, [html, sessionId, documentPath, refreshKey]);
+  const openTarget = path => {
+    if (sessionId) openFile(sessionId, path);
+    else window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: path }));
+  };
+  const fileTargetFrom = target => {
+    const link = target.closest('a');
+    if (link) {
+      const destination = resolveMarkdownReference(link.getAttribute('href'), documentPath);
+      return destination.kind === 'file' ? { path: destination.path, dir: destination.path.endsWith('/') } : null;
+    }
+    const ref = target.closest('[data-path]');
+    if (ref) {
+      const path = ref.dataset.path;
+      return { path, dir: path.endsWith('/') || ref.dataset.kind === 'folder' };
+    }
+    const image = target.closest('img[data-preview-path]');
+    if (image) return { path: image.dataset.previewPath, dir: false };
+    return null;
+  };
   const onClick = e => {
     const copy = e.target.closest('[data-copy]');
     if (copy) {
@@ -179,28 +221,31 @@ export function Markdown({ text, streaming, sessionId, documentPath, refreshKey 
       copy.textContent = 'Copied'; setTimeout(() => { copy.textContent = 'Copy'; }, 1400);
       return;
     }
-    const ref = e.target.closest('[data-path]');
-    if (ref) {
-      const path = ref.dataset.path.replace(/&amp;/g, '&');
-      // Inline code is a literal project path, unlike a Markdown URL destination.
-      if (sessionId) openFile(sessionId, path);
-      else window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: path }));
+    const link = e.target.closest('a');
+    if (link) {
+      e.preventDefault();
+      const destination = resolveMarkdownReference(link.getAttribute('href'), documentPath);
+      if (destination.kind === 'external') api('openExternal', destination.url);
+      else if (destination.kind === 'anchor') scrollMarkdownAnchor(root.current, destination.fragment);
+      else if (destination.kind === 'file') openTarget(destination.path);
       return;
     }
+    const ref = e.target.closest('[data-path]');
+    if (ref) { openTarget(ref.dataset.path); return; }
     const image = e.target.closest('img[data-preview-path]');
-    if (image && sessionId) { openFile(sessionId, image.dataset.previewPath); return; }
-    const link = e.target.closest('a');
-    if (!link) return;
-    e.preventDefault();
-    const destination = resolveMarkdownReference(link.getAttribute('href'), documentPath);
-    if (destination.kind === 'external') api('openExternal', destination.url);
-    else if (destination.kind === 'anchor') scrollMarkdownAnchor(root.current, destination.fragment);
-    else if (destination.kind === 'file') {
-      if (sessionId) openFile(sessionId, destination.path);
-      else window.dispatchEvent(new CustomEvent('pidesk:open-file', { detail: destination.path }));
-    }
+    if (image && sessionId) openTarget(image.dataset.previewPath);
   };
-  return <div ref={root} className={`markdown ${streaming ? 'streaming' : ''}`} onClick={onClick} dangerouslySetInnerHTML={{ __html: html }} />;
+  const onContextMenu = e => {
+    const target = fileTargetFrom(e.target);
+    if (!target) return;
+    e.preventDefault();
+    e.stopPropagation();
+    setMenu({ ...target, anchor: pointAnchor(e.clientX, e.clientY) });
+  };
+  return <>
+    <div ref={root} className={`markdown ${streaming ? 'streaming' : ''}`} onClick={onClick} onContextMenu={onContextMenu} dangerouslySetInnerHTML={{ __html: html }} />
+    <FileContextMenu menu={menu} sessionId={sessionId} onClose={() => setMenu(null)} />
+  </>;
 }
 
 export function Spinner({ size = 14 }) {

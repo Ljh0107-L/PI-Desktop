@@ -2,9 +2,10 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import hljs from 'highlight.js/lib/common';
 import { Icon } from './Icons.jsx';
-import { MenuItem, Markdown, Popover, Spinner, useResizable } from './ui.jsx';
+import { FileContextMenu, MenuItem, Markdown, Popover, Spinner, pointAnchor, useResizable } from './ui.jsx';
 import { ImagePreview } from './ImagePreview.jsx';
 import { changeStats, hunkLines } from './diffs.js';
+import { prepareCodePreview, shouldAutoRefreshPreview } from './file-preview-view.js';
 import { api, closeFile, downloadFile, notify, openFile, set as setStore, setFilePaneOpen, useStore } from './store.js';
 
 const LANGS = { js: 'javascript', mjs: 'javascript', cjs: 'javascript', jsx: 'javascript', ts: 'typescript', tsx: 'typescript', py: 'python', sh: 'bash', zsh: 'bash', bash: 'bash',
@@ -79,16 +80,23 @@ function TreeDir({ sessionId, rel, depth, active, version }) {
   </Popover>}</>;
 }
 
-function CodeView({ text, ext }) {
+const escapeHtml = text => text.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+
+function CodeView({ view, ext }) {
+  const { displayedText: text, lineCount, highlight, wrapped } = view;
   const html = useMemo(() => {
+    if (!highlight) return escapeHtml(text);
     const lang = LANGS[ext];
-    try { return lang && hljs.getLanguage(lang) ? hljs.highlight(text, { language: lang, ignoreIllegals: true }).value : text.length <= 200000 ? hljs.highlightAuto(text).value : text.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
-    catch { return text.replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c])); }
-  }, [text, ext]);
-  const lines = text.split('\n').length;
+    try {
+      return lang && hljs.getLanguage(lang)
+        ? hljs.highlight(text, { language: lang, ignoreIllegals: true }).value
+        : hljs.highlightAuto(text).value;
+    } catch { return escapeHtml(text); }
+  }, [text, ext, highlight]);
+  const showGutter = !wrapped || lineCount <= 1;
   return (
-    <div className="fp-code">
-      <pre className="fp-gutter" aria-hidden="true">{Array.from({ length: lines }, (_, i) => i + 1).join('\n')}</pre>
+    <div className={`fp-code ${wrapped ? 'wrap' : ''}`}>
+      {showGutter && <pre className="fp-gutter" aria-hidden="true">{Array.from({ length: lineCount }, (_, i) => i + 1).join('\n')}</pre>}
       <pre className="fp-source"><code className="hljs" dangerouslySetInnerHTML={{ __html: html }} /></pre>
     </div>
   );
@@ -105,37 +113,126 @@ function PdfPreview({ dataUrl, name }) {
   return url ? <iframe className="fp-pdf" src={url} title={`PDF: ${name}`} /> : <div className="fp-empty"><Spinner /></div>;
 }
 
-function Preview({ sessionId, path, refreshKey }) {
+function DirectoryPreview({ sessionId, listing, onOpen }) {
+  const [menu, setMenu] = useState(null);
+  const entries = listing.entries ?? [];
+  const childPath = entry => {
+    const base = listing.path.endsWith('/') ? listing.path.slice(0, -1) : listing.path;
+    return `${base}/${entry.name}${entry.dir ? '/' : ''}`;
+  };
+  return (
+    <div className="fp-dir-view">
+      <div className="fp-dir-head">
+        <Icon name="folderOpen" size={15} />
+        <span>{entries.length} {entries.length === 1 ? 'item' : 'items'}</span>
+      </div>
+      {!entries.length && <div className="fp-empty">Empty folder</div>}
+      <div className="fp-dir-list">
+        {entries.map(entry => {
+          const full = childPath(entry);
+          return (
+            <button key={entry.name} type="button" className="fp-dir-row" onClick={() => onOpen(full)}
+              onContextMenu={e => { e.preventDefault(); setMenu({ path: full, dir: entry.dir, anchor: pointAnchor(e.clientX, e.clientY) }); }}>
+              <Icon name={entry.dir ? 'folder' : iconFor(entry.name)} size={15} className="fp-file-icon" />
+              <span className="fp-name">{entry.name}</span>
+            </button>
+          );
+        })}
+      </div>
+      <FileContextMenu menu={menu} sessionId={sessionId} onOpen={onOpen} onClose={() => setMenu(null)} />
+    </div>
+  );
+}
+
+function Preview({ sessionId, path, toolsDone, manualVersion }) {
   const [file, setFile] = useState(null);
+  const [dirListing, setDirListing] = useState(null);
   const [error, setError] = useState(null);
   const [source, setSource] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const [wrapOverride, setWrapOverride] = useState(null);
+  const fileRef = useRef(null);
+  const lastManualRef = useRef(-1);
+  const lastTargetRef = useRef('');
   const scroller = useRef(null);
+  fileRef.current = file;
   useEffect(() => {
+    const targetKey = `${sessionId}\n${path}`;
+    const targetChanged = lastTargetRef.current !== targetKey;
+    const manualChanged = lastManualRef.current !== manualVersion;
+    if (!targetChanged && !shouldAutoRefreshPreview(fileRef.current, manualChanged)) return;
+    lastTargetRef.current = targetKey;
+    lastManualRef.current = manualVersion;
     let alive = true;
     setError(null);
-    api('readFile', sessionId, path).then(f => { if (alive) setFile(f); }, e => { if (alive) { setFile(null); setError(e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')); } });
+    const cleanError = e => e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '');
+    api('readFile', sessionId, path).then(
+      f => { if (alive) { setDirListing(null); setFile(f); } },
+      e => {
+        const msg = cleanError(e);
+        if (/not a regular file/i.test(msg) || path.endsWith('/')) {
+          api('listFiles', sessionId, path).then(
+            listing => { if (alive) { setFile(null); setDirListing(listing); setError(null); } },
+            () => { if (alive) { setFile(null); setDirListing(null); setError(msg); } },
+          );
+          return;
+        }
+        if (alive) { setFile(null); setDirListing(null); setError(msg); }
+      },
+    );
     return () => { alive = false; };
-  }, [sessionId, path, refreshKey]);
-  useEffect(() => { setSource(false); scroller.current?.scrollTo(0, 0); }, [path]);
+  }, [sessionId, path, toolsDone, manualVersion]);
+  useEffect(() => { setSource(false); setExpanded(false); setWrapOverride(null); scroller.current?.scrollTo(0, 0); }, [path]);
   const ext = extOf(path);
-  const parts = path.split('/');
+  const cleanPath = path.length > 1 && path.endsWith('/') ? path.slice(0, -1) : path;
+  const parts = cleanPath.split('/');
   const crumbs = parts.length > 4 ? [parts[0], '…', ...parts.slice(-3)] : parts;
+  const isCode = file?.kind === 'text' && (ext !== 'md' || source);
+  const codeView = useMemo(
+    () => (isCode ? prepareCodePreview(file.content, { expanded, wrapOverride }) : null),
+    [isCode, file, expanded, wrapOverride],
+  );
+  const refreshKey = toolsDone + manualVersion;
   return (
     <div className="fp-preview">
       <div className="fp-crumbs">
         <span className="fp-crumb-path">{crumbs.map((c, i) => <span key={i} className={i === crumbs.length - 1 ? 'last' : ''}>{c}</span>)}</span>
         {file?.kind === 'text' && ext === 'md' && <button className={`tool-button ${source ? 'on' : ''}`} onClick={() => setSource(s => !s)} title={source ? 'Show preview' : 'Show source'} aria-label="Toggle source"><Icon name="code" size={16} /></button>}
+        {codeView && <button className={`tool-button ${codeView.wrapped ? 'on' : ''}`} disabled={codeView.maxLineLength > 50000 && expanded} onClick={() => setWrapOverride(!codeView.wrapped)} title={codeView.wrapped ? 'Disable line wrap' : 'Wrap lines'} aria-label="Toggle line wrap" aria-pressed={codeView.wrapped}><Icon name="wrap" size={15} /></button>}
         {file && <DownloadButton sessionId={sessionId} path={file.path ?? path} />}
       </div>
+      {codeView && (codeView.previewLimited || codeView.longLines) && (
+        <div className="fp-notice">
+          <span className="fp-notice-text">
+            {codeView.longLines
+              ? `Long single-line file (${sizeLabel(file.size)})`
+              : `Large file (${sizeLabel(file.size)})`}
+            {codeView.previewLimited
+              ? ` · showing first ${sizeLabel(new TextEncoder().encode(codeView.displayedText).length)}${codeView.wrapped ? ' wrapped' : ''}`
+              : !codeView.highlight ? ' · syntax highlighting paused for speed' : ''}
+          </span>
+          <span className="fp-notice-actions">
+            {codeView.previewLimited && (
+              <button type="button" className="fp-notice-btn" onClick={() => setExpanded(true)}>
+                Show {file.truncated ? `${sizeLabel(file.content.length)} preview` : 'full file'}
+              </button>
+            )}
+            <button type="button" className="fp-notice-btn primary" onClick={() => downloadFile(sessionId, file.path ?? path)}>
+              Download
+            </button>
+          </span>
+        </div>
+      )}
       <div className="fp-content" ref={scroller}>
         {error && <div className="fp-empty error"><Icon name="alert" size={15} /> {error}</div>}
-        {!error && !file && <div className="fp-empty"><Spinner /></div>}
+        {!error && !file && !dirListing && <div className="fp-empty"><Spinner /></div>}
+        {dirListing && <DirectoryPreview sessionId={sessionId} listing={dirListing} onOpen={target => openFile(sessionId, target)} />}
         {file?.kind === 'image' && (file.dataUrl ? <div className="fp-image"><ImagePreview src={file.dataUrl} alt={parts.at(-1)} /></div> : <div className="fp-empty">Image too large to preview · {sizeLabel(file.size)}</div>)}
         {file?.kind === 'pdf' && (file.dataUrl ? <PdfPreview dataUrl={file.dataUrl} name={parts.at(-1)} /> : <div className="fp-empty">PDF too large to preview · {sizeLabel(file.size)} (32 MB limit)</div>)}
         {file?.kind === 'binary' && <div className="fp-empty"><Icon name="fileAny" size={16} /> Binary file · {sizeLabel(file.size)}</div>}
         {file?.kind === 'text' && (ext === 'md' && !source
           ? <div className="fp-markdown"><Markdown text={file.content} sessionId={sessionId} documentPath={file.path ?? path} refreshKey={refreshKey} /></div>
-          : <CodeView text={file.content} ext={ext} />)}
+          : <CodeView view={codeView} ext={ext} />)}
         {file?.truncated && file.kind === 'text' && <div className="fp-truncated">First {sizeLabel(new TextEncoder().encode(file.content).length)} of {sizeLabel(file.size)}</div>}
       </div>
     </div>
@@ -196,7 +293,7 @@ export function FilePane({ session }) {
         <div className="fp-tabs">
           {state.tabs.map(path => (
             <div key={path} className={`fp-tab ${path === state.active ? 'active' : ''}`} title={path}>
-              <button className="fp-tab-name" onClick={() => openFile(session.id, path)}>{path.split('/').pop()}</button>
+              <button className="fp-tab-name" onClick={() => openFile(session.id, path)}>{path.split('/').filter(Boolean).pop() || path}</button>
               <button className="fp-tab-close" onClick={() => closeFile(session.id, path)} aria-label="Close"><Icon name="x" size={13} /></button>
             </div>
           ))}
@@ -222,7 +319,7 @@ export function FilePane({ session }) {
       </div>
       <div className="fp-body">
         {state.active
-          ? <Preview key={`${session.id}\n${state.active}`} sessionId={session.id} path={state.active} refreshKey={refresh} />
+          ? <Preview key={`${session.id}\n${state.active}`} sessionId={session.id} path={state.active} toolsDone={toolsDone} manualVersion={version} />
           : state.changes ? <ChangesView sessionId={session.id} changes={state.changes} />
           : <div className="fp-preview fp-placeholder"><Icon name="folder" size={26} /><span>Open files appear here</span></div>}
         {tree && (state.active || state.changes

@@ -2011,6 +2011,7 @@ button:not(:disabled) { cursor: pointer; }
 .fp-tab { font-size: 12.5px; }
 .fp-tab-name { font-style: normal; font-weight: 450; }
 .fp-code { font-size: 12.5px; }
+.fp-notice { background: var(--surface); }
 .fp-empty { font-size: 13px; line-height: 1.65; gap: 8px; }
 
 /* ------------------------------------------------------------ Theme Surface Overrides */
