@@ -108,6 +108,14 @@ try {
       return [{ name: 'goal', description: 'Work autonomously toward a clear objective' }, { name: 'compact', description: 'Compact conversation context' }];
     }
     if (method === 'agents') return [];
+    if (method === 'jobs') {
+      if (args[0] === 'cc-ui') return { version: 1, at: Date.now(), jobs: [{ id: 'bmon00001', description: 'Watch CI run', command: 'tail -f ci.log', cwd, status: 'running', stopping: false, startedAt: 1000, elapsedMs: 500, tail: 'ci step 1\n' }] };
+      return { version: 0, jobs: [] };
+    }
+    if (method === 'stopBackgroundJob') {
+      await page.evaluate(({ id, cwd }) => window.fixtureEvent({ channel: 'jobs', payload: { id, version: 2, at: Date.now(), jobs: [{ id: 'bmon00001', description: 'Watch CI run', command: 'tail -f ci.log', cwd, status: 'stopped', stopping: false, startedAt: 1000, endedAt: 2000, elapsedMs: 1000, tail: 'ci step 1\n' }] } }), { id: args[0], cwd });
+      return null;
+    }
     if (method === 'updateStatus') return { state: 'idle' };
     if (method === 'prompt') {
       const verb = args[1]?.match(/^\/pidesk-ultra (resume|pause|dismiss)$/)?.[1];
@@ -365,6 +373,15 @@ try {
   await page.locator('.session-row', { hasText: 'Audit parser with Claude Code' }).locator('.session-engine-badge', { hasText: 'CC' }).waitFor();
   await page.getByRole('button', { name: 'Audit parser with Claude Code' }).click();
   await page.locator('.header-engine-badge', { hasText: 'Claude Code' }).waitFor();
+  assert.ok(ipcCalls.some(c => c.method === 'jobs' && c.args[0] === 'cc-ui'), 'opening a Claude Code session refreshes background jobs');
+  await page.locator('.header-pill.live', { hasText: '1 running' }).click();
+  await page.locator('.right-panel .job[data-job-id="bmon00001"]', { hasText: 'Watch CI run' }).waitFor();
+  await page.locator('.right-panel .job[data-job-id="bmon00001"] .job-details-toggle').click();
+  await page.locator('.right-panel .job[data-job-id="bmon00001"] .job-output', { hasText: 'ci step 1' }).waitFor();
+  await page.getByRole('button', { name: 'Stop job bmon00001', exact: true }).click();
+  assert.ok(ipcCalls.some(c => c.method === 'stopBackgroundJob' && c.args[0] === 'cc-ui' && c.args[1] === 'bmon00001' && c.args[2] === 1000));
+  await page.locator('.right-panel .job[data-job-id="bmon00001"]').waitFor({ state: 'detached' });
+  await page.getByRole('button', { name: 'Session details', exact: true }).click();
   await page.locator('.cc-todo-card', { hasText: '1/2' }).waitFor();
   await page.locator('.cc-task-card', { hasText: 'Inspect parser module' }).waitFor();
   await page.locator('.cc-task-head', { hasText: 'Inspect parser module' }).click();

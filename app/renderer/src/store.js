@@ -485,7 +485,7 @@ export async function openSession(id, { record = true } = {}) {
   setTimeout(() => { if (state.activeId === id) api('warmFolder', id).catch(() => {}); }, 1500);
   const t = transcriptOf(id);
   const isClaude = state.sessions.find(s => s.id === id)?.engine === 'claude-code';
-  if (!isClaude) refreshJobs(id);
+  refreshJobs(id);
   if (t.loaded) { api('focusSession', id).catch(() => {}); prefetchHistory(id); return; } // the sweep never stops the open conversation
   try {
     await reloadTranscript(id);

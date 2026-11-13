@@ -836,6 +836,7 @@ export class SessionManager extends EventEmitter {
     // An adapter this desktop just started has the current settings; one that kept running may not.
     runtime.claudeKey = created ? runtime.claudeBootKey : null;
     await this.#applyModel(record, runtime).catch(error => { if (!record.spare && this.#current(record, runtime)) this.emit('notice', { id: record.id, level: 'warning', message: error.message }); });
+    if (!created) await session.request('background_sync').catch(() => {});
     this.#assertCurrent(record, runtime);
     this.#save(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId });
     return session;
@@ -1474,13 +1475,16 @@ export class SessionManager extends EventEmitter {
     this.emit('jobs', { id: record.id, ...runtime.jobs });
   }
   jobs(id) { return this.runtimes.get(id)?.jobs ?? { version: 0, jobs: [] }; }
-  // Stop only the exact execution shown in the card, never a reused id after a Pi restart.
+  // Stop only the exact execution shown in the card, never a reused id after a process restart.
   async stopBackgroundJob(id, jobId, startedAt) {
     const runtime = this.runtimes.get(id);
     const job = runtime?.jobs?.jobs.find(job => job.id === jobId && job.startedAt === startedAt);
-    if (runtime?.status !== 'connected' || !job || job.status !== 'running' || !/^bg-\d+$/.test(jobId) || !Number.isFinite(startedAt))
+    const claude = runtime?.engine === CLAUDE_ENGINE;
+    const validId = claude ? /^[A-Za-z0-9_-]{1,64}$/.test(jobId) : /^bg-\d+$/.test(jobId);
+    if (runtime?.status !== 'connected' || !job || job.status !== 'running' || !validId || !Number.isFinite(startedAt))
       throw new Error('This job is no longer running in this session.');
-    await runtime.session.prompt(`/pidesk-agents background-stop ${jobId} ${startedAt}`);
+    if (claude) await runtime.session.request('stop_background_job', { taskId: jobId, startedAt });
+    else await runtime.session.prompt(`/pidesk-agents background-stop ${jobId} ${startedAt}`);
   }
   // The inspector's controls, handled by the bridge's /pidesk-agents command (not recorded in history).
   async stopAgent(id, agentId) {

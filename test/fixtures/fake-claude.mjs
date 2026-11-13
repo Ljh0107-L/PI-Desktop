@@ -30,6 +30,8 @@ let model = flag('--model') ?? 'claude-default';
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const out = record => process.stdout.write(JSON.stringify(record) + '\n');
 const pending = new Map(); // our control request id -> resolver
+const bgTasks = new Map(); // task_id -> { id, runId, toolUseId, description, output }
+const taskOutputs = new Map(); // task_id -> output string (readable even after completion)
 let busy = null;           // the running turn's promise
 const queue = [];
 let interrupted = false;
@@ -165,6 +167,46 @@ async function turn(content) {
     const u = await streamMessage([{ type: 'text', text: 'The agent found a.js' }]);
     return result(u);
   }
+  if (/\[\[bg-complete\]\]/.test(text)) {
+    const id = `toolu_${++n}`;
+    const taskId = 'b12345678';
+    const runId = 'run-1';
+    const u1 = await streamMessage([{ type: 'tool_use', id, name: 'Bash', input: { command: 'echo bg-started; sleep 1; echo bg-done', description: 'Background build', run_in_background: true } }], { stop: 'tool_use' });
+    out({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: taskId, run_id: runId, task_type: 'local_bash', description: 'Background build' }], session_id: sessionId, uuid: randomUUID() });
+    out({ type: 'system', subtype: 'task_started', task_id: taskId, run_id: runId, tool_use_id: id, description: 'Background build', is_backgrounded: true, task_type: 'local_bash', session_id: sessionId, uuid: randomUUID() });
+    bgTasks.set(taskId, { id: taskId, runId, toolUseId: id, description: 'Background build', output: 'bg-started\n' });
+    taskOutputs.set(taskId, 'bg-started\n');
+    toolResult(id, `Command running in background with ID: ${taskId}.`, { structured: { backgroundTaskId: taskId } });
+    const u2 = await streamMessage([{ type: 'text', text: 'Started background build.' }]);
+    result({ input_tokens: u1.input_tokens + u2.input_tokens, output_tokens: u1.output_tokens + u2.output_tokens });
+    setTimeout(async () => {
+      const task = bgTasks.get(taskId);
+      if (!task) return;
+      task.output = 'bg-started\nbg-done\n';
+      taskOutputs.set(taskId, task.output);
+      bgTasks.delete(taskId);
+      out({ type: 'system', subtype: 'task_updated', task_id: taskId, run_id: runId, patch: { status: 'completed', end_time: Date.now() }, session_id: sessionId, uuid: randomUUID() });
+      out({ type: 'system', subtype: 'task_notification', task_id: taskId, run_id: runId, tool_use_id: id, status: 'completed', output_file: '/tmp/bg.output', summary: 'Background command "Background build" completed (exit code 0)', session_id: sessionId, uuid: randomUUID() });
+      out({ type: 'system', subtype: 'background_tasks_changed', tasks: [], session_id: sessionId, uuid: randomUUID() });
+      out({ type: 'system', subtype: 'init', cwd: process.cwd(), session_id: sessionId, model, tools: ['Bash'], slash_commands: [], permissionMode: 'default' });
+      out({ type: 'user', message: { role: 'user', content: `<task-notification><task-id>${taskId}</task-id><status>completed</status></task-notification>` }, session_id: sessionId, parent_tool_use_id: null, uuid: randomUUID(), isReplay: true, origin: { kind: 'task-notification', producer: 'session-task', runId } });
+      result(await streamMessage([{ type: 'text', text: 'Follow-up after background build finished.' }]));
+    }, 120);
+    return;
+  }
+  if (/\[\[bg-monitor\]\]/.test(text)) {
+    const id = `toolu_${++n}`;
+    const taskId = 'bmon00001';
+    const runId = 'run-mon-1';
+    const u1 = await streamMessage([{ type: 'tool_use', id, name: 'Monitor', input: { command: 'tail -f ci.log', description: 'Watch CI run' } }], { stop: 'tool_use' });
+    out({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: taskId, run_id: runId, task_type: 'local_bash', description: 'Watch CI run' }], session_id: sessionId, uuid: randomUUID() });
+    out({ type: 'system', subtype: 'task_started', task_id: taskId, run_id: runId, tool_use_id: id, description: 'Watch CI run', is_backgrounded: true, task_type: 'local_bash', session_id: sessionId, uuid: randomUUID() });
+    bgTasks.set(taskId, { id: taskId, runId, toolUseId: id, description: 'Watch CI run', output: 'monitor-ready\n' });
+    taskOutputs.set(taskId, 'monitor-ready\n');
+    toolResult(id, `Monitor started (task ${taskId}).`, { structured: { taskId } });
+    const u2 = await streamMessage([{ type: 'text', text: 'Monitor armed.' }]);
+    return result({ input_tokens: u1.input_tokens + u2.input_tokens, output_tokens: u1.output_tokens + u2.output_tokens });
+  }
   if (/\[\[slow\]\]/.test(text)) {
     const u = await streamMessage([{ type: 'text', text: 'slow '.repeat(400) }], { delay: 30 });
     if (interrupted) {
@@ -210,6 +252,22 @@ process.stdin.on('data', chunk => {
         else { if (r.settings?.model) model = r.settings.model; if (process.env.FAKE_CLAUDE_LOG) appendFileSync(process.env.FAKE_CLAUDE_LOG, JSON.stringify({ applied: r.settings }) + '\n'); answerControl(record.request_id, {}); }
       }
       else if (r.subtype === 'get_context_usage') answerControl(record.request_id, { totalTokens: 1234, maxTokens: 200000 });
+      else if (r.subtype === 'get_task_output') {
+        const output = bgTasks.get(r.task_id)?.output ?? taskOutputs.get(r.task_id);
+        if (output === undefined) failControl(record.request_id, `get_task_output: no shell or Monitor task with that task_id (${r.task_id})`);
+        else answerControl(record.request_id, { output, total_bytes: Buffer.byteLength(output), truncated: false });
+      }
+      else if (r.subtype === 'stop_task') {
+        const task = bgTasks.get(r.task_id);
+        if (!task) failControl(record.request_id, `No task found with ID: ${r.task_id}`);
+        else {
+          bgTasks.delete(r.task_id);
+          out({ type: 'system', subtype: 'task_updated', task_id: task.id, run_id: task.runId, patch: { status: 'killed', end_time: Date.now() }, session_id: sessionId, uuid: randomUUID() });
+          out({ type: 'system', subtype: 'task_notification', task_id: task.id, run_id: task.runId, tool_use_id: task.toolUseId, status: 'stopped', output_file: '/tmp/mon.output', summary: task.description, session_id: sessionId, uuid: randomUUID() });
+          out({ type: 'system', subtype: 'background_tasks_changed', tasks: [...bgTasks.values()].map(t => ({ task_id: t.id, run_id: t.runId, task_type: 'local_bash', description: t.description })), session_id: sessionId, uuid: randomUUID() });
+          answerControl(record.request_id, {});
+        }
+      }
       else if (r.subtype === 'set_permission_mode') answerControl(record.request_id, {});
       else failControl(record.request_id, `unsupported ${r.subtype}`);
       continue;

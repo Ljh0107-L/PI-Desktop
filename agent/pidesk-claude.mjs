@@ -66,6 +66,12 @@ export function piUsage(u = {}, cost) {
   return { input, output, cacheRead, cacheWrite, totalTokens: input + output + cacheRead + cacheWrite, cost: c, ...(Number.isFinite(thinking) && thinking > 0 ? { reasoning: thinking } : {}) };
 }
 const STOP = { end_turn: 'stop', stop_sequence: 'stop', tool_use: 'toolUse', max_tokens: 'length', pause_turn: 'stop', refusal: 'stop' };
+const FINISHED_BG_LIMIT = 32;
+const BG_POLL_MS = 2000;
+const BG_OUTPUT_TYPES = new Set(['local_bash', 'monitor_mcp', 'monitor_ws']);
+const HOUSEKEEPING_BG_TYPES = new Set(['dream', 'auto_mode_scan', 'local_memory_import', 'post_turn_memory']);
+const stripAnsi = text => String(text ?? '').replace(/\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
+const formatBgTail = text => stripAnsi(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n').slice(-10).join('\n').replace(/\n*$/, '').slice(-2048);
 
 // Environment for the Claude Code process: only what it needs, never PIDESK_BOOT. `extra` holds
 // non-secret variables the desktop chose for it (tests use it to point the fake binary at a log).
@@ -202,6 +208,13 @@ export class ClaudeAdapter {
     this.live = null;          // the assistant message streaming now
     this.requestStart = null;
     this.pendingTools = new Map(); // tool_use id -> { name, startedAt, agent? }
+    this.toolCalls = new Map();    // recent tool_use id -> { name, ccName, input, args }
+    this.knownTasks = new Map();   // task_id -> metadata from task_started (even before backgrounded)
+    this.bgGeneration = randomUUID();
+    this.bgRevision = 0;
+    this.bgTasks = new Map();      // task_id -> live/finished background job record
+    this.bgPollTimer = null;
+    this.bgPublishTimer = null;
     this.uuids = new Map();    // message id -> last Claude Code uuid seen for it
     this.recorded = new Map(); // message id -> entry written for it by the running Claude Code
     this.commandList = [];
@@ -280,6 +293,8 @@ export class ClaudeAdapter {
       case 'switch_session': return this.switchSession(request.sessionPath);
       case 'get_fork_messages': return { messages: (this.transcript?.branch() ?? []).filter(e => e.type === 'message' && e.message?.role === 'user').map(e => ({ entryId: e.id, text: blockText(e.message.content) })) };
       case 'fork': return this.forkAt(request.entryId);
+      case 'background_sync': return this.#syncBackgroundTasks();
+      case 'stop_background_job': return this.stopBackgroundJob(request.taskId, request.startedAt);
       default: throw new Error(`Claude Code conversations do not support ${request.type}`);
     }
   }
@@ -382,6 +397,13 @@ export class ClaudeAdapter {
     this.resume = null;
     this.uuids.clear();
     this.recorded.clear();
+    this.toolCalls.clear();
+    this.knownTasks.clear();
+    clearInterval(this.bgPollTimer); this.bgPollTimer = null;
+    clearTimeout(this.bgPublishTimer); this.bgPublishTimer = null;
+    this.bgGeneration = randomUUID();
+    this.bgRevision = 0;
+    this.bgTasks.clear();
     let stderr = '';
     let buffer = '';
     child.stdout.setEncoding?.('utf8');
@@ -405,6 +427,7 @@ export class ClaudeAdapter {
       if (this.child !== child) return;
       this.child = null;
       this.childReady = null;
+      this.#finishAllBackgroundTasks();
       for (const pending of this.controls.values()) pending.reject(new Error('Claude Code exited'));
       this.controls.clear();
       for (const pending of this.ui.values()) pending.resolve({ cancelled: true });
@@ -416,7 +439,7 @@ export class ClaudeAdapter {
       }
     });
     this.childReady = (async () => {
-      const init = await this.control({ subtype: 'initialize', hooks: null }, { timeout: 120000 });
+      const init = await this.control({ subtype: 'initialize', hooks: null, perTaskStopAffordance: true }, { timeout: 120000 });
       const tuiOnly = new Set(['color', 'focus', 'heapdump', 'output-style', 'workflow-launch-exec', 'auto-mode-setup']);
       this.commandList = (init?.commands ?? []).filter(c => c?.name && !c.name.startsWith('__') && c.userInvocable !== false && !tuiOnly.has(c.name));
       this.models = init?.models ?? [];
@@ -436,6 +459,7 @@ export class ClaudeAdapter {
     if (!child) return;
     this.child = null;
     this.childReady = null;
+    this.#finishAllBackgroundTasks();
     try { child.stdin.end(); } catch { /* already closed */ }
     const kill = setTimeout(() => child.kill('SIGTERM'), 3000);
     child.once('close', () => clearTimeout(kill));
@@ -468,7 +492,7 @@ export class ClaudeAdapter {
     const timestamp = this.now();
     const piMessage = { role: 'user', content: [...images.filter(i => i?.data).map(i => ({ type: 'image', data: i.data, mimeType: i.mimeType ?? 'image/png' })), ...(message ? [{ type: 'text', text: message }] : [])], timestamp };
     transcript.append({ type: 'message', message: piMessage });
-    if (!busy) { this.streaming = true; this.turnError = null; this.interrupting = false; this.emit({ type: 'agent_start' }); }
+    if (!busy) this.#beginTurn();
     // Output of Claude Code's own slash commands (/context, /cost …) is shown only when the user ran one.
     if (message.trim().startsWith('/')) this.slashCommand = true;
     this.emit({ type: 'message_start', message: piMessage });
@@ -554,6 +578,294 @@ export class ClaudeAdapter {
     }
   }
 
+  #beginTurn() {
+    if (this.streaming) return;
+    this.streaming = true;
+    this.turnError = null;
+    this.interrupting = false;
+    this.emit({ type: 'agent_start' });
+  }
+
+  // ---------------------------------------------------------------- background tasks
+  #rememberToolCall(id, name, ccName, input, args) {
+    if (!id) return;
+    this.toolCalls.set(id, { name, ccName, input, args });
+    if (this.toolCalls.size > 200) this.toolCalls.delete(this.toolCalls.keys().next().value);
+  }
+  #isHousekeepingTask(record) {
+    return !!(record?.ambient || record?.skip_transcript || HOUSEKEEPING_BG_TYPES.has(record?.task_type));
+  }
+  #taskCommand(record, existing) {
+    const tool = record?.tool_use_id ? this.toolCalls.get(record.tool_use_id) : null;
+    const input = tool?.input;
+    return input?.command ?? input?.url ?? input?.prompt ?? record?.prompt ?? existing?.command ?? record?.description ?? existing?.description ?? record?.task_type ?? record?.task_id ?? '';
+  }
+  #bgSnapshot(job) {
+    const endedAt = job.endedAt ?? null;
+    return {
+      id: job.id,
+      command: job.command,
+      description: job.description,
+      cwd: job.cwd,
+      status: job.status,
+      stopping: job.stopping && job.status === 'running',
+      exitCode: job.exitCode,
+      exitSignal: job.exitSignal,
+      pid: null,
+      startedAt: job.startedAt,
+      endedAt,
+      elapsedMs: Math.max(0, (endedAt ?? this.now()) - job.startedAt),
+      escalated: false,
+      error: job.error ?? null,
+      tail: job.tail ?? '',
+    };
+  }
+  #trimFinishedBg() {
+    const finished = [...this.bgTasks.values()].filter(j => j.status !== 'running')
+      .sort((a, b) => (a.endedAt ?? 0) - (b.endedAt ?? 0) || a.startedAt - b.startedAt);
+    for (const job of finished.slice(0, Math.max(0, finished.length - FINISHED_BG_LIMIT))) this.bgTasks.delete(job.id);
+  }
+  #publishJobs(immediate = false) {
+    if (immediate) {
+      clearTimeout(this.bgPublishTimer);
+      this.bgPublishTimer = null;
+      this.#trimFinishedBg();
+      this.bgRevision += 1;
+      const jobs = [...this.bgTasks.values()].map(j => this.#bgSnapshot(j));
+      this.emit({ type: 'extension_ui_request', id: randomUUID(), method: 'setStatus', statusKey: 'pidesk-background', statusText: JSON.stringify({ generation: this.bgGeneration, revision: this.bgRevision, jobs }) });
+      return;
+    }
+    if (this.bgPublishTimer) return;
+    this.bgPublishTimer = setTimeout(() => { this.bgPublishTimer = null; this.#publishJobs(true); }, 1000);
+    this.bgPublishTimer.unref?.();
+  }
+  #syncBgPoller() {
+    const needsPoll = [...this.bgTasks.values()].some(j => j.status === 'running' && BG_OUTPUT_TYPES.has(j.taskType) && !j.outputUnsupported);
+    if (!needsPoll) { clearInterval(this.bgPollTimer); this.bgPollTimer = null; return; }
+    if (this.bgPollTimer) return;
+    this.bgPollTimer = setInterval(() => { void this.#pollBackgroundOutputs(); }, BG_POLL_MS);
+    this.bgPollTimer.unref?.();
+  }
+  async #pollBackgroundOutputs() {
+    const running = [...this.bgTasks.values()].filter(j => j.status === 'running' && BG_OUTPUT_TYPES.has(j.taskType) && !j.outputUnsupported);
+    if (!running.length || !this.child) { this.#syncBgPoller(); return; }
+    await Promise.all(running.map(job => this.#pollTaskOutput(job)));
+  }
+  async #pollTaskOutput(job, { immediatePublish = false } = {}) {
+    if (!this.child || job.outputUnsupported || !BG_OUTPUT_TYPES.has(job.taskType) || job.polling) return;
+    job.polling = true;
+    try {
+      const res = await this.control({ subtype: 'get_task_output', task_id: job.id }, { timeout: 3000 });
+      if (typeof res?.output === 'string') {
+        const nextTail = formatBgTail(res.output);
+        if (nextTail !== job.tail) {
+          const hadTail = !!job.tail;
+          job.tail = nextTail;
+          this.#publishJobs(immediatePublish || !hadTail);
+        }
+      }
+    } catch (error) {
+      if (/unsupported|not available|not supported/i.test(error?.message ?? '')) { job.outputUnsupported = true; this.#syncBgPoller(); }
+    } finally {
+      job.polling = false;
+    }
+  }
+  #syncBackgroundTasks() {
+    this.#publishJobs(true);
+    void this.#pollBackgroundOutputs();
+    return { ok: true };
+  }
+  async stopBackgroundJob(taskId, startedAt) {
+    const job = this.bgTasks.get(taskId);
+    if (!this.child || !job || job.status !== 'running' || (startedAt != null && job.startedAt !== startedAt)) {
+      throw new Error('This job is no longer running in this session.');
+    }
+    job.stopping = true;
+    this.#publishJobs(true);
+    try {
+      await this.control({ subtype: 'stop_task', task_id: job.id }, { timeout: 10000 });
+      return { stopped: true };
+    } catch (error) {
+      if (job.status === 'running') { job.stopping = false; this.#publishJobs(true); }
+      throw error;
+    }
+  }
+  #upsertBgTask(info) {
+    if (!info?.task_id) return false;
+    const existing = this.bgTasks.get(info.task_id);
+    const taskType = info.task_type ?? existing?.taskType ?? 'local_bash';
+    const description = info.description ?? existing?.description ?? '';
+    const subagentType = info.subagent_type ?? existing?.subagentType ?? null;
+    const command = this.#taskCommand(info, existing);
+    if (existing) {
+      if (existing.runId && info.run_id && info.run_id < existing.runId) return false;
+      if (existing.status !== 'running') {
+        if (!(info.run_id && existing.runId && info.run_id > existing.runId)) return false;
+        Object.assign(existing, {
+          runId: info.run_id, taskType, subagentType, description, command, status: 'running',
+          stopping: false, exitCode: null, exitSignal: null, startedAt: this.now(), endedAt: null,
+          error: null, tail: '', outputUnsupported: false,
+        });
+        this.#syncBgPoller();
+        if (BG_OUTPUT_TYPES.has(taskType)) setTimeout(() => void this.#pollTaskOutput(existing), 250).unref?.();
+        return true;
+      }
+      let changed = false;
+      if (info.run_id && !existing.runId) { existing.runId = info.run_id; changed = true; }
+      if (info.task_type && existing.taskType !== info.task_type) { existing.taskType = info.task_type; changed = true; }
+      if (subagentType && existing.subagentType !== subagentType) { existing.subagentType = subagentType; changed = true; }
+      if (description && existing.description !== description) { existing.description = description; changed = true; }
+      if (command && command !== existing.command && (existing.command === existing.description || existing.command === existing.id || existing.command === existing.taskType || info.tool_use_id || info.prompt)) {
+        existing.command = command;
+        changed = true;
+      }
+      if (changed) this.#syncBgPoller();
+      return changed;
+    }
+    const job = {
+      id: info.task_id,
+      runId: info.run_id ?? null,
+      taskType,
+      subagentType,
+      description,
+      command,
+      cwd: this.cwd,
+      status: 'running',
+      stopping: false,
+      exitCode: null,
+      exitSignal: null,
+      startedAt: info.startedAt ?? this.now(),
+      endedAt: null,
+      error: null,
+      tail: '',
+      outputUnsupported: false,
+      polling: false,
+    };
+    this.bgTasks.set(info.task_id, job);
+    this.#syncBgPoller();
+    if (BG_OUTPUT_TYPES.has(taskType)) setTimeout(() => void this.#pollTaskOutput(job), 250).unref?.();
+    return true;
+  }
+  #onTaskStarted(record) {
+    if (!record?.task_id) return;
+    const prev = this.knownTasks.get(record.task_id);
+    const known = { ...prev, ...record, command: this.#taskCommand(record, prev), startedAt: prev?.startedAt ?? this.now() };
+    this.knownTasks.set(record.task_id, known);
+    if (this.knownTasks.size > 200) this.knownTasks.delete(this.knownTasks.keys().next().value);
+    if (this.#isHousekeepingTask(record)) return;
+    const bgByDefault = record.is_backgrounded === true || (record.is_backgrounded == null && ['monitor_mcp', 'monitor_ws', 'local_workflow', 'remote_agent'].includes(record.task_type));
+    if (!bgByDefault && !this.bgTasks.has(record.task_id)) return;
+    if (this.#upsertBgTask(known)) this.#publishJobs(true);
+  }
+  #onTaskProgress(record) {
+    const job = this.bgTasks.get(record?.task_id);
+    if (!job || job.status !== 'running') return;
+    if (job.runId && record.run_id && record.run_id < job.runId) return;
+    if (record.description && !job.description) job.description = record.description;
+    if (!BG_OUTPUT_TYPES.has(job.taskType) || !job.tail) {
+      const text = record.summary || (record.last_tool_name ? `Running ${record.last_tool_name}…` : '');
+      if (text) {
+        const nextTail = formatBgTail(text);
+        if (nextTail !== job.tail) {
+          const hadTail = !!job.tail;
+          job.tail = nextTail;
+          this.#publishJobs(!hadTail);
+        }
+      }
+    }
+  }
+  #onTaskUpdated(record) {
+    if (!record?.task_id) return;
+    const patch = record.patch ?? {};
+    if (patch.is_backgrounded === true && !this.bgTasks.has(record.task_id)) {
+      const known = this.knownTasks.get(record.task_id);
+      if (known && !this.#isHousekeepingTask(known) && this.#upsertBgTask({ ...known, run_id: record.run_id ?? known.run_id })) {
+        this.#publishJobs(true);
+      }
+    }
+    const job = this.bgTasks.get(record.task_id);
+    if (!job) return;
+    if (job.runId && record.run_id && record.run_id < job.runId) return;
+    let changed = false;
+    if (patch.description && patch.description !== job.description) { job.description = patch.description; changed = true; }
+    if (patch.error != null && patch.error !== job.error) { job.error = patch.error; changed = true; }
+    if (patch.status === 'completed' && job.status === 'running') {
+      job.status = 'exited'; job.exitCode ??= 0; job.endedAt = patch.end_time ?? this.now(); job.stopping = false; changed = true;
+    } else if (patch.status === 'failed' && job.status === 'running') {
+      job.status = 'failed'; job.endedAt = patch.end_time ?? this.now(); job.stopping = false; changed = true;
+    } else if (patch.status === 'killed' && job.status === 'running') {
+      job.status = 'stopped'; job.exitSignal ??= 'SIGTERM'; job.endedAt = patch.end_time ?? this.now(); job.stopping = false; changed = true;
+    }
+    if (changed) {
+      this.#syncBgPoller();
+      this.#publishJobs(true);
+      if (job.status !== 'running' && BG_OUTPUT_TYPES.has(job.taskType) && !job.outputUnsupported) void this.#pollTaskOutput(job, { immediatePublish: true });
+    }
+  }
+  #onTaskNotification(record) {
+    if (!record?.task_id) return;
+    let job = this.bgTasks.get(record.task_id);
+    if (!job) {
+      const known = this.knownTasks.get(record.task_id);
+      if (known && !this.#isHousekeepingTask(known) && !this.#isHousekeepingTask(record) && known.is_backgrounded !== false) {
+        this.#upsertBgTask({ ...known, run_id: record.run_id ?? known.run_id });
+        job = this.bgTasks.get(record.task_id);
+      }
+    }
+    if (!job) return;
+    if (job.runId && record.run_id && record.run_id < job.runId) return;
+    if (record.status === 'completed') { job.status = 'exited'; job.exitCode ??= 0; }
+    else if (record.status === 'failed') job.status = 'failed';
+    else if (record.status === 'stopped') { job.status = 'stopped'; job.exitSignal ??= 'SIGTERM'; }
+    job.stopping = false;
+    job.endedAt ??= this.now();
+    if (!job.tail && record.summary) job.tail = formatBgTail(record.summary);
+    this.#syncBgPoller();
+    this.#publishJobs(true);
+    if (BG_OUTPUT_TYPES.has(job.taskType) && !job.outputUnsupported) void this.#pollTaskOutput(job, { immediatePublish: true });
+  }
+  #onBackgroundTasksChanged(record) {
+    const tasks = Array.isArray(record?.tasks) ? record.tasks : [];
+    const liveIds = new Set();
+    let changed = false;
+    for (const t of tasks) {
+      if (!t?.task_id || this.#isHousekeepingTask(t)) continue;
+      liveIds.add(t.task_id);
+      const known = this.knownTasks.get(t.task_id);
+      if (this.#upsertBgTask({ ...known, ...t, startedAt: known?.startedAt })) changed = true;
+    }
+    for (const [taskId, job] of this.bgTasks) {
+      if (job.status === 'running' && !liveIds.has(taskId)) {
+        job.status = job.stopping ? 'stopped' : 'exited';
+        if (job.status === 'exited' && job.exitCode == null) job.exitCode = 0;
+        if (job.status === 'stopped' && !job.exitSignal) job.exitSignal = 'SIGTERM';
+        job.stopping = false;
+        job.endedAt ??= this.now();
+        changed = true;
+        if (BG_OUTPUT_TYPES.has(job.taskType) && !job.outputUnsupported) void this.#pollTaskOutput(job, { immediatePublish: true });
+      }
+    }
+    if (changed || this.bgRevision === 0) {
+      this.#syncBgPoller();
+      this.#publishJobs(true);
+    }
+  }
+  #finishAllBackgroundTasks() {
+    clearInterval(this.bgPollTimer); this.bgPollTimer = null;
+    clearTimeout(this.bgPublishTimer); this.bgPublishTimer = null;
+    let changed = false;
+    for (const job of this.bgTasks.values()) {
+      if (job.status === 'running') {
+        job.status = 'stopped';
+        job.exitSignal ??= 'SIGTERM';
+        job.stopping = false;
+        job.endedAt ??= this.now();
+        changed = true;
+      }
+    }
+    if (changed) this.#publishJobs(true);
+  }
+
   #onSystem(record) {
     if (record.session_id) this.claudeSessionId = record.session_id;
     switch (record.subtype) {
@@ -561,7 +873,7 @@ export class ClaudeAdapter {
         if (Array.isArray(record.slash_commands) && !this.commandList.length) this.commandList = record.slash_commands.filter(n => !n.startsWith('__')).map(name => ({ name }));
         return;
       case 'status':
-        if (record.status === 'requesting') { this.requestStart = this.now(); clearTimeout(this.continueTimer); }
+        if (record.status === 'requesting') { this.requestStart = this.now(); clearTimeout(this.continueTimer); if (!this.compacting) this.#beginTurn(); }
         if (record.status === 'compacting' && !this.compacting) { this.compacting = true; this.emit({ type: 'compaction_start', reason: 'auto' }); }
         return;
       case 'compact_boundary':
@@ -573,8 +885,23 @@ export class ClaudeAdapter {
       case 'session_title_changed':
         if (record.title) this.emit({ type: 'extension_ui_request', id: randomUUID(), method: 'setStatus', statusKey: 'pidesk-title', statusText: record.title });
         return;
+      case 'background_tasks_changed':
+        this.#onBackgroundTasksChanged(record);
+        return;
+      case 'task_started':
+        this.#onTaskStarted(record);
+        return;
+      case 'task_progress':
+        this.#onTaskProgress(record);
+        return;
+      case 'task_updated':
+        this.#onTaskUpdated(record);
+        return;
+      case 'task_notification':
+        this.#onTaskNotification(record);
+        return;
       default:
-        // Claude Code's own state (background tasks, agents, hooks) for the desktop to show if it wants.
+        // Claude Code's own state (hooks, etc.) for the desktop to show if it wants.
         this.emit({ type: 'claude_event', subtype: record.subtype, data: record });
     }
   }
@@ -583,6 +910,7 @@ export class ClaudeAdapter {
     const now = this.now();
     switch (event.type) {
       case 'message_start': {
+        if (!this.compacting) this.#beginTurn();
         if (this.live) this.#finishLive('aborted');
         const m = event.message ?? {};
         this.emit({ type: 'auto_retry_end' });
@@ -626,6 +954,7 @@ export class ClaudeAdapter {
           try { input = b.json ? JSON.parse(b.json) : {}; } catch { input = {}; }
           b.input = input;
           const toolCall = normalizeToolCall(b.id, b.name, input);
+          this.#rememberToolCall(b.id, toolCall.name, b.name, input, toolCall.arguments);
           this.#update({ type: 'toolcall_end', contentIndex: i, toolCall });
           if (!b.server && !this.pendingTools.has(b.id)) {
             this.pendingTools.set(b.id, { name: toolCall.name, ccName: toolCall.ccName ?? toolCall.name, startedAt: now, steps: [], usage: null });
@@ -708,12 +1037,15 @@ export class ClaudeAdapter {
     }
     // API errors are reported as synthetic assistant messages without a stream.
     if (record.isApiErrorMessage || record.error) {
+      if (!this.compacting) this.#beginTurn();
       const text = blockText(m.content) || String(record.error ?? 'Claude Code request failed');
       this.#errorMessage(text);
       return;
     }
     // Without partial messages (should not happen) the whole message arrives here.
     if (m.id && !this.live && !this.recorded.has(m.id) && Array.isArray(m.content) && m.content.length) {
+      if (!this.compacting) this.#beginTurn();
+      for (const b of m.content) if (b?.type === 'tool_use') { const tc = normalizeToolCall(b.id, b.name, b.input); this.#rememberToolCall(b.id, tc.name, b.name, b.input, tc.arguments); }
       this.live = { id: m.id, model: m.model, usage: { ...(m.usage ?? {}) }, blocks: m.content.map(b => b.type === 'tool_use' ? { type: 'tool_use', id: b.id, name: b.name, input: b.input } : b.type === 'thinking' ? { type: 'thinking', thinking: b.thinking ?? '' } : b.type === 'text' ? { type: 'text', text: b.text ?? '' } : null), start: this.now(), requestStart: this.requestStart ?? this.now(), stopReason: m.stop_reason ?? 'end_turn' };
       this.emit({ type: 'message_start', message: { role: 'assistant', content: [], api: 'anthropic-messages', provider: this.#provider(), model: m.model, timestamp: this.live.requestStart } });
       this.#finishLive();
@@ -759,8 +1091,8 @@ export class ClaudeAdapter {
       }
       return;
     }
-    // A prompt we sent, taken up by Claude Code.
-    if (record.isReplay) { this.queued = Math.max(0, this.queued - 1); clearTimeout(this.continueTimer); }
+    // A prompt we sent, taken up by Claude Code (not an automated task-notification replay).
+    if (record.isReplay && record.origin?.kind !== 'task-notification') { this.queued = Math.max(0, this.queued - 1); clearTimeout(this.continueTimer); }
   }
 
   #toolResult(block, record) {

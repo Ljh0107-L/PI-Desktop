@@ -48,12 +48,13 @@ On a custom endpoint the conversation's model also becomes Claude Code's backgro
 | Slash commands, skills, custom commands | `commands(id)` returns Claude Code's own list (`source: 'claude-code'`, optional `argumentHint`), including its `/goal`, `/review`, `/context`, `/compact`. Local command output (e.g. `/context`) arrives as an assistant message with `__localCommand: true`. |
 | CLAUDE.md, project `.claude/` settings, `.mcp.json` | Loaded by Claude Code from the conversation folder as usual. |
 | Agents (`Task`) | The call's live result is a `tool_execution_update` with `details: { kind: 'claude-code-agent', steps: [...] }`; the final `toolResult` has the steps and `details.agentRuns` (usage, counted once in Usage). |
+| Background tasks & `Monitor` | `background_tasks_changed`, `task_started`, `task_progress`, `task_updated`, `task_notification`, plus `get_task_output` polling and `stop_task` (with `perTaskStopAffordance: true` on `initialize`), feed Pi Desktop's `pidesk-background` status card and header pill. Follow-up turns woken by `task_notification` emit `agent_start` … `agent_settled`. |
 | Compaction | `compact(id)` sends `/compact`; history gets a `compactionSummary` with Claude Code's summary. |
-| Other Claude Code state | Forwarded as `{ type: 'claude_event', subtype, data }` events (background tasks, hooks…), ignored by the current UI. |
+| Other Claude Code state | Forwarded as `{ type: 'claude_event', subtype, data }` events (hooks, etc.). |
 
 ## Pi-only features (requirement 5)
 
-Ultra, Pi Desktop's Subagents setting, `/goal` continuation and the background-jobs card belong to Pi. For Claude Code conversations `setUltra(id, true)` and `create({ ultra: true, engine: 'claude-code' })` are refused; `ultra(id)`, `agents(id)` and `jobs(id)` stay empty; spares (pre-warmed Pi processes) are never adopted.
+Ultra, Pi Desktop's Subagents setting and `/goal` continuation belong to Pi. For Claude Code conversations `setUltra(id, true)` and `create({ ultra: true, engine: 'claude-code' })` are refused; `ultra(id)` and `agents(id)` stay empty; spares (pre-warmed Pi processes) are never adopted.
 
 ## Compatibility (requirement 8)
 

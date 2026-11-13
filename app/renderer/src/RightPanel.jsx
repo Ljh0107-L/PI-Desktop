@@ -161,7 +161,7 @@ export function RightPanel({ session }) {
         {percent != null && <span className={`meter ${percent > 100 ? 'over' : ''}`} title={`${Math.round(percent)}% of the context window`}><span style={{ width: `${Math.max(0, Math.min(100, percent))}%` }} /></span>}
       </>} />
       <UsageCard transcript={transcript} />
-      {!isClaude && <BackgroundJobs key={session.id} sessionId={session.id} />}
+      <BackgroundJobs key={session.id} sessionId={session.id} />
       {!isClaude && session.engine !== 'cursor' && <SubagentList sessionId={session.id} batches={batches} selectedCallId={selection?.callId} />}
     </aside>
   );

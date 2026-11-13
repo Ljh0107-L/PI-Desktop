@@ -778,3 +778,128 @@ test('Claude Code respects configured 800K contextWindow in stats and restarts i
   assert.equal(starts.length, 2);
   assert.equal(starts[1].env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, '500000');
 });
+
+test('Claude Code background tasks and Monitor publish jobs, support Stop, and track autonomous wake-up turns', { timeout: 30000 }, async t => {
+  const f = await managerFixture(t);
+  const view = await f.manager.create({ environmentId: 'local', cwd: f.work, model: { provider: 'gw', id: 'gw-claude' }, engine: 'claude-code' });
+  const jobUpdates = [];
+  f.manager.on('jobs', payload => { if (payload.id === view.id) jobUpdates.push(payload); });
+
+  await f.manager.prompt(view.id, 'run [[bg-complete]]');
+  // Turn 1 finishes while the background task is still running, then Turn 2 starts autonomously on task_notification.
+  await waitFor(() => f.manager.jobs(view.id).jobs.some(j => j.id === 'b12345678' && j.status === 'running' && j.command.includes('bg-done')));
+  const runningJob = f.manager.jobs(view.id).jobs.find(j => j.id === 'b12345678');
+  assert.equal(runningJob.description, 'Background build');
+  assert.equal(runningJob.command, 'echo bg-started; sleep 1; echo bg-done');
+
+  await waitFor(() => f.events.filter(e => e.id === view.id && e.event.type === 'agent_settled').length >= 2);
+  await waitFor(() => f.manager.jobs(view.id).jobs.some(j => j.id === 'b12345678' && j.status === 'exited' && j.tail.includes('bg-done')));
+  const starts = f.events.filter(e => e.id === view.id && e.event.type === 'agent_start').length;
+  const settles = f.events.filter(e => e.id === view.id && e.event.type === 'agent_settled').length;
+  assert.equal(starts, 2, 'autonomous task-notification turn emits agent_start');
+  assert.equal(settles, 2, 'autonomous task-notification turn emits agent_settled');
+  const page = await f.manager.historyPage(view.id, {});
+  assert.ok(page.messages.some(m => m.role === 'assistant' && m.content.some(b => b.type === 'text' && b.text.includes('Follow-up after background build finished.'))));
+
+  // Monitor stays running after Turn 1 finishes, polls tail, and stops cleanly without starting a model turn.
+  await f.manager.prompt(view.id, 'watch [[bg-monitor]]');
+  await waitFor(() => f.manager.jobs(view.id).jobs.some(j => j.id === 'bmon00001' && j.status === 'running' && j.tail.includes('monitor-ready')));
+  const monJob = f.manager.jobs(view.id).jobs.find(j => j.id === 'bmon00001');
+  assert.equal(monJob.command, 'tail -f ci.log');
+  await assert.rejects(f.manager.stopBackgroundJob(view.id, monJob.id, monJob.startedAt - 1), /no longer running/);
+  const settlesBeforeStop = f.events.filter(e => e.id === view.id && e.event.type === 'agent_settled').length;
+  await f.manager.stopBackgroundJob(view.id, monJob.id, monJob.startedAt);
+  await waitFor(() => f.manager.jobs(view.id).jobs.some(j => j.id === 'bmon00001' && j.status === 'stopped'));
+  await sleep(60);
+  assert.equal(f.events.filter(e => e.id === view.id && e.event.type === 'agent_settled').length, settlesBeforeStop, 'stopping a monitor does not trigger a model turn');
+  await assert.rejects(f.manager.stopBackgroundJob(view.id, monJob.id, monJob.startedAt), /no longer running/);
+});
+
+test('ClaudeAdapter handles background task ordering, ambient filtering, foreground promotion, and child exit', async t => {
+  const { EventEmitter } = await import('node:events');
+  const { PassThrough } = await import('node:stream');
+  const dir = tmp(t);
+  const events = [];
+  const initRequests = [];
+  let child;
+  const spawnImpl = () => {
+    const proc = new EventEmitter();
+    proc.stdin = new PassThrough();
+    proc.stdout = new PassThrough();
+    proc.stderr = new PassThrough();
+    proc.kill = () => {};
+    let buf = '';
+    proc.stdin.on('data', chunk => {
+      buf += chunk.toString();
+      let i;
+      while ((i = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
+        if (!line) continue;
+        const req = JSON.parse(line);
+        if (req.type === 'control_request' && req.request?.subtype === 'initialize') {
+          initRequests.push(req.request);
+          proc.stdout.write(JSON.stringify({ type: 'control_response', response: { subtype: 'success', request_id: req.request_id, response: { commands: [], models: [], account: { tokenSource: 'none', apiKeySource: 'ANTHROPIC_API_KEY' }, claude_code_version: '2.1.322' } } }) + '\n');
+        } else if (req.type === 'control_request' && req.request?.subtype === 'get_task_output') {
+          proc.stdout.write(JSON.stringify({ type: 'control_response', response: { subtype: 'error', request_id: req.request_id, error: 'unsupported' } }) + '\n');
+        }
+      }
+    });
+    child = proc;
+    return proc;
+  };
+  const adapter = new ClaudeAdapter({
+    boot: { claudeCode: { bin: 'mock', configDir: join(dir, 'cfg'), sessionsDir: join(dir, 'sessions'), cwd: dir, provider: { id: 'gw', kind: 'custom', api: 'anthropic-messages', apiKey: 'sk-1' }, model: { provider: 'gw', id: 'gw-claude' } } },
+    write: record => events.push(record),
+    spawnImpl,
+    env: process.env,
+  });
+  const snapshots = () => events.filter(e => e.type === 'extension_ui_request' && e.statusKey === 'pidesk-background').map(e => JSON.parse(e.statusText));
+
+  await adapter.handle({ type: 'get_commands', id: 'c1' });
+  assert.equal(initRequests[0]?.perTaskStopAffordance, true);
+
+  const emit = r => child.stdout.write(JSON.stringify(r) + '\n');
+  // 1) background_tasks_changed arrives before task_started; ambient and dream tasks are excluded.
+  emit({ type: 'stream_event', event: { type: 'message_start', message: { id: 'm1', model: 'gw-claude', usage: { input_tokens: 1, output_tokens: 1 } } } });
+  emit({ type: 'stream_event', event: { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tu_1', name: 'Bash', input: {} } } });
+  emit({ type: 'stream_event', event: { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"command":"sleep 10","description":"Sleeper","run_in_background":true}' } } });
+  emit({ type: 'stream_event', event: { type: 'content_block_stop', index: 0 } });
+  emit({ type: 'system', subtype: 'background_tasks_changed', tasks: [
+    { task_id: 'b_early1', run_id: 'r2', task_type: 'local_bash', description: 'Sleeper' },
+    { task_id: 's_amb', task_type: 'monitor_ws', description: 'Ambient monitor', ambient: true },
+    { task_id: 'd_mem', task_type: 'dream', description: 'Housekeeping' },
+  ] });
+  await sleep(10);
+  let snap = snapshots().at(-1);
+  assert.deepEqual(snap.jobs.map(j => j.id), ['b_early1']);
+  emit({ type: 'system', subtype: 'task_started', task_id: 'b_early1', run_id: 'r2', tool_use_id: 'tu_1', description: 'Sleeper', is_backgrounded: true, task_type: 'local_bash' });
+  await sleep(10);
+  snap = snapshots().at(-1);
+  assert.equal(snap.jobs[0].command, 'sleep 10', 'task_started enriches command even if background_tasks_changed came first');
+
+  // 2) Stale late frame from r1 cannot overwrite r2; completion before background_tasks_changed does not resurrect.
+  emit({ type: 'system', subtype: 'task_updated', task_id: 'b_early1', run_id: 'r1', patch: { status: 'failed', error: 'late' } });
+  emit({ type: 'system', subtype: 'task_notification', task_id: 'b_early1', run_id: 'r2', status: 'completed', summary: 'Done' });
+  emit({ type: 'system', subtype: 'background_tasks_changed', tasks: [{ task_id: 'b_early1', run_id: 'r2', task_type: 'local_bash', description: 'Sleeper' }] });
+  await sleep(10);
+  snap = snapshots().at(-1);
+  assert.equal(snap.jobs.find(j => j.id === 'b_early1').status, 'exited');
+
+  // 3) Foreground task stays hidden until moved to background; local_agent uses task_progress summary; child exit stops running jobs.
+  emit({ type: 'system', subtype: 'task_started', task_id: 'a_fg', run_id: 'r1', description: 'Explore repo', is_backgrounded: false, task_type: 'local_agent', subagent_type: 'Explore', prompt: 'find files' });
+  await sleep(10);
+  assert.ok(!snapshots().at(-1).jobs.some(j => j.id === 'a_fg'), 'foreground task stays hidden');
+  emit({ type: 'system', subtype: 'task_updated', task_id: 'a_fg', run_id: 'r1', patch: { is_backgrounded: true } });
+  emit({ type: 'system', subtype: 'task_progress', task_id: 'a_fg', run_id: 'r1', description: 'Explore repo', summary: 'Scanning src/…', usage: { total_tokens: 10, tool_uses: 1, duration_ms: 50 } });
+  await sleep(10);
+  snap = snapshots().at(-1);
+  const bgAgent = snap.jobs.find(j => j.id === 'a_fg');
+  assert.equal(bgAgent.status, 'running');
+  assert.equal(bgAgent.command, 'find files');
+  assert.match(bgAgent.tail, /Scanning src/);
+
+  child.emit('close', 0, null);
+  await sleep(10);
+  snap = snapshots().at(-1);
+  assert.equal(snap.jobs.find(j => j.id === 'a_fg').status, 'stopped', 'child exit ends remaining running tasks');
+});
