@@ -78,7 +78,7 @@ test('a Google URL loses a pasted request path and its query, which can hold the
   assert.equal(providerBaseUrl('google-generative-ai', 'https://gw.example.com/models-api/v1'), 'https://gw.example.com/models-api/v1');
 });
 
-test('a Google URL without a version gets /v1beta, unless only the URL as entered serves the API', async t => {
+test('a Google URL gains /v1beta only when that path returns a model list', async t => {
   const standard = await gemini(t, '/v1beta');
   assert.equal(await resolveProviderBaseUrl(google(standard.url), 'AIza-key'), `${standard.url}/v1beta`);
   assert.equal(await resolveProviderBaseUrl(google(`${standard.url}/v1beta/models/gemini-a:streamGenerateContent?alt=sse`), 'AIza-key'), `${standard.url}/v1beta`, 'a pasted request URL');
@@ -89,7 +89,51 @@ test('a Google URL without a version gets /v1beta, unless only the URL as entere
   assert.equal(await resolveProviderBaseUrl(google(bare.url), 'AIza-key'), bare.url, 'a gateway without a version');
   assert.ok([...standard.requests, ...bare.requests].every(r => r.method === 'GET' && r.key === 'AIza-key' && !r.authorization), 'only model lists, with the key in its header');
   const port = await new Promise(resolve => { const s = http.createServer().listen(0, '127.0.0.1', () => { const { port } = s.address(); s.close(() => resolve(port)); }); });
-  assert.equal(await resolveProviderBaseUrl(google(`http://127.0.0.1:${port}`), 'AIza-key', { timeout: 2000 }), `http://127.0.0.1:${port}/v1beta`, 'unreachable from this Mac: Google\'s default version');
+  assert.equal(await resolveProviderBaseUrl(google(`http://127.0.0.1:${port}`), 'AIza-key', { timeout: 2000 }), `http://127.0.0.1:${port}`, 'unreachable from this Mac: preserve the custom URL');
+});
+
+// Some gateways return HTTP 200 with no body for an unknown route, including /v1beta.
+// Others implement generation but not /models at all. Neither is evidence for rewriting a URL.
+async function googleProbeEndpoint(t, responses) {
+  const server = http.createServer((req, res) => {
+    const path = new URL(req.url, 'http://local').pathname;
+    const reply = responses[path] ?? { status: 404, body: '{}' };
+    res.writeHead(reply.status ?? 200, { 'content-type': reply.type ?? 'application/json' });
+    res.end(reply.body);
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  return `http://127.0.0.1:${server.address().port}`;
+}
+
+test('Google endpoint probing preserves a custom path when model discovery is inconclusive', async t => {
+  for (const reply of [
+    { body: '' }, { body: '<html>Sign in</html>', type: 'text/html' }, { body: '{}' },
+    { body: '{"models":{}}' }, { status: 401, body: '{"error":{"message":"unauthorized"}}' },
+  ]) {
+    const base = await googleProbeEndpoint(t, { '/proxy/google/v1beta/models': reply });
+    const entered = `${base}/proxy/google`;
+    assert.equal(await resolveProviderBaseUrl(google(entered), 'test-key'), entered, JSON.stringify(reply));
+  }
+});
+
+test('Google probing prefers the entered URL when both paths return valid model lists', async t => {
+  const reply = { body: '{"models":[]}' };
+  const base = await googleProbeEndpoint(t, { '/models': reply, '/v1beta/models': reply });
+  assert.equal(await resolveProviderBaseUrl(google(base), 'test-key'), base);
+});
+
+test('Google probing accepts an empty model list, not an empty HTTP response', async t => {
+  const base = await googleProbeEndpoint(t, { '/v1beta/models': { body: '{"models":[]}' } });
+  assert.equal(await resolveProviderBaseUrl(google(base), 'test-key'), `${base}/v1beta`);
+  const empty = await googleProbeEndpoint(t, { '/v1beta/models': { body: '{}' } });
+  await assert.rejects(listCustomModels(google(empty), 'test-key'), /Expected a Google model list/);
+});
+
+test('the official Google host keeps its default version when discovery is unavailable', async t => {
+  t.mock.method(globalThis, 'fetch', async () => { throw new Error('offline'); });
+  assert.equal(await resolveProviderBaseUrl(google('https://generativelanguage.googleapis.com'), 'test-key'), 'https://generativelanguage.googleapis.com/v1beta');
 });
 
 test('Gemini models are listed from every page, only the ones that generate, with their limits', async t => {

@@ -172,8 +172,8 @@ const api = {
   },
   async saveProvider(provider, key) {
     if (isRetiredProvider(provider.id)) throw new Error(RETIRED_PROVIDER_MESSAGE);
-    // With or without the version: an OpenAI-compatible URL is kept as entered unless only the other form
-    // serves the API, and a Google one without a version gets /v1beta.
+    // Normalize SDK-specific paths, but only rewrite custom Google URLs when model discovery
+    // confirms the alternative. A generation-only gateway may not serve /models at all.
     const baseUrl = provider.kind === 'custom' ? await resolveProviderBaseUrl(provider, key || store.getKey(provider.id)) : provider.baseUrl;
     const providers = store.settings.providers;
     const index = providers.findIndex(p => p.id === provider.id);

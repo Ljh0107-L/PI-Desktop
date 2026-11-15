@@ -26,6 +26,8 @@ npm run dist                   # builds the .dmg / .zip into release/
 
 Add a provider under **Settings (bottom left) → Models** (built-in providers such as DeepSeek, Anthropic, OpenAI, OpenRouter, or any endpoint compatible with OpenAI's, Anthropic's or Google's Gemini API). Choose an environment and folder under the message box, then start typing.
 
+For custom Google-compatible gateways, Pi keeps the base URL you enter unless a valid model list confirms that `/v1beta` is required. Empty HTTP 200 responses, unavailable model discovery, and network failures do not cause Pi to rewrite the gateway's path. Google's own API host still defaults to `/v1beta`.
+
 ChatGPT subscription sign-in is no longer included. Existing subscription conversations remain readable; select another model explicitly to continue them. Removing the integration does not delete saved API keys, conversation history or encrypted legacy authorization data.
 
 ## How it works

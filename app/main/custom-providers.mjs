@@ -6,7 +6,7 @@
 // /chat/completions or /responses, so there the version belongs in the base, and servers differ:
 // OpenAI and Moonshot serve only /v1/…, Perplexity only the root, DeepSeek both. Pi sets up Google's
 // SDK to append only models/<model>:streamGenerateContent, so there too the version belongs in the
-// base: /v1beta, the one Google's SDK uses by default, unless the URL names another.
+// base. Only Google's own host defaults to /v1beta; a custom gateway may need the exact URL entered.
 
 const ANTHROPIC = 'anthropic-messages';
 const GOOGLE = 'google-generative-ai';
@@ -38,8 +38,8 @@ function requestHeaders(api, apiKey, headers) {
 }
 const statusOf = response => response.then(res => { res.body?.cancel().catch(() => {}); return res.status; }, () => 0);
 
-// The Google bases worth trying, in order: as entered when it names a version, else with /v1beta
-// added, then as entered for a gateway that serves the API without a version.
+// Model discovery tries Google's conventional version and the entered URL. A successful HTTP
+// status alone proves nothing: some gateways return 200 with an empty body for unknown routes.
 const googleCandidates = url => {
   const base = googleBase(url);
   return !isUrl(base) || GOOGLE_VERSION.test(base) ? [base] : [`${base}/v1beta`, base];
@@ -49,15 +49,24 @@ const googleCandidates = url => {
 // removed serves the API. An empty request gets 404 where there is no such route and 400 or 401 where
 // there is, without generating anything. Only when the URL as entered has no such route and the other
 // one does is the other one used; a server this Mac cannot reach (it may be reachable only from an SSH
-// host) keeps the URL as entered. A Google URL without a version gets /v1beta, unless only the URL as
-// entered lists models (GET …/models generates nothing either).
+// host) keeps the URL as entered. Google custom URLs change only when a valid model list proves the
+// alternative works. GET …/models generates nothing; generation-only gateways need no discovery.
 export async function resolveProviderBaseUrl({ api, baseUrl, headers }, apiKey, { timeout = 8000 } = {}) {
   if (api === GOOGLE) {
     const [versioned, entered] = googleCandidates(baseUrl);
     if (!entered) return versioned;
-    const status = url => statusOf(fetch(`${url}/models`, { headers: requestHeaders(api, apiKey, headers), signal: AbortSignal.timeout(timeout) }));
-    const [withVersion, without] = await Promise.all([status(versioned), status(entered)]);
-    return withVersion === 404 && without && without !== 404 ? entered : versioned;
+    const servesModels = async url => {
+      try {
+        const res = await fetch(`${url}/models`, { headers: requestHeaders(api, apiKey, headers), signal: AbortSignal.timeout(timeout) });
+        if (!res.ok) { res.body?.cancel().catch(() => {}); return false; }
+        await googleModelPage(res);
+        return true;
+      } catch { return false; }
+    };
+    const [withVersion, without] = await Promise.all([servesModels(versioned), servesModels(entered)]);
+    if (without) return entered;
+    if (withVersion || entered === 'https://generativelanguage.googleapis.com') return versioned;
+    return entered;
   }
   const base = providerBaseUrl(api, baseUrl);
   if (api === ANTHROPIC || !isUrl(base)) return base;
@@ -80,6 +89,15 @@ const toModel = m => typeof m === 'string' ? { id: m } : {
 };
 const toModels = list => list.map(toModel).filter(m => m.id).sort((a, b) => a.id.localeCompare(b.id));
 
+// An empty array is a valid model list; an empty body, HTML login page, or unrelated JSON is not.
+async function googleModelPage(res) {
+  let body;
+  try { body = await res.json(); } catch { throw new Error('Expected a Google model list'); }
+  const models = Array.isArray(body) ? body : body?.models ?? body?.data;
+  if (!Array.isArray(models)) throw new Error('Expected a Google model list');
+  return { models, nextPageToken: body?.nextPageToken };
+}
+
 // Gemini lists its models a page at a time, among them models that only embed text or make images:
 // only the ones that generate content are kept.
 async function googleModels(base, apiKey, headers) {
@@ -92,9 +110,9 @@ async function googleModels(base, apiKey, headers) {
       const detail = await res.json().then(body => body?.error?.message, () => undefined); // e.g. "API key not valid."
       throw new Error(`${res.status} ${res.statusText} from ${base}/models${typeof detail === 'string' ? `: ${detail}` : ''}`);
     }
-    const body = await res.json();
-    models.push(...(Array.isArray(body) ? body : body.models ?? body.data ?? []));
-    token = body.nextPageToken;
+    const pageData = await googleModelPage(res);
+    models.push(...pageData.models);
+    token = pageData.nextPageToken;
     if (!token) break;
   }
   return models.filter(m => !Array.isArray(m?.supportedGenerationMethods) || m.supportedGenerationMethods.some(method => /generateContent$/i.test(method)));

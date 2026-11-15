@@ -1,7 +1,10 @@
 // Gemini models behind custom endpoints whose id doesn't name the model (Volcengine Ark's ep-… ids).
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { AssistantMessageEventStream } from '@earendil-works/pi-ai/compat';
+import http from 'node:http';
+import { once } from 'node:events';
+import { AssistantMessageEventStream, googleGenerativeAIApi } from '@earendil-works/pi-ai/compat';
+import { resolveProviderBaseUrl } from '../app/main/custom-providers.mjs';
 import { geminiAlias, geminiModel, geminiStream } from '../agent/pidesk-gemini.mjs';
 import pideskBridge from '../agent/pidesk-bridge.js';
 
@@ -82,6 +85,52 @@ test('a stream that breaks ends with an error under the endpoint id', async () =
   assert.equal(result.stopReason, 'error');
   assert.equal(result.model, 'ep-1');
   assert.match(result.errorMessage, /socket hang up/);
+});
+
+test('a generation-only Google gateway survives discovery and resumes after a tool result', async t => {
+  const requests = [];
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://local');
+    // This gateway returns 200/empty for unknown routes, including both model-list probes.
+    if (req.method !== 'POST' || url.pathname !== '/proxy/google/models/ep-1:streamGenerateContent') return res.end();
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    requests.push(JSON.parse(body));
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(`data: ${JSON.stringify({ candidates: [{ content: { role: 'model', parts: [{ text: 'File written.' }] }, finishReason: 'STOP' }], usageMetadata: { promptTokenCount: 100, candidatesTokenCount: 3, totalTokenCount: 103 } })}\n\n`);
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const baseUrl = `http://127.0.0.1:${server.address().port}/proxy/google`;
+  const model = geminiModel({ id: 'ep-1', name: 'Gemini 4 Argon', api: 'google-generative-ai', provider: 'gateway',
+    reasoning: true, input: ['text'], baseUrl, contextWindow: 1048576, maxTokens: 64000,
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } }, catalog);
+  const context = { messages: [
+    { role: 'user', content: 'Write an HTML file.', timestamp: 1 },
+    { role: 'assistant', api: model.api, provider: model.provider, model: model.id, stopReason: 'toolUse', timestamp: 2,
+      usage: { input: 100, output: 20, cacheRead: 0, cacheWrite: 0, totalTokens: 120, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+      content: [{ type: 'toolCall', id: 'call_write_1', name: 'write', arguments: { path: 'pelican.html', content: '<html></html>' }, thoughtSignature: 'c2lnbmF0dXJl' }] },
+    { role: 'toolResult', toolName: 'write', toolCallId: 'call_write_1', content: [{ type: 'text', text: 'Successfully wrote pelican.html' }], isError: false, timestamp: 3 },
+  ] };
+  const stream = geminiStream([model], { adapter: googleGenerativeAIApi, catalog });
+  const options = { apiKey: 'test-key', reasoning: 'high', maxRetries: 0 };
+  const wrong = await collect(stream({ ...model, baseUrl: `${baseUrl}/v1beta` }, context, options));
+  assert.equal(wrong.result.stopReason, 'error', 'empty streams are still errors, not fabricated successes');
+  assert.match(wrong.result.errorMessage, /without a finish reason/);
+  const resolved = await resolveProviderBaseUrl(model, options.apiKey);
+  assert.equal(resolved, baseUrl, 'inconclusive model discovery must not break the generation endpoint');
+  const { result } = await collect(stream({ ...model, baseUrl: resolved }, context, options));
+  assert.equal(result.stopReason, 'stop');
+  assert.equal(result.model, model.id);
+  assert.equal(result.content[0].text, 'File written.');
+  assert.equal(requests.length, 1, 'the continuation is sent once, without executing the tool again');
+  const [call, response] = requests[0].contents.slice(-2).map(c => c.parts[0]);
+  assert.equal(call.functionCall.id, 'call_write_1');
+  assert.equal(response.functionResponse.id, 'call_write_1');
+  assert.equal(call.thoughtSignature, 'c2lnbmF0dXJl');
+  assert.equal(requests[0].generationConfig.thinkingConfig.thinkingLevel, 'HIGH');
+  assert.equal(context.messages[1].model, model.id, 'the stored history is not mutated');
 });
 
 test('the bridge streams Google-protocol providers with such models itself, and registers the rest as before', t => {

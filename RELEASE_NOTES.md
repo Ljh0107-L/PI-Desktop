@@ -2,6 +2,14 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.22 — Preserve custom Google gateway URLs
+
+- **Stop guessing `/v1beta` for custom Google endpoints.** Saving a Google-compatible provider now changes its base URL only when the alternative returns a valid model list. Empty HTTP 200 responses, unrelated JSON, authentication failures and unreachable discovery endpoints no longer cause a generation-only gateway's working URL to be rewritten. When both paths list models, the address entered wins; Google's own API host retains its conventional `/v1beta` default.
+- **Prevent misleading stream failures from a wrong route.** Some gateways return HTTP 200 with no body for an unsupported `/v1beta` path, which surfaced as “Google stream ended without a finish reason”. Model discovery now rejects empty or malformed model-list responses instead of treating them as success. Genuine empty or interrupted generation streams still fail normally.
+- **Regression coverage.** Added route-discovery fixtures and a real Google-adapter HTTP test covering tool-result continuation, call IDs, thought signatures, thinking levels and preserved endpoint IDs. Replayed the affected conversation's model request against its gateway without executing returned tools.
+
+Previously saved provider URLs are not silently changed. If an earlier version appended an unsupported `/v1beta` to your custom gateway, remove that suffix once in **Settings → Models** after updating. Existing conversations and API keys are preserved.
+
 ## 0.2.21 — Large single-line file preview protection, inline context-menu downloads, and Markdown escaping
 
 - **Large and minified file preview protection.** `FilePane` now inspects text length and maximum line length before rendering: files over `150 KB` or with lines over `4,000` characters skip `highlight.js` DOM tokenization, long single-line files (such as multi-megabyte minified JSON traces) automatically wrap and open an initial `64 KB` slice (`300 KB` for large multi-line files) with a banner offering **Show … preview** and one-click **Download**, a toolbar line-wrap toggle, and suppressed background auto-refreshes for already-truncated previews unless manually refreshed.
