@@ -28,6 +28,8 @@ Add a provider under **Settings (bottom left) → Models** (built-in providers s
 
 For custom Google-compatible gateways, Pi keeps the base URL you enter unless a valid model list confirms that `/v1beta` is required. Empty HTTP 200 responses, unavailable model discovery, and network failures do not cause Pi to rewrite the gateway's path. Google's own API host still defaults to `/v1beta`.
 
+Gemini 4 Argon and Carbon stream tool arguments incrementally, including behind endpoint aliases such as Ark's `ep-…` IDs. Long file writes show progress while the model generates them, rather than waiting for one complete argument object. Partial calls are assembled before execution; an interrupted or unfinished response never executes its calls. Native continuation tokens resume the same response with its signatures and usage intact. The stream timeout measures inactivity between events, not the total generation time. Other Google models retain Pi's built-in adapter.
+
 ChatGPT subscription sign-in is no longer included. Existing subscription conversations remain readable; select another model explicitly to continue them. Removing the integration does not delete saved API keys, conversation history or encrypted legacy authorization data.
 
 ## How it works

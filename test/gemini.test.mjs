@@ -137,12 +137,17 @@ test('the bridge streams Google-protocol providers with such models itself, and 
   const saved = process.env.PIDESK_BOOT;
   t.after(() => { if (saved === undefined) delete process.env.PIDESK_BOOT; else process.env.PIDESK_BOOT = saved; });
   process.env.PIDESK_BOOT = JSON.stringify({ providers: [
+    { id: 'google', apiKey: 'builtin-key' },
+    { id: 'direct', api: 'google-generative-ai', models: [{ id: 'models/gemini-4-carbon', reasoning: true }] },
     { id: 'ark', name: 'Ark', api: 'google-generative-ai', baseUrl: 'https://ark.example.com/v1beta', apiKey: 'k1', models: [{ id: 'ep-20261104202510-wbfrp', name: 'gemini-4-argon', reasoning: true }] },
     { id: 'relay', name: 'Relay', api: 'google-generative-ai', baseUrl: 'https://relay.example.com/v1beta', apiKey: 'k2', models: [{ id: 'gemini-2.5-pro', reasoning: true }] },
     { id: 'gateway', name: 'Gateway', api: 'openai-completions', baseUrl: 'https://gw.example.com/v1', apiKey: 'k3', models: [{ id: 'ep-9', name: 'gemini-4-argon' }] },
   ] });
   const registered = new Map();
   pideskBridge({ on() {}, registerTool() {}, registerCommand() {}, registerProvider(id, config) { registered.set(id, config); } });
+  assert.equal(registered.get('google').models, undefined, 'built-in Google keeps its catalog');
+  assert.equal(typeof registered.get('google').streamSimple, 'function');
+  assert.equal(typeof registered.get('direct').streamSimple, 'function', 'canonical Carbon IDs also stream arguments');
   const ark = registered.get('ark');
   assert.equal(typeof ark.streamSimple, 'function');
   assert.deepEqual(ark.models[0].thinkingLevelMap, ARGON, 'Pi\'s catalog: Gemini 4 Argon accepts low, medium and high');

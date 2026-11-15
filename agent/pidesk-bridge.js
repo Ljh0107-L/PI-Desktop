@@ -373,9 +373,10 @@ export default function pideskBridge(pi) {
       if (apiKey) config.apiKey = literalKey(apiKey);
       if (models) config.models = models.map(m => modelDefaults(m, config.api));
       // Gemini models whose id doesn't say which Gemini they are: streamed under the model their name gives.
-      if (config.api === GEMINI_API && config.models?.some(m => geminiAlias(m))) {
-        config.models = config.models.map(m => geminiModel(m));
-        config.streamSimple = geminiStream(config.models);
+      if ((id === 'google' && !config.api) || (config.api === GEMINI_API && config.models?.some(m => geminiAlias(m) || /^(?:models\/)?gemini-4-(argon|carbon)(?:-|$)/i.test(m.id)))) {
+        config.api = GEMINI_API;
+        if (config.models) config.models = config.models.map(m => geminiModel(m));
+        config.streamSimple = geminiStream(config.models ?? []);
       }
       pi.registerProvider(id, config);
     }

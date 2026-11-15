@@ -2,6 +2,13 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.23 — Native Gemini streaming tool arguments and continuation
+
+- **Incremental tool arguments for Gemini 4 Argon and Carbon.** Long file writes now stream their arguments instead of waiting for one complete object. Supports built-in Google, custom endpoint aliases, and `models/…` IDs; other Google models retain Pi's existing adapter.
+- **Safe completion and retry.** Partial arguments are assembled across streamed fragments and continuation requests. Tools execute only after the full response finishes successfully; interrupted, cancelled, refused or truncated calls never execute. Retrying a broken response does not repeat tools that already ran.
+- **Native continuation and signed history.** Resume responses using Google's continuation tokens while preserving tool-call IDs, thought-signature boundaries and per-hop usage. Timeouts measure inactivity rather than total generation duration. Bounded error-body reads preserve safe HTTP/context-limit classification without hanging on incorrect Content-Length headers.
+- **Regression coverage.** Added native Google HTTP fixtures and a real staged-extension Pi tool-loop test. The related protocol, recovery, startup, metrics, speed and subagent suites passed on an isolated SSH host before CI.
+
 ## 0.2.22 — Preserve custom Google gateway URLs
 
 - **Stop guessing `/v1beta` for custom Google endpoints.** Saving a Google-compatible provider now changes its base URL only when the alternative returns a valid model list. Empty HTTP 200 responses, unrelated JSON, authentication failures and unreachable discovery endpoints no longer cause a generation-only gateway's working URL to be rewritten. When both paths list models, the address entered wins; Google's own API host retains its conventional `/v1beta` default.

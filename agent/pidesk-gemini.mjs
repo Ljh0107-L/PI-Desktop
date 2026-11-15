@@ -10,6 +10,7 @@
 // id, and so does the reply, so the conversation keeps the model it was started with.
 import { AssistantMessageEventStream, getApiProvider } from '@earendil-works/pi-ai/compat';
 import { getBuiltinModel } from '@earendil-works/pi-ai/providers/all';
+import { streamGoogle, streamsGoogleArguments } from './pidesk-google.mjs';
 
 export const GEMINI_API = 'google-generative-ai';
 const catalogModel = id => getBuiltinModel('google', id);
@@ -43,9 +44,10 @@ export function geminiModel(model, catalog = catalogModel) {
 const emptyUsage = () => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } });
 
 // A provider's streamSimple (Pi routes its models' requests here) that sends each aliased model to the
-// Gemini adapter under its alias: the earlier replies of this model under the alias too (they carry
+// Gemini adapter under its alias (Argon/Carbon use the native incremental adapter): earlier replies under the alias too (they carry
 // its thought signatures), the request body and the reply with the endpoint's id.
-export function geminiStream(models, { adapter = () => getApiProvider(GEMINI_API), catalog = catalogModel } = {}) {
+export function geminiStream(models, { adapter = () => ({ streamSimple: (model, context, options) =>
+  streamsGoogleArguments(model) ? streamGoogle(model, context, options) : getApiProvider(GEMINI_API).streamSimple(model, context, options) }), catalog = catalogModel } = {}) {
   const aliases = new Map(models.map(m => [m.id, geminiAlias(m, catalog)]).filter(([, alias]) => alias));
   return (model, context, options) => {
     const gemini = adapter();
