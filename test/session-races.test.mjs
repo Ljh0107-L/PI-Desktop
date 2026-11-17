@@ -129,3 +129,14 @@ test('navigation history adopts the final session ID instead of retaining a pend
   assert.equal(store.getState().history.at(-1).activeId, 'created');
   store.goBack(); assert.equal(store.getState().activeId, 'created');
 });
+
+for (const aborted of [false, true]) test(`compaction failures are visible unless cancelled (aborted: ${aborted})`, async () => {
+  reset(); store.set({ notices: [] });
+  invoke = method => Promise.resolve(method === 'historyPage' ? page() : null);
+  event('a', { type: 'compaction_start', reason: 'threshold' });
+  assert.equal(store.getState().transcripts.a.compacting, true);
+  event('a', { type: 'compaction_end', reason: 'threshold', aborted, errorMessage: 'Auto-compaction failed: empty response' });
+  assert.equal(store.getState().transcripts.a.compacting, false);
+  assert.deepEqual(store.getState().notices.map(n => [n.level, n.message]), aborted ? [] : [['error', 'Auto-compaction failed: empty response']]);
+  await new Promise(resolve => setImmediate(resolve));
+});

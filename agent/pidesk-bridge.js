@@ -33,6 +33,7 @@ import { createBashToolDefinition } from '@earendil-works/pi-coding-agent';
 import { createSubagentTool, isActiveAgent } from './pidesk-subagent.mjs';
 import { createSpeed } from './pidesk-speed.mjs';
 import { registerSessionTools } from './pidesk-session-tools.mjs';
+import { OPENAI_APIS, openaiStream } from './pidesk-openai.mjs';
 import { GEMINI_API, geminiAlias, geminiModel, geminiStream } from './pidesk-gemini.mjs';
 import { AWAY_ANSWER, createUltra, parseVerdict, reviewBrief } from './pidesk-ultra.mjs';
 
@@ -377,6 +378,13 @@ export default function pideskBridge(pi) {
         config.api = GEMINI_API;
         if (config.models) config.models = config.models.map(m => geminiModel(m));
         config.streamSimple = geminiStream(config.models ?? []);
+      }
+      // Infer only a uniform, explicit model API; never reroute models that rely on catalog defaults.
+      const modelApi = config.models?.length && config.models.every(m => m.api === config.models[0].api) ? config.models[0].api : undefined;
+      const api = config.api ?? modelApi ?? (id === 'openai' && !config.models ? 'openai-responses' : undefined);
+      if (OPENAI_APIS.includes(api)) {
+        config.api = api;
+        config.streamSimple = openaiStream;
       }
       pi.registerProvider(id, config);
     }

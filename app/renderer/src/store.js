@@ -127,7 +127,10 @@ window.pidesk.subscribe(({ channel, payload }) => {
           // Update it on the same boundary as the usage/TPS card.
           scheduleStats(payload.id);
         }
-        if (payload.event.type === 'compaction_end') { reloadTranscript(payload.id); refreshStats(payload.id); } } // history now starts with the summary
+        if (payload.event.type === 'compaction_end') {
+          if (payload.event.errorMessage && !payload.event.aborted) notify(payload.event.errorMessage, 'error');
+          reloadTranscript(payload.id); refreshStats(payload.id);
+        } }
       if (payload.event.type === 'agent_settled') {
         if (state.activeId === payload.id && !transcriptOf(payload.id).history?.viewingOlder) reloadTranscript(payload.id);
         scheduleStats(payload.id);

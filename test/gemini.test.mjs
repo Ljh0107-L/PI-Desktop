@@ -153,5 +153,5 @@ test('the bridge streams Google-protocol providers with such models itself, and 
   assert.deepEqual(ark.models[0].thinkingLevelMap, ARGON, 'Pi\'s catalog: Gemini 4 Argon accepts low, medium and high');
   assert.equal(ark.models[0].id, 'ep-20261104202510-wbfrp', 'still registered under the endpoint id');
   assert.equal(registered.get('relay').streamSimple, undefined);
-  assert.equal(registered.get('gateway').streamSimple, undefined, 'only the Google protocol');
+  assert.equal(typeof registered.get('gateway').streamSimple, 'function', 'OpenAI uses its own empty-response guard');
 });

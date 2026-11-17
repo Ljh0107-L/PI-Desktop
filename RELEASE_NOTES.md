@@ -2,6 +2,14 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.24 — Preserve context when OpenAI-compatible compaction returns no text
+
+- **Reject empty successful responses.** OpenAI Responses and Chat Completions gateways that finish with no answer text, only whitespace, or only reasoning now report an error instead of letting Compact save an empty summary and remove older messages from model context. Valid tool calls remain supported.
+- **Keep failed compaction recoverable.** Manual and automatic compaction retain the existing context when summarization fails. Compaction errors are shown in the desktop; user cancellation stays quiet. A later retry can complete normally.
+- **Regression coverage.** Real Pi RPC tests against local mock endpoints cover both OpenAI protocols, empty and reasoning-only summaries, whitespace, truncation, automatic compaction, retries, and tool availability after successful compaction. The local backend suite passed 487 tests with 8 environment-dependent skips; the renderer build also passed.
+
+This release does not change compaction's reasoning effort, output budget, or timeout behavior. Existing conversation files are not rewritten to repair earlier empty summaries.
+
 ## 0.2.23 — Native Gemini streaming tool arguments and continuation
 
 - **Incremental tool arguments for Gemini 4 Argon and Carbon.** Long file writes now stream their arguments instead of waiting for one complete object. Supports built-in Google, custom endpoint aliases, and `models/…` IDs; other Google models retain Pi's existing adapter.
