@@ -2,6 +2,14 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.25 — Compact inherits OpenAI Fast and Ultrafast
+
+- **Use the conversation's selected speed for Compact.** OpenAI summary requests now inherit Fast or Ultrafast instead of silently omitting the service tier. This covers manual and automatic compaction, both requests in split-turn summaries, and speed changes made after earlier replies.
+- **Keep speed handling and accounting consistent.** Summaries share the conversation's rate-limit cooldown, use request-local accounting, and honor the provider's reported tier. Existing caller-managed tiers are preserved so ordinary replies and subagents are not charged twice. Chat Completions Fast usage now receives its missing 2× price adjustment.
+- **Regression coverage.** Real Pi RPC tests against local HTTP fixtures verify transmitted tiers, split summaries, configuration changes, rate-limit fallback, cancellation, persisted summary costs, and unchanged ordinary reply accounting. The full local backend suite passed 498 tests with 8 environment-dependent skips; the renderer build also passed.
+
+This release does not change compaction's reasoning effort, output budget, or timeout behavior. The other issues identified during the design review are not included in this release.
+
 ## 0.2.24 — Preserve context when OpenAI-compatible compaction returns no text
 
 - **Reject empty successful responses.** OpenAI Responses and Chat Completions gateways that finish with no answer text, only whitespace, or only reasoning now report an error instead of letting Compact save an empty summary and remove older messages from model context. Valid tool calls remain supported.

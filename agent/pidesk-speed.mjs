@@ -53,10 +53,10 @@ export function speedUsed(data) {
   return tier === 'priority' ? 'fast' : tier === 'default' ? 'standard' : tier;
 }
 
-// The factor on the standard-rate cost Pi computed. pi-ai already prices OpenAI's Fast mode from
-// the response's service tier; it knows neither Ultrafast nor Anthropic's fast mode.
+// The factor on the standard-rate cost Pi computed. pi-ai already prices Responses Fast from
+// the service tier; Chat Completions Fast, Ultrafast and Anthropic fast need scaling here.
 export function extraCost(model, used) {
-  if (model?.api === 'anthropic-messages' && used === 'fast') return 2;
+  if (['anthropic-messages', 'openai-completions'].includes(model?.api) && used === 'fast') return 2;
   if (model?.api?.startsWith('openai-') && used === 'ultrafast') return 6;
   return 1;
 }

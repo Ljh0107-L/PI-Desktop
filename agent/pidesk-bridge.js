@@ -364,6 +364,8 @@ export default function pideskBridge(pi) {
     try { globalThis[BOOT] = JSON.parse(raw); } catch { process.stderr.write('pidesk: ignoring malformed boot record\n'); }
   }
   const boot = globalThis[BOOT] ?? {};
+  // Share one live speed/cooldown controller with agent turns, summaries and subagents.
+  const speed = registerSpeed(pi, createSpeed({ speed: boot.config?.speed }));
 
   // Old subscription boot records must not register a removed provider or fall back to an API key.
   const register = providers => {
@@ -384,14 +386,12 @@ export default function pideskBridge(pi) {
       const api = config.api ?? modelApi ?? (id === 'openai' && !config.models ? 'openai-responses' : undefined);
       if (OPENAI_APIS.includes(api)) {
         config.api = api;
-        config.streamSimple = openaiStream;
+        config.streamSimple = (model, context, options) => openaiStream(model, context, options, speed);
       }
       pi.registerProvider(id, config);
     }
   };
   register(boot.providers);
-  // Settings sent with the boot record and by /pidesk-config: the conversation's speed.
-  const speed = registerSpeed(pi, createSpeed({ speed: boot.config?.speed }));
 
   // ---------------------------------------------------------------- agents
   // Agents run inside this Pi. Their live state reaches the desktop as a status line; reports reach

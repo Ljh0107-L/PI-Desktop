@@ -4,6 +4,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { AssistantMessageEventStream } from '@earendil-works/pi-ai';
+import { getApiProvider, registerApiProvider } from '@earendil-works/pi-ai/compat';
+import { openaiStream } from '../agent/pidesk-openai.mjs';
 import { Type } from 'typebox';
 import { ANTHROPIC_FAST_BETA, SPEED_COOLDOWN_MS, createSpeed, effectiveSpeed, speedOptions, speedUsed, withSpeed } from '../agent/pidesk-speed.mjs';
 import { createSubagentTool } from '../agent/pidesk-subagent.mjs';
@@ -60,7 +62,7 @@ test('the speed providers report, from their stream events', () => {
   assert.equal(speedUsed({ type: 'content_block_delta' }), null);
 });
 
-test('a reply records its speed and is priced at it; pi-ai already prices OpenAI Fast', () => {
+test('a reply records its speed and is priced at it; pi-ai already prices Responses Fast', () => {
   const speed = createSpeed({ speed: 'fast' });
   const anthropic = speed.request(opus, { model: 'claude-opus-5-5' });
   assert.equal(anthropic.payload.speed, 'fast');
@@ -71,6 +73,10 @@ test('a reply records its speed and is priced at it; pi-ai already prices OpenAI
   const openai = speed.request(sol, { model: 'gpt-6.1-sol' });
   openai.event({ type: 'response.completed', response: { service_tier: 'fast' } });
   assert.deepEqual(openai.finish(reply(sol)).usage.cost, cost(), 'unchanged: pi-ai priced it from service_tier');
+  const chatModel = { ...sol, api: 'openai-completions' };
+  const chat = speed.request(chatModel, { model: sol.id });
+  chat.event({ service_tier: 'fast' });
+  assert.equal(chat.finish(reply(chatModel)).usage.cost.total, 3.75 * 2, 'Chat Completions does not price the fast tier itself');
   speed.set('ultrafast');
   const ultra = speed.request(sol, { model: 'gpt-6.1-sol' });
   ultra.event({ type: 'response.completed', response: { service_tier: 'ultrafast' } });
@@ -146,6 +152,62 @@ test('the bridge starts at the boot record speed and follows /pidesk-config', ()
   const plain = request({ model: 'gpt-6.1-sol' }, sol);
   assert.equal(plain.service_tier, undefined);
   assert.equal(end(reply(sol)).__speed, undefined, 'nothing recorded at standard speed');
+});
+
+function installOpenaiAdapter(t, respond) {
+  const original = getApiProvider(sol.api);
+  t.after(() => registerApiProvider(original));
+  registerApiProvider({ api: sol.api, stream: original.stream, streamSimple(model, context, options) {
+    const stream = new AssistantMessageEventStream();
+    queueMicrotask(async () => {
+      try {
+        const payload = (await options.onPayload?.({ model: model.id }, model)) ?? { model: model.id };
+        await respond({ model, context, options, payload, stream });
+      } catch (error) { stream.push({ type: 'error', reason: 'error', error: reply(model, { stopReason: 'error', errorMessage: error.message }) }); }
+      finally { stream.end(); }
+    });
+    return stream;
+  } });
+}
+
+test('background OpenAI requests compose hooks and keep concurrent speed accounting separate', async t => {
+  const speed = createSpeed({ speed: 'ultrafast' }), bodies = [], observed = [];
+  let firstStarted, releaseFirst;
+  const started = new Promise(resolve => { firstStarted = resolve; });
+  const release = new Promise(resolve => { releaseFirst = resolve; });
+  installOpenaiAdapter(t, async ({ context, options, payload, stream }) => {
+    bodies.push(payload);
+    await options.onResponse?.({ status: 200 });
+    await options.onProviderStreamEvent?.({ response: { service_tier: context.first ? 'ultrafast' : 'default' } }, sol);
+    if (context.first) { firstStarted(); await release; }
+    stream.push({ type: 'done', reason: 'stop', message: reply(sol) });
+  });
+  const options = {
+    onPayload: payload => ({ ...payload, marker: 'caller' }),
+    onResponse: response => { observed.push(response.status); },
+    onProviderStreamEvent: event => { observed.push(event.response.service_tier); },
+  };
+  const first = openaiStream(sol, { first: true }, options, speed).result();
+  await started;
+  const second = await openaiStream(sol, { first: false }, options, speed).result();
+  releaseFirst();
+  const result = await first;
+  assert.deepEqual(bodies, Array(2).fill({ model: sol.id, marker: 'caller', service_tier: 'ultrafast' }));
+  assert.deepEqual(observed, [200, 'ultrafast', 200, 'default']);
+  assert.equal(result.__speed.used, 'ultrafast'); assert.equal(result.usage.cost.total, 3.75 * 6);
+  assert.equal(second.__speed.used, 'standard'); assert.equal(second.usage.cost.total, 3.75);
+});
+
+test('caller-managed OpenAI tiers and pricing are not overridden or applied twice', async t => {
+  const speed = createSpeed({ speed: 'ultrafast' });
+  installOpenaiAdapter(t, async ({ payload, options, stream }) => {
+    assert.equal(payload.service_tier, 'fast');
+    await options.onProviderStreamEvent?.({ response: { service_tier: 'fast' } }, sol);
+    stream.push({ type: 'done', reason: 'stop', message: reply(sol) });
+  });
+  const result = await openaiStream(sol, {}, { onPayload: payload => ({ ...payload, service_tier: 'fast' }) }, speed).result();
+  assert.equal(result.__speed, undefined, 'the caller owns this request');
+  assert.deepEqual(result.usage.cost, cost());
 });
 
 test("agents' requests go at the conversation's speed and are priced at it", async t => {
