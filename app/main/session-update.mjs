@@ -1,7 +1,7 @@
 // An in-app update is different from a normal quit/reconnect: the new desktop must
 // replace the live session processes, not attach to code they loaded before the update.
 import { randomUUID } from 'node:crypto';
-import { readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { isRetiredProvider } from '../../core/retired-providers.mjs';
 
@@ -23,11 +23,14 @@ export function loadSessionUpdate(dir, version, { legacyCache } = {}) {
     if (plan?.version === version && [plan.reopen, plan.done, plan.only ?? []].every(ids => Array.isArray(ids) && ids.every(id => typeof id === 'string'))) return plan;
   } catch (error) { if (error.code !== 'ENOENT') throw error; }
   // Before this feature, the updater moved the only .app out of updates/<version>/app.
-  // An empty staging directory at that exact version signals a successful in-app update.
+  // An empty staging directory with the verified ZIP already removed (at that exact
+  // version) signals a successful in-app update, not an interrupted extraction.
   // Old builds didn't record which local sessions were live before quitting, so don't
   // guess from history; only restart sessions we can still see on their relays.
   if (!legacyCache) return null;
-  try { if (readdirSync(join(legacyCache, version, 'app')).length) return null; }
+  const staged = join(legacyCache, version);
+  if (existsSync(join(staged, 'update.zip'))) return null;
+  try { if (readdirSync(join(staged, 'app')).length) return null; }
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
   const plan = { version, reopen: [], done: [] };
   saveSessionUpdate(dir, plan);

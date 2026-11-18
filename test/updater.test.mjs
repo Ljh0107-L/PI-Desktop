@@ -200,6 +200,10 @@ test('the old updater leaves an empty staging directory; a newer updater writes 
   mkdirSync(join(stage, 'Pi Desktop.app'), { recursive: true });
   assert.equal(loadSessionUpdate(dir, '0.2.29', { legacyCache }), null, 'downloaded is not installed');
   rmSync(join(stage, 'Pi Desktop.app'), { recursive: true });
+  const incomplete = join(legacyCache, '0.2.29', 'update.zip');
+  writeFileSync(incomplete, 'unextracted');
+  assert.equal(loadSessionUpdate(dir, '0.2.29', { legacyCache }), null, 'a failed extraction is not installed');
+  rmSync(incomplete);
   const plan = loadSessionUpdate(dir, '0.2.29', { legacyCache });
   assert.deepEqual(plan, { version: '0.2.29', reopen: [], done: [] }, 'cannot guess which local sessions were live');
   rmSync(legacyCache, { recursive: true });
