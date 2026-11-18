@@ -2,6 +2,10 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.30 — Dismiss the Updated badge
+
+- Clicking **OK** on a successful session restart report now clears the sidebar's **Updated** badge. The report is still available from **Session Update Report…**, and **Update issues** stays visible when a restart needs attention.
+
 ## 0.2.29 — Restart running conversations after Update
 
 - **Refresh running sessions.** Confirming **Update** restarts live Pi and Claude Code conversations on this Mac and enabled SSH connections so the new processes load the updated code. Conversation history, folders, and model settings are kept. In-flight work may be interrupted; servers are not rebooted. Normal quit and reconnect still leave SSH sessions running.

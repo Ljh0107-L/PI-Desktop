@@ -123,7 +123,7 @@ export function Sidebar() {
         </div>}
         {update?.state === 'ready' && sessionUpdate?.state !== 'restarting' && <button className="update-button" onClick={() => api('installUpdate').catch(updateError)} title={`Update to ${update.version} and restart running conversations`}><Icon name="download" size={13} /> Update</button>}
         {(update?.state === 'installing' || sessionUpdate?.state === 'restarting') && <span className="update-button downloading" role="status" title="Restarting running conversations"><Spinner size={12} /> Restarting…</span>}
-        {sessionUpdate?.state === 'complete' && !['ready', 'downloading', 'installing'].includes(update?.state) && <button className="update-button" onClick={() => api('showSessionUpdateReport').catch(updateError)} title={`${sessionUpdate.version} · ${sessionUpdate.restarted} restarted · ${sessionUpdate.failures} issues`}>
+        {sessionUpdate?.state === 'complete' && !sessionUpdate.acknowledged && !['ready', 'downloading', 'installing'].includes(update?.state) && <button className="update-button" onClick={() => api('showSessionUpdateReport').catch(updateError)} title={`${sessionUpdate.version} · ${sessionUpdate.restarted} restarted · ${sessionUpdate.failures} issues`}>
           {sessionUpdate.failures ? 'Update issues' : 'Updated'}
         </button>}
       </div>

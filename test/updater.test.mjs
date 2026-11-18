@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { stringify } from 'yaml';
 import { Updater } from '../app/main/updater.mjs';
-import { clearSessionUpdate, loadSessionUpdate, planSessionUpdate, restartUpdatedSessions, saveSessionUpdate } from '../app/main/session-update.mjs';
+import { clearSessionUpdate, loadSessionUpdate, planSessionUpdate, restartUpdatedSessions, reviewSessionUpdate, saveSessionUpdate } from '../app/main/session-update.mjs';
 import { MAX_MANIFEST_BYTES, parseUpdateManifest, UPDATE_MANIFEST_URL } from '../core/update-manifest.mjs';
 
 const checksum = data => createHash('sha512').update(data).digest('base64');
@@ -272,6 +272,25 @@ test('update reopens saved local history and restarts only live SSH sessions; re
   assert.deepEqual(retried.restarted.map(r => r.id), ['remote-live']);
   assert.deepEqual(retried.failures, []);
   assert.deepEqual(f.trace.filter(([op]) => op === 'stop' || op === 'start'), [['stop', 'remote-live'], ['start', 'remote-live']]);
+});
+
+test('only acknowledging a successful report dismisses its badge; failed restarts can still be retried', async () => {
+  const success = { version: '0.2.30', restarted: [{ environment: 'GPU', title: 'Project' }], failures: [] };
+  assert.equal(await reviewSessionUpdate(success, async options => {
+    assert.deepEqual(options.buttons, ['OK']);
+    assert.match(options.detail, /GPU — Project/);
+    return { response: 0 };
+  }), 'acknowledge');
+  assert.equal(await reviewSessionUpdate(success, async () => ({ response: -1 })), undefined);
+
+  const failure = { ...success, failures: [{ environment: 'Down', message: 'SSH timeout' }], retryPlan: { only: ['session-to-retry'] } };
+  assert.equal(await reviewSessionUpdate(failure, async options => {
+    assert.deepEqual(options.buttons, ['OK', 'Retry Restarts']);
+    assert.match(options.detail, /Down: SSH timeout/);
+    return { response: 0 };
+  }), undefined, 'OK must not hide the retry entry point');
+  assert.equal(await reviewSessionUpdate(failure, async () => ({ response: 1 })), 'retry');
+  assert.equal(await reviewSessionUpdate({ ...failure, retryPlan: undefined }, async () => ({ response: 0 })), undefined);
 });
 
 test('quitting after a remote stop keeps that session in the persisted reopen set', async () => {

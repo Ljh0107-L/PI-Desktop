@@ -103,3 +103,18 @@ export async function restartUpdatedSessions(manager, plan, { checkpoint, cancel
   }));
   return { version: plan.version, restarted, failures, skipResume, failedIds, retryPlan: { ...snapshot(), only: [...failedIds] } };
 }
+
+export async function reviewSessionUpdate(result, showMessageBox) {
+  const hasIssues = result.failures.length > 0, canRetry = !!result.retryPlan?.only.length;
+  const lines = [
+    ...result.restarted.map(({ environment, title }) => `✓ ${environment} — ${title ?? 'Conversation'}`),
+    ...result.failures.map(({ environment, title, message }) => `${environment}${title ? ` — ${title}` : ''}: ${message}`),
+  ];
+  const { response } = await showMessageBox({
+    type: hasIssues ? 'warning' : 'info', buttons: canRetry ? ['OK', 'Retry Restarts'] : ['OK'],
+    message: `Pi Desktop ${result.version} installed · ${result.restarted.length} conversations restarted`,
+    detail: lines.join('\n\n') || 'No running conversations needed to be restarted.',
+  });
+  if (response === 0 && !hasIssues) return 'acknowledge';
+  if (response === 1 && canRetry) return 'retry';
+}

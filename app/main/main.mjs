@@ -13,7 +13,7 @@ import { shellQuote } from '../../core/transports.mjs';
 import { SessionManager } from './session-manager.mjs';
 import { Terminals } from './terminals.mjs';
 import { Updater } from './updater.mjs';
-import { clearSessionUpdate, loadSessionUpdate, planSessionUpdate, restartUpdatedSessions, saveSessionUpdate } from './session-update.mjs';
+import { clearSessionUpdate, loadSessionUpdate, planSessionUpdate, restartUpdatedSessions, reviewSessionUpdate, saveSessionUpdate } from './session-update.mjs';
 import { Store } from './store.mjs';
 import { UsageLedger } from './usage.mjs';
 import { stageExtensions } from './extensions.mjs';
@@ -280,17 +280,13 @@ const api = {
     }
     const recovery = sessionRecovery, result = await recovery;
     if (!result) return;
-    const canRetry = !!result.retryPlan?.only.length;
-    const lines = [
-      ...result.restarted.map(({ environment, title }) => `✓ ${environment} — ${title ?? 'Conversation'}`),
-      ...result.failures.map(({ environment, title, message }) => `${environment}${title ? ` — ${title}` : ''}: ${message}`),
-    ];
-    const { response } = await dialog.showMessageBox(window, {
-      type: result.failures.length ? 'warning' : 'info', buttons: canRetry ? ['OK', 'Retry Restarts'] : ['OK'],
-      message: `Pi Desktop ${result.version} installed · ${result.restarted.length} conversations restarted`,
-      detail: lines.join('\n\n') || 'No running conversations needed to be restarted.',
-    });
-    if (canRetry && response === 1 && recovery === sessionRecovery && !quitting) {
+    const action = await reviewSessionUpdate(result, options => dialog.showMessageBox(window, options));
+    if (recovery !== sessionRecovery || quitting) return;
+    if (action === 'acknowledge' && !sessionUpdate.acknowledged) {
+      // Hide just the badge. Session Update Report… can still open this report.
+      sessionUpdate = { ...sessionUpdate, acknowledged: true };
+      send('session-update', sessionUpdate);
+    } else if (action === 'retry') {
       saveSessionUpdate(app.getPath('userData'), result.retryPlan);
       recoverUpdatedSessions(result.retryPlan, result.restarted);
     }

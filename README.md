@@ -10,7 +10,7 @@ A Claude Desktop–style app for the [Pi](https://github.com/earendil-works/pi) 
 
 Download the `.dmg` for your Mac (Apple Silicon `arm64` or Intel `x64`) from [Releases](https://github.com/Ljh0107-L/PI-Desktop/releases/latest) and drag Pi Desktop to Applications. The app is ad-hoc signed rather than notarized, so the first time **right-click it → Open** (or run `xattr -dr com.apple.quarantine "/Applications/Pi Desktop.app"`). After that it updates itself: when a new release is downloaded, an **Update** button appears next to Settings.
 
-When you confirm **Update** (0.2.29 and later), the new app restarts running conversations on this Mac and enabled SSH connections using their existing history and model settings. In-flight replies, tools, and compactions may be interrupted. Offline or archived conversations are not started. The sidebar shows **Updated** or **Update issues** with a restart report and a retry for failures. An ordinary quit or reconnect still leaves SSH sessions running.
+When you confirm **Update** (0.2.29 and later), the new app restarts running conversations on this Mac and enabled SSH connections using their existing history and model settings. In-flight replies, tools, and compactions may be interrupted. Offline or archived conversations are not started. The sidebar shows **Updated** until you acknowledge the report, or **Update issues** with a retry for failures. The report remains available in **Session Update Report…**. An ordinary quit or reconnect still leaves SSH sessions running.
 
 ## Updates behind a shared company proxy
 
