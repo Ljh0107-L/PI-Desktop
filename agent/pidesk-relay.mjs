@@ -5,6 +5,7 @@
 //   node pidesk-relay.mjs daemon   the long-lived owner of Pi processes (started on demand, detached)
 //   node pidesk-relay.mjs list     JSON summary of sessions
 //   node pidesk-relay.mjs stop ID  terminate a session's Pi process and its tools
+//   node pidesk-relay.mjs stop-for-update ID  stop a session for replacement, checking idle legacy processes
 //   node pidesk-relay.mjs stop-compatible ID  administrative stop, even on a legacy relay
 //   node pidesk-relay.mjs shutdown terminate every session and both daemons (local app quit only)
 //
@@ -60,7 +61,7 @@ const reply = (socket, value) => {
 // Pi's bash tool and background jobs create their own groups. Capture those groups by
 // ancestry before sending EOF, then keep following them even after the leader exits.
 const exec = promisify(execFile);
-async function readProcesses() {
+async function readProcesses(verify = false) {
   if (process.platform === 'linux') {
     // Works on minimal Linux hosts too (BusyBox ps may not expose process group IDs).
     const rows = [];
@@ -71,14 +72,19 @@ async function readProcesses() {
         const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
         const [state, parent, group] = fields;
         // starttime is field 22; fields here start at field 3 (state).
+        if (verify && (!state || ![parent, group, fields[19]].every(n => /^\d+$/.test(n)))) throw new Error('Unexpected process table format');
         rows.push({ pid: Number(entry), parent: Number(parent), group: Number(group), state, started: fields[19] });
       } catch (error) {
-        if (!['ENOENT', 'ESRCH', 'EACCES', 'EPERM'].includes(error.code)) throw error;
+        if (['ENOENT', 'ESRCH'].includes(error.code)) continue;
+        if (verify || !['EACCES', 'EPERM'].includes(error.code)) throw error;
       }
     }
     return rows;
   }
-  const { stdout } = await exec('/bin/ps', ['-A', '-o', 'pid=,ppid=,pgid=,stat=,lstart='], { timeout: 1000, maxBuffer: 4 * 1024 * 1024 });
+  const { stdout } = await exec('/bin/ps', ['-A', '-o', 'pid=,ppid=,pgid=,stat=,lstart='], {
+    timeout: 1000, maxBuffer: 4 * 1024 * 1024,
+    ...(verify ? { env: { ...process.env, LC_ALL: 'C', TZ: 'UTC' } } : {}),
+  });
   return stdout.trim().split('\n').map(line => {
     const [pid, parent, group, state, ...started] = line.trim().split(/\s+/);
     if (!state || !started.length || ![pid, parent, group].every(n => /^\d+$/.test(n))) throw new Error('Unexpected process table format');
@@ -502,10 +508,132 @@ async function stopForCli(sessionId, compatible) {
   }
   // Both verbs require tree-stop acknowledgement from a running v2 daemon. Routine
   // cleanup of a saved conversation must also work when neither daemon is running.
-  const reply = await request(SOCKET, { op: 'stop-tree', sessionId }, 'stopped', compatible ? OFFLINE : []);
+  return stopTree(sessionId, compatible ? OFFLINE : []);
+}
+
+async function stopTree(sessionId, absent = []) {
+  const reply = await request(SOCKET, { op: 'stop-tree', sessionId }, 'stopped', absent);
   if (!reply) return { relay: 'stopped', found: false, daemon: false };
   if (typeof reply.found !== 'boolean') throw new Error('Invalid process-tree stop acknowledgement');
   return reply;
+}
+
+const processIsLive = p => !!p && !/^[ZXx]/.test(p.state);
+const sameLegacySession = (a, b) => a?.pid === b.pid && a.startedAt === b.startedAt;
+
+async function verifyLegacyStart(session, leader) {
+  let bornAt;
+  if (process.platform === 'linux') {
+    const { stdout } = await exec('getconf', ['CLK_TCK'], { timeout: 1000, maxBuffer: 1024 });
+    const ticks = Number(stdout);
+    const boot = readFileSync('/proc/stat', 'utf8').match(/^btime (\d+)$/m);
+    bornAt = Number.isSafeInteger(ticks) && ticks > 0 && boot
+      ? Number(boot[1]) * 1000 + Math.floor(Number(leader.started) * 1000 / ticks) : NaN;
+  } else bornAt = Date.parse(`${leader.started} UTC`);
+  // The relay timestamps just after spawn; ps and Linux btime are only second-precise.
+  // The kernel start token, not this rounded time, is compared across snapshots below.
+  if (!Number.isFinite(bornAt) || session.startedAt < bornAt || session.startedAt - bornAt >= 2000) {
+    throw new Error(`Could not verify legacy session ${session.id} PID ${session.pid} start time; retry Update after it exits`);
+  }
+}
+
+function checkLegacyTools(session, rows, ownGroup) {
+  const children = new Map();
+  const blocked = p => {
+    throw new Error(`Legacy session ${session.id} has a running tool process (PID ${p.pid}); wait for it to finish or stop the tool, then retry Update`);
+  };
+  for (const p of rows) {
+    if (ownGroup && p.group === session.pid && p.pid !== session.pid && processIsLive(p)) blocked(p);
+    if (!children.has(p.parent)) children.set(p.parent, []);
+    children.get(p.parent).push(p);
+  }
+  // Older relays shared their group with every session. Check ancestry, not that
+  // shared PGID, and include descendants that have started groups of their own.
+  const seen = new Set([session.pid]), pending = [session.pid];
+  while (pending.length) for (const p of children.get(pending.pop()) ?? []) {
+    if (seen.has(p.pid)) continue;
+    if (processIsLive(p)) blocked(p);
+    seen.add(p.pid);
+    pending.push(p.pid);
+  }
+}
+
+function legacyLeader(rows, pid) {
+  const leader = rows.find(p => p.pid === pid);
+  if (!leader) {
+    // A process missing from the scan is not proof that it already exited.
+    try { process.kill(pid, 0); }
+    catch (error) { if (error.code === 'ESRCH') return; throw error; }
+    throw new Error(`Could not verify legacy session PID ${pid} in the process table`);
+  }
+  return leader;
+}
+
+async function stopForUpdate(sessionId) {
+  if (typeof sessionId !== 'string' || !sessionId) throw new Error('Invalid session id');
+  const readOwners = async () => {
+    const [legacy, current] = await Promise.all([listLegacy(), listOn(SOCKET)]);
+    const live = list => {
+      const matches = list?.sessions.filter(s => s.id === sessionId) ?? [];
+      if (matches.length > 1) throw new Error('Relay listed duplicate session identities; refusing an ambiguous stop');
+      return matches[0]?.alive ? matches[0] : null;
+    };
+    return { legacy: live(legacy), current: live(current), daemon: !!(legacy || current) };
+  };
+  const ambiguous = () => new Error('Session is live in both relay daemons; refusing an ambiguous stop');
+  const noSession = { relay: 'stopped', found: false };
+  const { legacy, current, daemon } = await readOwners();
+  if (legacy && current) throw ambiguous();
+  if (!legacy) {
+    if (!current) return daemon ? noSession : { ...noSession, daemon: false };
+    const ack = await stopTree(sessionId);
+    if (!ack.found) throw new Error('Relay did not acknowledge stopping the listed session');
+    return ack;
+  }
+
+  if (!Number.isSafeInteger(legacy.pid) || legacy.pid <= 1 || !Number.isSafeInteger(legacy.startedAt) || legacy.startedAt <= 0) {
+    throw new Error(`Legacy relay did not list a valid PID and start time for session ${sessionId}`);
+  }
+  const changed = () => new Error(`Legacy session ${sessionId} changed identity or could not be verified; retry Update after it exits`);
+  const first = await readProcesses(true);
+  const original = legacyLeader(first, legacy.pid);
+  const parent = first.find(p => p.pid === original?.parent);
+  const ownGroup = original?.group === legacy.pid;
+  if (original) await verifyLegacyStart(legacy, original);
+  checkLegacyTools(legacy, first, ownGroup);
+
+  // No client-count assumption: an idle process can have several attached desktops.
+  // Reconfirm the listed incarnation and both owners immediately before asking the
+  // old daemon to stop its own child. Its protocol has no conditional stop verb.
+  let owners = await readOwners();
+  if (owners.current) throw ambiguous();
+  if (owners.legacy && !sameLegacySession(owners.legacy, legacy)) throw changed();
+  const before = await readProcesses(true);
+  const leader = legacyLeader(before, legacy.pid);
+  if (leader && (!original || leader.started !== original.started)) throw changed();
+  checkLegacyTools(legacy, before, ownGroup);
+  if (!processIsLive(leader)) {
+    // A process can exit between list and the scan. Do not attach a replacement
+    // while the legacy relay still claims it (e.g. inherited pipes may be open).
+    if (owners.legacy) owners = await readOwners();
+    if (owners.current) throw ambiguous();
+    if (!owners.legacy) return noSession;
+    throw changed();
+  }
+  if (!owners.legacy || leader.parent <= 1 || !processIsLive(parent) || !before.some(p => p.pid === leader.parent &&
+    p.pid === parent.pid && p.started === parent.started && processIsLive(p))) throw changed();
+
+  const ack = await request(LEGACY_SOCKET, { op: 'stop', sessionId }, 'stopped');
+  if (ack.found !== true) throw new Error('Legacy relay did not acknowledge stopping the listed session');
+  const after = await readProcesses(true);
+  const remaining = legacyLeader(after, legacy.pid);
+  if (remaining?.started === leader.started && processIsLive(remaining)) {
+    throw new Error(`Legacy relay acknowledged stop, but session ${sessionId} PID ${legacy.pid} is still running; retry Update after it exits`);
+  }
+  if (!remaining || remaining.started === leader.started) checkLegacyTools(legacy, after, ownGroup);
+  owners = await readOwners();
+  if (owners.current || owners.legacy) throw changed();
+  return ack;
 }
 
 async function shutdownDaemons() {
@@ -521,7 +649,7 @@ async function shutdownDaemons() {
 async function runControl(command, sessionId) {
   try {
     const response = command === 'list' ? await listSessions() : command === 'shutdown' ? await shutdownDaemons()
-      : await stopForCli(sessionId, command === 'stop-compatible');
+      : command === 'stop-for-update' ? await stopForUpdate(sessionId) : await stopForCli(sessionId, command === 'stop-compatible');
     process.stdout.write(JSON.stringify(response) + '\n');
   } catch (error) {
     process.stdout.write(JSON.stringify({ relay: 'error', error: error.message }) + '\n');
@@ -574,5 +702,5 @@ async function runAttach() {
 const [command, arg] = process.argv.slice(2);
 if (command === 'daemon') runDaemon();
 else if (command === 'attach') runAttach().catch(error => { process.stderr.write(`pidesk-relay: ${error.message}\n`); process.exit(1); });
-else if (['list', 'stop', 'stop-compatible', 'shutdown'].includes(command)) runControl(command, arg);
-else { process.stderr.write('usage: pidesk-relay.mjs attach|daemon|list|stop <id>|stop-compatible <id>|shutdown\n'); process.exit(2); }
+else if (['list', 'stop', 'stop-for-update', 'stop-compatible', 'shutdown'].includes(command)) runControl(command, arg);
+else { process.stderr.write('usage: pidesk-relay.mjs attach|daemon|list|stop <id>|stop-for-update <id>|stop-compatible <id>|shutdown\n'); process.exit(2); }
