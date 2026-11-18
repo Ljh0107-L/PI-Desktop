@@ -551,8 +551,14 @@ function TurnFooter({ text, changes, sessionId, last }) {
 }
 
 // Where /goal set an objective.
-function GoalMarker({ objective }) {
-  return <div className="goal-marker"><Icon name="target" size={15} /><span className="goal-marker-label">Goal</span><span className="goal-marker-text">{objective}</span></div>;
+function GoalMarker({ block }) {
+  const [open, setOpen] = useDisclosure(block.key);
+  return <div>
+    <button type="button" className="goal-marker" aria-expanded={open} aria-label={open ? 'Collapse goal' : 'Show full goal'} onClick={() => setOpen(o => !o)}>
+      <Icon name="target" size={15} /><span className="goal-marker-label">Goal</span><span className="goal-marker-text">{block.objective}</span><Caret open={open} />
+    </button>
+    {open && <div className="goal-marker-body"><HistoryContent historyRef={block.historyRef}>{block.objective}</HistoryContent></div>}
+  </div>;
 }
 
 // Your text as typed, with list items ("1. …", "- …") given a hanging indent and @file mentions clickable.
@@ -888,7 +894,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             case 'pendingHistory': return null;
             case 'image': return <ImagePreview key={block.key} src={`data:${block.image.mimeType};base64,${block.image.data}`} alt="Assistant image" />;
             case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!block.truncated && (!transcript.history || !!block.entryId) && !readOnly && session?.engine !== 'cursor' && !!session && !isPendingSession(session.id) && session.status === 'connected' && !session.streaming && !block.text.startsWith('/')} />;
-            case 'goal': return <GoalMarker key={block.key} objective={block.objective} />;
+            case 'goal': return <GoalMarker key={block.key} block={block} />;
             case 'text': return <Markdown key={block.key} text={block.text} streaming={block.streaming} sessionId={session?.id} documentPath="" />;
             case 'usage': return <TurnFooter key={block.key} text={block.text} changes={readOnly ? [] : block.changes} sessionId={session?.id} last={block === lastUsage} />;
             case 'compaction': return <CompactionMarker key={block.key} {...block} blockKey={block.key} />;
@@ -908,7 +914,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             default: return null;
           }
           };
-          const automatic = ['text', 'user', 'goal', 'bash', 'notice', 'pendingHistory', 'image'].includes(block.kind);
+          const automatic = ['text', 'user', 'bash', 'notice', 'pendingHistory', 'image'].includes(block.kind);
           return <HistoryContent key={block.key} historyRef={automatic ? block.historyRef : null} active={active}>{render()}</HistoryContent>;
         }} />
         {readOnly && copyText && <TurnFooter text={copyText} last />}

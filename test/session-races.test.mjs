@@ -107,10 +107,42 @@ for (const ultra of [true, false]) test(`queued prompt respects Ultra while reta
 
 test('a completed history snapshot cannot revive a previously streaming reply', async () => {
   reset(); const read = deferred(); invoke = method => method === 'historyPage' ? read.promise : Promise.resolve(null);
-  store.set({ transcripts: { a: { ...emptyTranscript(), live: reply('partial', 7) } } });
-  const task = store.reloadTranscript('a'); read.resolve(page([reply('finished', 7)])); await task;
+  store.set({ transcripts: { a: { ...emptyTranscript(), live: reply('fin', 7) } } });
+  const message = reply('finished', 7);
+  const task = store.reloadTranscript('a'); read.resolve(page([{ ...message, __entryId: 'finished' }])); await task;
   assert.equal(store.getState().transcripts.a.live, null);
   assert.equal(store.getState().transcripts.a.messages[0].content[0].text, 'finished');
+  const key = store.getState().transcripts.a.messages[0].__liveKey;
+  event('a', { type: 'message_end', message });
+  assert.equal(store.getState().transcripts.a.messages.length, 1, 'the late end event is the same completed reply');
+  assert.equal(store.getState().transcripts.a.messages[0].__liveKey, key);
+});
+
+for (const sameText of [false, true]) test(`a new reply does not reuse an existing entry at the same timestamp (same text: ${sameText})`, async () => {
+  reset(); const read = deferred(); let pending;
+  const first = { ...reply('First answer', 7), __entryId: 'first' };
+  const second = reply(sameText ? 'First answer' : 'Second answer', 7);
+  invoke = method => Promise.resolve(method === 'historyPage' ? pending : null);
+  pending = page([first]); await store.reloadTranscript('a');
+  pending = read.promise;
+  const task = store.reloadTranscript('a');
+  event('a', { type: 'message_end', message: second });
+  read.resolve(page([first])); await task;
+  const messages = () => store.getState().transcripts.a.messages;
+  assert.deepEqual(messages().map(m => m.content[0].text), ['First answer', second.content[0].text]);
+  assert.deepEqual(messages().map(m => m.__entryId), ['first', undefined]);
+  pending = page([first, { ...second, __entryId: 'second' }]); await store.reloadTranscript('a');
+  assert.deepEqual(messages().map(m => m.__entryId), ['first', 'second']);
+});
+
+test('a saved earlier reply with the same timestamp does not dismiss the currently streaming reply', async () => {
+  reset(); const read = deferred(); invoke = method => method === 'historyPage' ? read.promise : Promise.resolve(null);
+  const previous = reply('Same opening of the first answer', 7);
+  event('a', { type: 'message_end', message: previous });
+  event('a', { type: 'message_start', message: reply('', 7) });
+  event('a', { type: 'message_update', assistantMessageEvent: { type: 'text_delta', contentIndex: 0, delta: 'Same opening' } });
+  const task = store.reloadTranscript('a'); read.resolve(page([{ ...previous, __entryId: 'first' }])); await task;
+  assert.equal(store.getState().transcripts.a.live.content[0].text, 'Same opening');
 });
 
 test('failed superseded history reads cannot overwrite a newer successful view', async () => {

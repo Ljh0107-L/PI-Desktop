@@ -1,4 +1,5 @@
 // Turns Pi's AgentMessages (history) and RPC events (live) into one per-session transcript.
+import { createLiveKey, finishSnapshotReply, historyKey } from './history.js';
 
 // Rough token count for speed ONLY when usage is missing or a gateway sends a placeholder.
 // Never use this estimate to rewrite provider-reported token totals.
@@ -17,7 +18,14 @@ function toolsFromMessages(messages) {
 
 // `timings`: source timing saved when replies streamed, restored without changing model history.
 export function fromHistory(messages, timings = {}) {
-  const withTiming = messages.map(m => m.role === 'assistant' && !m.__timing && timings[m.timestamp] ? { ...m, __timing: timings[m.timestamp] } : m);
+  const seen = new Set(), collisions = new Set();
+  for (const m of messages) {
+    if (m.role !== 'assistant') continue;
+    if (seen.has(m.timestamp)) collisions.add(m.timestamp);
+    seen.add(m.timestamp);
+  }
+  const withTiming = messages.map(m => m.role === 'assistant' && !m.__timing && !collisions.has(m.timestamp) && timings[m.timestamp]
+    ? { ...m, ...(!m.__entryId ? { __liveKey: historyKey(m) } : {}), __timing: timings[m.timestamp] } : m);
   return { messages: withTiming, live: null, tools: toolsFromMessages(messages), loaded: true, error: null };
 }
 
@@ -195,11 +203,12 @@ export function applyEvent(t, event) {
     case 'agent_settled':
       return { ...t, retry: null };
     case 'message_start':
-      if (event.message?.role === 'assistant') return { ...t, live: { ...event.message, content: [], stopReason: 'pending', __t0: Date.now(), __chars: 0, __deltas: 0, __thinkingChars: 0 } };
+      if (event.message?.role === 'assistant') return { ...t, completedLiveKey: null, live: { ...event.message, __liveKey: createLiveKey(), content: [], stopReason: 'pending', __t0: Date.now(), __chars: 0, __deltas: 0, __thinkingChars: 0 } };
       return t;
     case 'message_update': {
+      if (!t.live && t.completedLiveKey) return t; // a newer disk snapshot already shows this reply
       // Attached mid-reply (e.g. after an app restart): start a live message from the deltas we do get.
-      if (!t.live) t = { ...t, live: { role: 'assistant', content: [], stopReason: 'pending' } };
+      if (!t.live) t = { ...t, live: { role: 'assistant', __liveKey: createLiveKey(), content: [], stopReason: 'pending' } };
       const e = event.assistantMessageEvent ?? {};
       // Receipt timing is useful for activity display, but is never used as generation TPS.
       if (typeof e.delta === 'string' && e.delta.length > 0 && ['text_delta', 'thinking_delta', 'toolcall_delta'].includes(e.type)) {
@@ -228,14 +237,16 @@ export function applyEvent(t, event) {
       }
     }
     case 'message_end': {
-      const message = event.message;
-      if (!message) return t;
+      if (!event.message) return t;
+      const message = { ...event.message, __liveKey: t.live && event.message.role === 'assistant' ? historyKey(t.live) : createLiveKey() };
       if (message.role === 'assistant') {
+        const reconciled = finishSnapshotReply(t.messages, t.completedLiveKey, message);
+        if (reconciled) return { ...t, live: null, completedLiveKey: null, messages: reconciled };
         const now = Date.now();
         // A relay may attach timing gathered on the host before any replay. Never overwrite it with
         // receipt-time measurements, including when we attached in the middle of a response.
         const timing = message.__timing ?? (t.live?.__t0 != null ? { source: 'renderer', complete: true, start: t.live.__t0, first: t.live.__tFirst ?? null, end: now, last: t.live.__tLast ?? null, chars: t.live.__chars ?? 0, est: t.live.__est ?? null, deltas: t.live.__deltas ?? 0, thinkingChars: t.live.__thinkingChars ?? 0, think: t.live.__thinkStart != null ? (t.live.__thinkEnd ?? now) - t.live.__thinkStart : null } : null);
-        return { ...t, live: null, messages: [...t.messages, timing ? { ...message, __timing: timing } : message] };
+        return { ...t, live: null, completedLiveKey: null, messages: [...t.messages, timing ? { ...message, __timing: timing } : message] };
       }
       // Your message arrived from Pi: it replaces the optimistic copy shown while editing, and the dimmed
       // copy of a message sent while Pi was working.
@@ -297,7 +308,7 @@ export function displayBlocks(t) {
   };
   let ordinal = 0;
   all.forEach((message, mi) => {
-    const mk = message.__entryId ?? `${message.role}:${message.timestamp ?? mi}:${message.toolCallId ?? ''}`;
+    const mk = historyKey(message);
     const ref = message.__history?.truncated ? message.__history.ref : null;
     const contentRef = index => ref && (!message.__history.deferredContent || message.__history.deferredContent.includes(index)) ? ref : null;
     if (message.__history?.placeholder) {
@@ -309,7 +320,7 @@ export function displayBlocks(t) {
     if (message.role === 'user') {
       flush();
       closeTurn();
-      turnKey = message.__entryId ?? message.timestamp ?? `u${mi}`;
+      turnKey = mk;
       const parts = typeof message.content === 'string' ? [{ type: 'text', text: message.content }] : message.content ?? [];
       let text = stripImageNotes(parts.filter(c => c.type === 'text').map(c => c.text).join('\n'));
       if (text.startsWith('/pidesk-')) return;
@@ -323,8 +334,16 @@ export function displayBlocks(t) {
     }
     // A goal started with /goal (the bridge's hidden prompt): show what was set.
     if (message.role === 'custom' && message.customType === 'pidesk-goal') {
-      const objective = /^The user set a goal[\s\S]*?<objective>\n([\s\S]*?)\n<\/objective>/.exec(typeof message.content === 'string' ? message.content : '')?.[1];
-      if (objective) { flush(); closeTurn(); turnKey = `goal:${mi}`; blocks.push({ kind: 'goal', key: `g${mk}`, objective, historyRef: ref }); }
+      const content = typeof message.content === 'string' ? message.content : '';
+      const opening = /^The user set a goal[\s\S]*?<objective>\n/.exec(content);
+      const end = content.lastIndexOf('\n</objective>');
+      // The closing tag can be beyond the page preview. Keep the recognizable start
+      // as a goal row so the reader can request the original objective.
+      const objective = opening && (end >= opening[0].length || ref) ? content.slice(opening[0].length, end >= opening[0].length ? end : undefined) : '';
+      if (objective || (ref && content.startsWith('The user set a goal'))) {
+        flush(); closeTurn(); turnKey = `goal:${mk}`;
+        blocks.push({ kind: 'goal', key: `g${mk}`, objective, historyRef: ref });
+      }
       // A goal continuation is a new prompt: the reply before it is an answer, not folded work.
       else { flush(); blocks.push({ kind: 'break', key: `x${mk}` }); }
       return;
@@ -561,5 +580,5 @@ export function rewindTo(t, ordinal, text, images = []) {
   });
   if (cut === -1) return t;
   const content = [{ type: 'text', text }, ...images.map(img => ({ type: 'image', data: img.data, mimeType: img.mimeType }))];
-  return { ...t, live: null, history: undefined, rewinding: true, messages: [...t.messages.slice(0, cut), { role: 'user', content, timestamp: Date.now(), __optimistic: true }] };
+  return { ...t, live: null, completedLiveKey: null, history: undefined, rewinding: true, messages: [...t.messages.slice(0, cut), { role: 'user', content, timestamp: Date.now(), __optimistic: true }] };
 }

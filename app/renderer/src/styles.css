@@ -832,10 +832,11 @@ a[href], .markdown a { cursor: pointer; }
 .goal-action { height: 28px; padding: 0 10px; border-radius: 8px; color: var(--text-2); }
 .goal-action:hover, .goal-close:hover { background: rgba(255, 255, 255, .08); color: var(--text); }
 .goal-close { width: 28px; height: 28px; border-radius: 8px; display: grid; place-items: center; color: var(--muted); }
-.goal-marker { display: flex; align-items: center; gap: 8px; margin: 6px 0; color: var(--text-2); font-size: 14.5px; }
-.goal-marker svg { color: var(--accent); flex-shrink: 0; }
+.goal-marker { display: flex; align-items: center; gap: 8px; max-width: 100%; margin: 6px 0; padding: 0; text-align: left; color: var(--text-2); font-size: 14.5px; }
+.goal-marker > svg:first-child { color: var(--accent); flex-shrink: 0; }
 .goal-marker-label { font-weight: 600; color: var(--text); }
 .goal-marker-text { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.goal-marker-body { margin: 4px 0 10px 23px; color: var(--text-2); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
 
 /* ------------------------------------------------------------ change review */
 .changes-pill { display: inline-flex; align-items: center; gap: 7px; height: 28px; padding: 0 11px; border-radius: 999px; border: 0.5px solid var(--border); background: rgba(255, 255, 255, .03); font-size: 13px; color: var(--text-2); font-variant-numeric: tabular-nums; transition: background .12s; }

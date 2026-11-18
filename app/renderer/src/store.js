@@ -258,20 +258,17 @@ export async function reloadTranscript(id) {
     const page = await api('historyPage', id);
     if (historySeq.get(id) !== seq || deleting.has(id)) return;
     const current = transcriptOf(id);
-    const arrived = current.messages.filter(message => !baseline.has(historyKey(message)));
-    const pageState = mergeReloadedHistory(page, current);
+    const pageState = mergeReloadedHistory(page, current, baseline);
     if (JSON.stringify(current.history?.next) !== JSON.stringify(pageState.history.next)) historyBuffers.get(id)?.clear();
-    const history = fromHistory(mergeHistory(pageState.messages, arrived), timingsOf(id));
+    const history = fromHistory(pageState.messages, timingsOf(id));
     const updatedTools = Object.fromEntries(Object.entries(current.tools)
       .filter(([key, tool]) => {
         const persisted = history.tools[key];
         if (tool.status === 'running') return !persisted;
         return initial.tools[key] !== tool && (!persisted || persisted.historyRef);
       }));
-    const completed = current.live?.timestamp != null
-      && history.messages.some(message => message.role === 'assistant' && historyKey(message) === historyKey(current.live));
-    setTranscript(id, { ...current, ...history, live: completed ? null : current.live,
-      tools: { ...history.tools, ...updatedTools }, history: pageState.history });
+    setTranscript(id, { ...current, ...pageState, ...history, live: pageState.live,
+      tools: { ...history.tools, ...updatedTools } });
     prefetchHistory(id);
   } catch (error) {
     if (historySeq.get(id) === seq && !deleting.has(id)) setTranscript(id, { ...transcriptOf(id), loaded: true, error: error.message });
@@ -313,7 +310,7 @@ export function loadHistoryEntry(id, ref) {
     const target = now.messages.find(m => m.__entryId === ref.id);
     const locator = target?.__history?.ref;
     if (now.rewinding || !target?.__history?.truncated || locator?.snapshot.identity !== ref.snapshot.identity || locator.offset !== ref.offset || locator.length !== ref.length) return;
-    const messages = now.messages.map(m => m.__entryId === message.__entryId ? { ...message, __retryOmitted: m.__retryOmitted } : m);
+    const messages = now.messages.map(m => m.__entryId === message.__entryId ? { ...message, __liveKey: m.__liveKey, __retryOmitted: m.__retryOmitted } : m);
     const history = fromHistory(messages, timingsOf(id));
     const active = Object.fromEntries(Object.entries(now.tools).filter(([, tool]) => tool.status === 'running'));
     setTranscript(id, { ...now, messages: history.messages, tools: { ...now.tools, ...history.tools, ...active } });

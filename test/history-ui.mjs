@@ -54,6 +54,9 @@ for (let i = 0; i < 120; i++) {
 append({ role: 'assistant', content: [{ type: 'toolCall', name: 'present_files', id: 'show-plot', arguments: { paths: ['plot.svg'] } }] });
 append({ role: 'toolResult', toolCallId: 'show-plot', toolName: 'present_files', content: [], details: { kind: 'pidesk-files', files: [{ path: 'plot.svg', name: 'plot.svg', size: 130 }] } });
 append({ role: 'assistant', content: [{ type: 'text', text: 'LONG_BODY_START ' + 'visible body '.repeat(1200) + ' LONG_BODY_END\n\n![Reply plot](plot.svg)' }, { type: 'image', mimeType: 'image/png', data: png }] });
+const objective = 'A long goal\n' + 'objective text '.repeat(250) + '\nEXACT_GOAL_END';
+appendFileSync(file, JSON.stringify({ type: 'custom_message', id: 'long-goal', parentId, timestamp: new Date().toISOString(), customType: 'pidesk-goal', display: false,
+  content: `The user set a goal for this session. Pursue it until it is achieved.\n\n<objective>\n${objective}\n</objective>\n\nWork autonomously.` }) + '\n');
 const original = readFileSync(file);
 writeFileSync(sparseFile, JSON.stringify({ type: 'session', version: 3, id: sparseSessionId, cwd, timestamp: new Date().toISOString() }) + '\n');
 let sparseParent = null, sparseIndex = 0;
@@ -175,6 +178,14 @@ try {
   await page.getByRole('button', { name: 'Jump to latest', exact: true }).click();
   await page.locator('.session-main .markdown', { hasText: 'New live reply while browsing' }).waitFor();
   assert.equal((await state()).messages.length, count, 'Latest is a scroll action, not a history reset');
+  const goal = () => page.getByRole('button', { name: 'Show full goal', exact: true });
+  assert.match(await goal().textContent(), /A long goal/);
+  assert.equal((await state()).messages.find(m => m.__entryId === 'long-goal').__history.truncated, true, 'opening a conversation does not fetch a collapsed goal');
+  await goal().click();
+  const expandedGoal = page.locator('.goal-marker-body', { hasText: 'EXACT_GOAL_END' });
+  await expandedGoal.waitFor();
+  assert.equal(await expandedGoal.textContent(), objective);
+  await page.getByRole('button', { name: 'Collapse goal', exact: true }).click();
   assert.deepEqual(errors, []);
   assert.ok(readFileSync(file).subarray(0, original.length).equals(original));
   assert.equal(mock.requests.length, 0);

@@ -7,7 +7,7 @@ import { dirname, join, resolve } from 'node:path';
 import test from 'node:test';
 import { PAGE_BYTES, PAGE_MESSAGES, projectEntry, readHistory } from '../agent/pidesk-history.mjs';
 import { historyKey, mergeHistory, retainLoadedContent, mergeReloadedHistory } from '../app/renderer/src/history.js';
-import { displayBlocks, fromHistory, retainWorkKeys, rewindTo } from '../app/renderer/src/transcript.js';
+import { applyEvent, displayBlocks, fromHistory, retainWorkKeys, rewindTo } from '../app/renderer/src/transcript.js';
 import { SessionManager } from '../app/main/session-manager.mjs';
 import { historyEvent } from '../core/history-view.mjs';
 import { HistoryBuffer, prepareHistoryPage } from '../app/renderer/src/history-buffer.js';
@@ -90,7 +90,7 @@ test('CLI history entrypoint works through symlinked deployment paths', { skip: 
 });
 
 test('refresh preserves already received text and images without keeping hidden signatures', () => {
-  const original = { role: 'assistant', timestamp: 1, content: [{ type: 'text', text: 'answer'.repeat(2000), textSignature: 'PRIVATE' }, { type: 'image', data: 'image'.repeat(2000), mimeType: 'image/png' }] };
+  const original = { role: 'assistant', timestamp: 1, responseId: 'provider-reply', content: [{ type: 'text', text: 'answer'.repeat(2000), textSignature: 'PRIVATE' }, { type: 'image', data: 'image'.repeat(2000), mimeType: 'image/png' }] };
   const projected = projectEntry(entry(0, null, original), {});
   assert.equal(projected.__history.truncated, true);
   const retained = retainLoadedContent([projected], [original])[0];
@@ -208,11 +208,11 @@ test('invalid or stale references never access a different file or silently read
   await assert.rejects(readHistory(file, { ref }), /History changed/);
 });
 
-test('page merging preserves live output and persisted identity; prepending keeps display keys stable', () => {
+test('page merging updates known entry IDs; prepending keeps display keys stable', () => {
   const rows = [entry(10, null), entry(11)];
   const messages = rows.map(r => projectEntry(r, {}));
-  const live = { ...messages[1], content: [{ type: 'text', text: 'updated output' }] }; delete live.__entryId; delete live.__history;
-  const merged = mergeHistory(messages, [live]);
+  const newer = { ...messages[1], content: [{ type: 'text', text: 'updated output' }] };
+  const merged = mergeHistory(messages, [newer]);
   assert.equal(merged.length, 2);
   assert.equal(merged[1].__entryId, 'e11');
   assert.equal(merged[1].content[0].text, 'updated output');
@@ -223,6 +223,59 @@ test('page merging preserves live output and persisted identity; prepending keep
   assert.equal(rewound.messages.length, 2);
   assert.equal(rewound.messages.at(-1).__optimistic, true);
   assert.notEqual(historyKey(messages[0]), historyKey(messages[1]));
+});
+
+test('same-timestamp replies stay distinct across live rendering, tail refresh and page prepend', () => {
+  const a = entry(0, null, { role: 'assistant', timestamp: 1000, content: [{ type: 'text', text: 'First answer' }] });
+  const b = entry(1, 'e0', { role: 'assistant', timestamp: 1000, content: [{ type: 'text', text: 'Second answer' }] });
+  const [pa, pb] = [a, b].map(row => projectEntry(row, { id: row.id }));
+  const text = messages => messages.map(m => m.content[0].text);
+  const current = [a, b].reduce((t, { message }) => applyEvent(t, { type: 'message_end', message }), fromHistory([]));
+  assert.deepEqual(text(mergeHistory([pa], [b.message])), ['First answer', 'Second answer']);
+  assert.deepEqual(text(retainLoadedContent([pa, pb], current.messages)), ['First answer', 'Second answer']);
+  const before = displayBlocks(current).map(block => block.key);
+  assert.equal(new Set(before).size, 2);
+  const refreshed = mergeReloadedHistory({ messages: [pa, pb] }, current);
+  assert.deepEqual(refreshed.messages.map(m => m.__entryId), ['e0', 'e1']);
+  assert.deepEqual(text(refreshed.messages), ['First answer', 'Second answer']);
+  assert.deepEqual(displayBlocks(fromHistory(refreshed.messages)).map(block => block.key), before, 'persisting a live reply must not remount it');
+  const stale = mergeReloadedHistory({ messages: [pa] }, current);
+  assert.deepEqual(text(stale.messages), ['First answer', 'Second answer'], 'a snapshot may not yet include the second event');
+  assert.equal(retainLoadedContent([pa], [b.message])[0], pa, 'conflicting prose must not borrow another entry’s locator');
+});
+
+test('clipped entries do not borrow full text from distinct replies with the same preview and timestamp', () => {
+  const long = 'visible '.repeat(3000);
+  const rows = ['first ending', 'second ending'].map((end, i) => entry(i, null, { role: 'assistant', timestamp: 1000, content: [{ type: 'text', text: long + end }] }));
+  const projected = rows.map(row => projectEntry(row, { id: row.id }));
+  assert.ok(projected.every(m => m.__history.truncated));
+  assert.equal(projected[0].content[0].text, projected[1].content[0].text);
+  assert.deepEqual(retainLoadedContent(projected, rows.map(row => row.message)), projected, 'a shared excerpt is not proof of identity');
+  const full = projectEntry(rows[1], { id: 'e1' }, { preview: false });
+  const hydrated = retainLoadedContent(projected, [full]);
+  assert.equal(hydrated[0], projected[0]);
+  assert.equal(hydrated[1].content[0].text, long + 'second ending');
+});
+
+test('a long goal keeps its marker and detail reference until the full objective is read', async t => {
+  const objective = 'Keep the first line.\n' + '界🙂'.repeat(2200) + '\nExact final line.';
+  const content = `The user set a goal for this session. Pursue it until it is achieved.\n\n<objective>\n${objective}\n</objective>\n\nWork autonomously.`;
+  const goal = { type: 'custom_message', id: 'goal', parentId: null, timestamp: new Date(1000).toISOString(), customType: 'pidesk-goal', display: false };
+  const file = fixture(t, [{ ...goal, content }, { ...goal, id: 'continue', parentId: 'goal', content: `Continue the active goal.\n\n<objective>\n${objective}\n</objective>` }]);
+  const before = hash(file);
+  const page = await readHistory(file);
+  const [preview, continuation] = displayBlocks(fromHistory(page.messages));
+  assert.equal(preview.kind, 'goal');
+  assert.equal(preview.historyRef.id, 'goal');
+  assert.ok(preview.objective.startsWith('Keep the first line.'));
+  assert.ok(preview.objective.length < objective.length);
+  assert.equal(continuation.kind, 'break');
+  const full = await readHistory(file, { ref: preview.historyRef });
+  const [loaded] = displayBlocks(fromHistory([full]));
+  assert.equal(loaded.key, preview.key);
+  assert.equal(loaded.historyRef, null);
+  assert.equal(loaded.objective, objective);
+  assert.equal(hash(file), before);
 });
 
 test('a page beginning with a tool result remains inspectable without its earlier call', async t => {
