@@ -258,7 +258,9 @@ test('hard stop cannot succeed when no daemon answers', async t => {
   const dir = mkdtempSync('/tmp/pidesk-relay-absent-');
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const env = { ...process.env, PIDESK_RUN_DIR: dir };
-  await assert.rejects(exec(process.execPath, [relay, 'stop', 'session'], { env, timeout: 10000 }), controlError(/ENOENT/));
+  const control = command => exec(process.execPath, [relay, command, 'session'], { env, timeout: 10000 });
+  await assert.rejects(control('stop'), controlError(/ENOENT/));
+  assert.deepEqual(JSON.parse((await control('stop-compatible')).stdout), { relay: 'stopped', found: false, daemon: false });
 });
 
 test('v2 and legacy daemons coexist: attach, list, stop and shutdown choose the right owner', { timeout: 15000 }, async t => {

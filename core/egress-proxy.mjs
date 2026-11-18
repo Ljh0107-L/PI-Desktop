@@ -22,7 +22,7 @@ export function startEgressProxy({ allow = [], port = 0 } = {}) {
     if (targetUrl.protocol !== 'http:') { res.writeHead(405).end('Use CONNECT for HTTPS'); return; }
     const port = Number(targetUrl.port || 80);
     const target = `${targetUrl.hostname}:${port}`.toLowerCase();
-    if (!allowed.has(target)) {
+    if (port === 0 || !allowed.has(target)) {
       stats.rejected.push(target);
       if (stats.rejected.length > 100) stats.rejected.shift();
       res.writeHead(403).end('Forbidden');

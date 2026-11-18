@@ -127,7 +127,7 @@ test('spawn ENOENT is reported promptly and is not retained as an alive session'
 test('malformed handshakes cannot crash the shared relay daemon', { timeout: 10000 }, async t => {
   const f = await fixture(t);
   for (const value of [null, [], { op: 'attach', sessionId: 'bad', spawn: {} }]) {
-    const socket = net.connect(join(f.runDir, 'relay.sock'));
+    const socket = net.connect(join(f.runDir, 'relay2.sock'));
     socket.on('error', () => {}); socket.resume();
     const closed = once(socket, 'close');
     socket.end(JSON.stringify(value) + '\n'); await closed;
@@ -158,13 +158,13 @@ test('startup timeout cleans up its attach transport', { timeout: 10000 }, async
 test('concurrent cold attaches recover a stale socket without split daemons', { timeout: 15000 }, async t => {
   const f = await fixture(t, { startDaemon: false });
   // A regular stale socket-path file produces EADDRINUSE/EEXIST across Node/macOS versions.
-  writeFileSync(join(f.runDir, 'relay.sock'), 'stale');
+  writeFileSync(join(f.runDir, 'relay2.sock'), 'stale');
   const sessions = Array.from({ length: 12 }, (_, i) => f.connect(`concurrent-${i}`));
   await Promise.all(sessions.map(s => s.start({ readyTimeout: 10000 })));
   const list = (await f.relay('list')).sessions;
   assert.equal(list.length, sessions.length);
   assert.ok(list.every(s => s.alive && s.clients === 1));
-  const log = readFileSync(join(f.runDir, 'relay.log'), 'utf8');
+  const log = readFileSync(join(f.runDir, 'relay2.log'), 'utf8');
   assert.ok(!/EEXIST|EADDRINUSE|uncaught/i.test(log), log);
 });
 
@@ -175,10 +175,13 @@ test('interrupt deadline includes a hung abort RPC', { timeout: 15000 }, async t
   const runtime = manager.runtimes.get(record.id);
   const pid = runtime.session.attachInfo.pid;
   runtime.streaming = true;
-  const started = Date.now();
+  const stopRelay = manager.stopRelay.bind(manager);
+  let hardStopAt;
+  t.mock.method(manager, 'stopRelay', (...args) => { hardStopAt ??= performance.now(); return stopRelay(...args); });
+  const started = performance.now();
   const result = await manager.prompt(record.id, 'replacement', [], { interrupt: true });
   assert.equal(result.interrupted, true);
-  assert.ok(Date.now() - started < 9000, 'must not await the 30s RPC timeout ahead of the 4s deadline');
+  assert.ok(hardStopAt - started < 6000, 'the hard stop must begin after the 4s Abort deadline, not the 30s RPC timeout');
   assert.equal(alive(pid), false);
   assert.notEqual(manager.runtimes.get(record.id).session.attachInfo.pid, pid);
 });
@@ -231,6 +234,7 @@ test('Stop hard-stops after rejected Abort even when streaming state is stale', 
   const resolved = t.mock.method(manager, 'stopRelay', stopRelay);
   await manager.abort(record.id);
   assert.equal(resolved.mock.callCount(), 1);
+  assert.deepEqual(resolved.mock.calls[0].arguments[2], { requireTree: true });
   assert.equal(alive(pid), false);
   assert.equal(manager.runtimes.has(record.id), false);
   assert.equal(statuses.at(-1).status, 'disconnected');
@@ -286,7 +290,7 @@ test('manual compaction stays busy before its first event and after the RPC time
   assert.deepEqual(await sweepStale(), [record.id]);
 });
 
-test('attachments with identical sanitized names keep their own bytes across sends', { timeout: 10000 }, async t => {
+for (const environmentId of ['local', 'remote']) test(`${environmentId}: attachments with identical sanitized names keep their own bytes`, { timeout: 10000 }, async t => {
   const f = await fixture(t);
   const manager = managerFor(t, f);
   const record = await manager.create({ environmentId: 'local', cwd: f.dir });
@@ -294,13 +298,37 @@ test('attachments with identical sanitized names keep their own bytes across sen
   const text = [];
   t.mock.method(session, 'prompt', async message => { if (message.includes('Attached files:')) text.push(message); });
   const attachment = (name, value) => ({ kind: 'file', name, data: Buffer.from(value).toString('base64') });
-  await Promise.all([
-    manager.prompt(record.id, 'first', [attachment('a b.txt', 'one'), attachment('a?b.txt', 'two')]),
-    manager.prompt(record.id, 'second', [attachment('a_b.txt', 'three'), attachment('..', 'four')]),
-  ]);
+  const originalPath = process.env.PATH;
+  if (environmentId === 'remote') {
+    // Execute only the fixture's upload command, in a throwaway root, with no SSH host.
+    const bin = join(f.dir, 'bin');
+    mkdirSync(bin);
+    writeFileSync(join(bin, 'ssh'), '#!/bin/sh\nfor arg do cmd=$arg; done\nexec /bin/sh -c "$cmd"\n', { mode: 0o755 });
+    process.env.PATH = `${bin}:${originalPath}`;
+    manager.prepare = async () => ({ root: f.dir });
+    manager.record(record.id).environmentId = 'remote';
+  }
+  try {
+    await Promise.all([
+      manager.prompt(record.id, 'first', [attachment('a b.txt', 'one'), attachment('a?b.txt', 'two')]),
+      manager.prompt(record.id, 'second', [attachment('a_b.txt', 'three'), attachment('..', 'four')]),
+    ]);
+  } finally { process.env.PATH = originalPath; }
   const paths = text.flatMap(message => [...message.matchAll(/^- (.+)$/gm)].map(match => match[1]));
   assert.equal(new Set(paths).size, 4);
   assert.deepEqual(paths.map(path => readFileSync(path, 'utf8')).sort(), ['four', 'one', 'three', 'two']);
+});
+
+test('deletion keeps history when the relay cannot stop its writer', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const manager = managerFor(t, f);
+  const file = join(f.dir, 'retained.jsonl');
+  writeFileSync(file, 'retained history\n');
+  manager.store.sessions.push({ id: 'retained', environmentId: 'local', piSessionFile: file });
+  t.mock.method(manager, 'stopRelay', async () => { throw new Error('Stop failed'); });
+  await assert.rejects(manager.delete('retained'), /Stop failed/);
+  assert.equal(manager.record('retained').piSessionFile, file);
+  assert.equal(readFileSync(file, 'utf8'), 'retained history\n');
 });
 
 test('cancelled forks never persist a second record pointing at the source file', { timeout: 10000 }, async t => {
@@ -391,7 +419,7 @@ test('egress proxy forwards allowed HTTP and requires CONNECT for HTTPS', { time
   upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening');
   t.after(() => { upstream.closeAllConnections?.(); upstream.close(); });
   const target = `127.0.0.1:${upstream.address().port}`;
-  const proxy = await startEgressProxy({ allow: [target] });
+  const proxy = await startEgressProxy({ allow: [target, '127.0.0.1:0'] });
   t.after(() => proxy.close());
   const viaProxy = path => new Promise((resolve, reject) => {
     const req = http.request({ host: '127.0.0.1', port: proxy.port, method: 'GET', path }, res => {
@@ -402,6 +430,7 @@ test('egress proxy forwards allowed HTTP and requires CONNECT for HTTPS', { time
   });
   assert.deepEqual(await viaProxy(`http://${target}/v1/models`), { status: 200, body: 'ok:/v1/models' });
   assert.equal((await viaProxy(`https://${target}/v1/models`)).status, 405);
+  assert.equal((await viaProxy('http://127.0.0.1:0/v1/models')).status, 403);
   assert.equal((await viaProxy('http://disallowed.invalid/v1/models')).status, 403);
   assert.equal(requests, 1, 'an HTTPS URL must never reach the plaintext upstream');
 });

@@ -2,6 +2,16 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.28 — Safer sends, stops, and conversation history
+
+- **Fail closed on model changes.** Sending a message or running Compact now stops if Pi cannot apply the selected model; it will not send your text or context to the previous provider. SSH egress requires CONNECT for HTTPS, keeping TLS end to end.
+- **Stop and reconnect reliably.** A failed or stalled Abort falls back to stopping the relay session and its tools. A slow connection no longer builds an unbounded relay send queue.
+- **Keep every attachment.** Files with the same sanitized name get separate upload paths on both the Mac and SSH hosts.
+- **Protect in-progress compaction.** Compact shows a busy state, can be stopped, and is never mistaken for an idle session by the cleanup sweep.
+- **Keep history complete.** Replies with the same timestamp remain distinct across live streaming and history reloads, and long `/goal` messages can load their full text.
+
+Existing SSH sessions are not interrupted by the update. Already-running sessions stay on their older relay until they end; new sessions start on the updated relay. The stronger hard-stop guarantee applies to sessions on the updated relay.
+
 ## 0.2.27 — GPT-6.2 Ultrafast and model retries
 
 - **GPT-6.2 Sol and Astra support Ultrafast.** Pi Desktop sends the Ultrafast tier on OpenAI Responses requests. Usage estimates apply 3× Standard rates through February 28, 2027, then 6× starting March 1, Pacific time.

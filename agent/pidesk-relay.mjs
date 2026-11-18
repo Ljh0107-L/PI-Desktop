@@ -466,8 +466,7 @@ function hasLegacySocket() {
   let stat;
   try { stat = lstatSync(LEGACY_SOCKET); }
   catch (error) { if (error.code === 'ENOENT') return false; throw error; }
-  if (!stat.isSocket()) throw new Error('Legacy relay path is not a socket');
-  return true;
+  return stat.isSocket(); // an abandoned regular file cannot own a legacy session
 }
 
 async function listOn(address) {
@@ -501,8 +500,10 @@ async function stopForCli(sessionId, compatible) {
     if (reply.found !== true) throw new Error('Legacy relay did not acknowledge stopping the listed session');
     return reply;
   }
-  // Outside the legacy path, both verbs require the same process-tree acknowledgement.
-  const reply = await request(SOCKET, { op: 'stop-tree', sessionId }, 'stopped');
+  // Both verbs require tree-stop acknowledgement from a running v2 daemon. Routine
+  // cleanup of a saved conversation must also work when neither daemon is running.
+  const reply = await request(SOCKET, { op: 'stop-tree', sessionId }, 'stopped', compatible ? OFFLINE : []);
+  if (!reply) return { relay: 'stopped', found: false, daemon: false };
   if (typeof reply.found !== 'boolean') throw new Error('Invalid process-tree stop acknowledgement');
   return reply;
 }

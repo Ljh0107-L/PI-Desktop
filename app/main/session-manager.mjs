@@ -169,9 +169,9 @@ export class SessionManager extends EventEmitter {
     if (env.kind === 'local') return JSON.parse((await this.#localRelay(['list'])).trim().split('\n').pop()).sessions ?? [];
     return listRelaySessions(env, await this.prepare(env.id));
   }
-  async stopRelay(env, id) {
-    if (env.kind === 'local') return this.#localRelay(['stop', id]);
-    return stopRelaySession(env, await this.prepare(env.id), id);
+  async stopRelay(env, id, { requireTree = false } = {}) {
+    if (env.kind === 'local') return this.#localRelay([requireTree ? 'stop' : 'stop-compatible', id]);
+    return stopRelaySession(env, await this.prepare(env.id), id, { requireTree });
   }
 
   // ---------------------------------------------------------------- providers and models
@@ -1101,7 +1101,7 @@ export class SessionManager extends EventEmitter {
     if (this.stopping.has(id)) return this.stopping.get(id);
     const stopping = (async () => {
       // Do not disconnect or claim success before the relay confirms the process is gone.
-      await this.stopRelay(this.env(record.environmentId), id);
+      await this.stopRelay(this.env(record.environmentId), id, { requireTree: true });
       if (this.runtimes.get(id) === runtime) await this.close(id);
       this.emit('status', { id, status: 'disconnected', streaming: false, compacting: false });
     })().finally(() => this.stopping.delete(id));
@@ -1444,9 +1444,8 @@ export class SessionManager extends EventEmitter {
   async delete(id) {
     const record = this.record(id);
     const env = this.environments().find(e => e.id === record.environmentId);
-    // close() marks the runtime as closing synchronously. Stop the relay alongside detaching instead
-    // of paying for two round trips in sequence; file removal still waits for both.
-    await Promise.all([this.close(id), env ? this.stopRelay(env, id).catch(() => {}) : null]);
+    // Stop alongside detaching, but do not remove history if the relay could not stop its writer.
+    await Promise.all([this.close(id), env ? this.stopRelay(env, id) : null]);
     if (env) {
       if (record.piSessionFile) {
         if (env.kind === 'local') rmSync(record.piSessionFile, { force: true });
@@ -1606,9 +1605,12 @@ export class SessionManager extends EventEmitter {
     if (!stopped.includes('"relay":"shutdown"')) {
       // A relay daemon from an older version has no shutdown: stop its Pis, then the daemon itself
       // (left alone it would idle for 15 minutes first).
-      for (const session of await this.relaySessions({ kind: 'local' }).catch(() => [])) if (session.alive) await this.#localRelay(['stop', session.id]).catch(() => {});
+      const env = { kind: 'local' };
+      const remaining = await this.relaySessions(env).catch(() => null);
+      const results = remaining && await Promise.allSettled(remaining.filter(s => s.alive).map(s => this.stopRelay(env, s.id)));
+      // Do not kill the supervisor if a session still needs its process-tree cleanup.
       const daemon = this.relayPath && `${this.relayPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} daemon`;
-      if (daemon) await new Promise(resolve => execFile('pkill', ['-f', daemon], () => resolve()));
+      if (daemon && results?.every(result => result.status === 'fulfilled')) await new Promise(resolve => execFile('pkill', ['-f', daemon], () => resolve()));
     }
     await closeSshMux();
   }

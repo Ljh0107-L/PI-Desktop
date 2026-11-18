@@ -98,7 +98,7 @@ try {
 
   // 5. secrets
   const remotePs = ssh('ps -axww -o command=');
-  const relayLog = existsSync(join(runDir, 'relay.log')) ? readFileSync(join(runDir, 'relay.log'), 'utf8') : '';
+  const relayLog = readFileSync(join(runDir, 'relay2.log'), 'utf8');
   check('API key not in any argv or relay log', !remotePs.includes(key) && !relayLog.includes(key));
   const envOut = await (async () => {
     d.ui.length = 0; d.events.length = 0;
