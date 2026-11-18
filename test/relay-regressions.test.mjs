@@ -31,7 +31,7 @@ function running(pid) {
 
 async function fixture(t, preload) {
   const dir = mkdtempSync('/tmp/pidesk-relay-test-');
-  const address = join(dir, 'relay.sock');
+  const address = join(dir, 'relay2.sock');
   const env = { ...process.env, PIDESK_RUN_DIR: dir };
   const args = [];
   if (preload) {
@@ -43,10 +43,14 @@ async function fixture(t, preload) {
   const closed = once(daemon, 'close');
   let stderr = '';
   daemon.stderr.on('data', chunk => { stderr += chunk; });
-  const sockets = [], children = new Set();
-  const control = (...args) => exec(process.execPath, [relay, ...args], { env, timeout: 8000 });
+  const sockets = [], bridges = [], children = new Set();
+  const control = (...args) => exec(process.execPath, [relay, ...args], { env, timeout: 10000 });
   t.after(async () => {
     for (const socket of sockets) socket.destroy();
+    for (const { child, closed } of bridges) {
+      if (child.exitCode === null && child.signalCode === null) child.kill();
+      await closed;
+    }
     if (daemon.exitCode === null && daemon.signalCode === null) {
       try { await control('shutdown'); } catch { daemon.kill(); }
     }
@@ -59,15 +63,11 @@ async function fixture(t, preload) {
   });
   await waitFor(() => existsSync(address), 'relay listener');
 
-  async function connect(message, { paused = false } = {}) {
-    const socket = net.connect(address);
-    sockets.push(socket);
-    socket.on('error', () => {});
-    await once(socket, 'connect');
+  function collect(stream) {
     const records = [];
     let buffer = '';
-    socket.setEncoding('utf8');
-    socket.on('data', chunk => {
+    stream.setEncoding('utf8');
+    stream.on('data', chunk => {
       buffer += chunk;
       let end;
       while ((end = buffer.indexOf('\n')) !== -1) {
@@ -79,6 +79,15 @@ async function fixture(t, preload) {
         records.push(record);
       }
     });
+    return records;
+  }
+
+  async function connect(message, { paused = false } = {}) {
+    const socket = net.connect(address);
+    sockets.push(socket);
+    socket.on('error', () => {});
+    await once(socket, 'connect');
+    const records = collect(socket);
     if (paused) socket.pause();
     const write = value => socket.write(JSON.stringify(value) + '\n');
     write(message);
@@ -86,8 +95,19 @@ async function fixture(t, preload) {
   }
   const spawnSpec = code => ({ cwd: dir, argv: [process.execPath, '-e', code] });
   const attach = (sessionId, code) => connect({ op: 'attach', sessionId, spawn: spawnSpec(code) });
+  function attachCli(sessionId, code = 'process.stdin.resume()') {
+    const child = spawn(process.execPath, [relay, 'attach'], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    const closed = once(child, 'close');
+    bridges.push({ child, closed });
+    const records = collect(child.stdout);
+    let stderr = '';
+    child.stderr.on('data', d => { stderr += d; });
+    child.stdin.on('error', () => {});
+    child.stdin.write(JSON.stringify({ op: 'attach', sessionId, spawn: spawnSpec(code), boot: { fixture: true }, sinceSeq: 1 }) + '\n');
+    return { records, closed, stderr: () => stderr, detach: () => { child.stdin.end(); return closed; } };
+  }
   const list = async () => JSON.parse((await control('list')).stdout).sessions;
-  return { dir, connect, attach, spawnSpec, list, control, closed, children };
+  return { dir, connect, attach, attachCli, spawnSpec, list, control, closed, children };
 }
 
 const stubborn = `process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);`;
@@ -176,32 +196,160 @@ test('relay stop and shutdown fail instead of acknowledging a surviving process'
   assert.deepEqual(await f.closed, [0, null]);
 });
 
-test('hard stop does not send a legacy parent-only stop or succeed when no daemon answers', { timeout: 10000 }, async t => {
-  const dir = mkdtempSync('/tmp/pidesk-relay-old-');
+const controlError = reason => error => {
+  assert.equal(error.code, 1);
+  assert.equal(JSON.parse(error.stdout).relay, 'error');
+  assert.match(error.stderr, reason);
+  return true;
+};
+
+test('relay does not signal a group whose process identity changes during escalation', { timeout: 10000 }, async t => {
+  const f = await fixture(t, dir => `
+    import cp from 'node:child_process';
+    import fs from 'node:fs';
+    import { syncBuiltinESMExports } from 'node:module';
+    import { promisify } from 'node:util';
+    const toggle = ${JSON.stringify(join(dir, 'reuse'))}, attempts = ${JSON.stringify(join(dir, 'attempts'))};
+    let replaced;
+    const kill = process.kill;
+    process.kill = (pid, signal) => {
+      if (pid < 0 && signal !== 0 && fs.existsSync(toggle)) {
+        fs.appendFileSync(attempts, signal + '\\n');
+        replaced = -pid;
+        return true;
+      }
+      return kill(pid, signal);
+    };
+    const read = fs.readFileSync;
+    fs.readFileSync = (path, ...args) => {
+      const out = read(path, ...args);
+      if (!replaced || path !== '/proc/' + replaced + '/stat' || !fs.existsSync(toggle)) return out;
+      const end = out.lastIndexOf(')') + 2;
+      const fields = out.slice(end).split(' ');
+      fields[19] = '99999999999';
+      return out.slice(0, end) + fields.join(' ');
+    };
+    const run = promisify(cp.execFile);
+    cp.execFile = () => {};
+    cp.execFile[promisify.custom] = async (...args) => {
+      const result = await run(...args);
+      if (replaced && args[0] === '/bin/ps' && fs.existsSync(toggle)) {
+        result.stdout = result.stdout.split('\\n').map(line => {
+          const fields = line.trim().split(/\\s+/);
+          return Number(fields[0]) === replaced ? fields.slice(0, 4).join(' ') + ' another-start-time' : line;
+        }).join('\\n');
+      }
+      return result;
+    };
+    syncBuiltinESMExports();
+  `);
+  const target = await f.attach('reused', `${stubborn} process.stdin.resume(); console.log('{"type":"ready"}');`);
+  await waitFor(() => target.records.length === 2, 'child to start');
+  const toggle = join(f.dir, 'reuse');
+  writeFileSync(toggle, '');
+  try {
+    await assert.rejects(f.control('stop', 'reused'), controlError(/Could not verify ownership/));
+    assert.equal(readFileSync(join(f.dir, 'attempts'), 'utf8'), 'SIGTERM\n');
+    assert.ok(running(target.records[0].pid));
+  } finally { rmSync(toggle); }
+});
+
+test('hard stop cannot succeed when no daemon answers', async t => {
+  const dir = mkdtempSync('/tmp/pidesk-relay-absent-');
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
   const env = { ...process.env, PIDESK_RUN_DIR: dir };
-  const stop = () => exec(process.execPath, [relay, 'stop', 'session'], { env, timeout: 8000 });
-  const operations = [];
-  const server = net.createServer(socket => socket.once('data', data => {
-    const { op } = JSON.parse(data);
-    operations.push(op);
-    if (op === 'stop') socket.end('{"relay":"stopped","found":true}\n');
-    else socket.end(); // a pre-process-tree relay ignores the unknown operation
-  }));
-  t.after(async () => {
-    if (server.listening) await new Promise(resolve => server.close(resolve));
-    rmSync(dir, { recursive: true, force: true });
+  await assert.rejects(exec(process.execPath, [relay, 'stop', 'session'], { env, timeout: 10000 }), controlError(/ENOENT/));
+});
+
+test('v2 and legacy daemons coexist: attach, list, stop and shutdown choose the right owner', { timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  const oldHistory = await f.attach('old', 'process.exit(0)');
+  await waitFor(() => oldHistory.records.some(r => r.relay === 'exit'), 'v2 exit history');
+  const first = f.attachCli('fresh');
+  await waitFor(() => first.records.length, 'v2 attach with no legacy socket');
+  assert.equal(first.records[0].created, true);
+  assert.deepEqual(await first.detach(), [0, null]);
+
+  const legacy = new Map(['old', 'recycled', 'raced', 'bad-ack', 'stay'].map((id, i) => [id, { id, alive: id !== 'recycled', pid: 20000 + i }]));
+  const requests = [], sockets = new Set();
+  let invalidList = false;
+  const server = net.createServer(socket => {
+    sockets.add(socket);
+    socket.once('close', () => sockets.delete(socket));
+    const answer = value => socket.end(JSON.stringify(value) + '\n');
+    socket.once('data', data => {
+      const message = JSON.parse(data);
+      requests.push(message);
+      const session = legacy.get(message.sessionId);
+      if (message.op === 'list') {
+        answer({ relay: 'list', sessions: invalidList ? [{ id: 'bad', alive: 'yes' }] : [...legacy.values()] });
+      } else if (message.op === 'attach') {
+        if (session.id === 'raced') {
+          session.alive = false;
+          answer({ relay: 'error', error: 'Session is not running' });
+        } else socket.write(JSON.stringify({ relay: 'attached', created: false, pid: session.pid }) + '\n');
+      } else if (message.op === 'stop') {
+        if (session.id !== 'bad-ack') session.alive = false;
+        answer({ relay: 'stopped', found: session.id !== 'bad-ack' });
+      } else if (message.op === 'shutdown') {
+        for (const session of legacy.values()) session.alive = false;
+        answer({ relay: 'shutdown', stopped: legacy.size });
+        server.close();
+      } else socket.end();
+    });
   });
-  const failed = reason => error => {
-    assert.equal(error.code, 1);
-    assert.equal(JSON.parse(error.stdout).relay, 'error');
-    assert.match(error.stderr, reason);
-    return true;
-  };
-  await assert.rejects(stop(), failed(/ENOENT/));
-  server.listen(join(dir, 'relay.sock'));
+  t.after(async () => {
+    for (const socket of sockets) socket.destroy();
+    if (server.listening) await new Promise(resolve => server.close(resolve));
+  });
+  server.listen(join(f.dir, 'relay.sock'));
   await once(server, 'listening');
-  await assert.rejects(stop(), failed(/restart the relay/));
-  assert.deepEqual(operations, ['stop-tree']);
+
+  const old = f.attachCli('old');
+  await waitFor(() => old.records.length, 'legacy attach');
+  assert.deepEqual(old.records[0], { relay: 'attached', created: false, pid: legacy.get('old').pid });
+  assert.deepEqual(requests.find(r => r.op === 'attach'), { op: 'attach', sessionId: 'old', sinceSeq: 1 }, 'legacy attach cannot spawn a new process');
+  assert.deepEqual(await old.detach(), [0, null]);
+
+  const recycled = f.attachCli('recycled');
+  await waitFor(() => recycled.records.length, 'v2 attach for an exited legacy ID');
+  assert.equal(recycled.records[0].created, true);
+  assert.deepEqual(await recycled.detach(), [0, null]);
+  const raced = f.attachCli('raced');
+  await waitFor(() => raced.records.length, 'legacy attach race');
+  assert.equal(raced.records[0].relay, 'error');
+  assert.equal(requests.find(r => r.sessionId === 'raced').spawn, undefined);
+  assert.deepEqual(await raced.detach(), [0, null]);
+
+  const sessions = await f.list();
+  assert.equal(sessions.length, 6, 'list merges both daemons and deduplicates IDs');
+  assert.deepEqual(sessions.find(s => s.id === 'old'), legacy.get('old'), 'alive legacy wins over v2 exit history');
+  assert.equal(sessions.find(s => s.id === 'recycled').pid, recycled.records[0].pid, 'alive v2 wins over legacy exit history');
+  assert.ok(sessions.find(s => s.id === 'fresh').alive);
+
+  await assert.rejects(f.control('stop', 'old'), controlError(/legacy relay.*process-tree/));
+  assert.ok(legacy.get('old').alive, 'strict stop leaves the legacy session alone');
+  assert.ok(requests.every(r => ['list', 'attach'].includes(r.op)));
+  assert.equal(JSON.parse((await f.control('stop-compatible', 'old')).stdout).found, true);
+  assert.equal(legacy.get('old').alive, false);
+  await assert.rejects(f.control('stop-compatible', 'bad-ack'), controlError(/did not acknowledge/));
+  assert.equal(JSON.parse((await f.control('stop-compatible', 'recycled')).stdout).found, true);
+  assert.equal(running(recycled.records[0].pid), false, 'compatible stop still awaits v2 exit');
+  assert.deepEqual(requests.filter(r => r.op === 'stop').map(r => r.sessionId), ['old', 'bad-ack']);
+
+  invalidList = true;
+  const blocked = f.attachCli('stay');
+  assert.deepEqual(await blocked.closed, [1, null]);
+  assert.match(blocked.stderr(), /Invalid relay session list/);
+  await assert.rejects(f.control('stop-compatible', 'stay'), controlError(/Invalid relay session list/));
+  invalidList = false;
+  assert.ok(legacy.get('stay').alive);
+  assert.ok(requests.every(r => r.op !== 'shutdown'));
+  assert.equal(JSON.parse((await f.control('shutdown')).stdout).relay, 'shutdown');
+  assert.deepEqual(await f.closed, [0, null]);
+  assert.equal(running(first.records[0].pid), false);
+  assert.equal(legacy.get('stay').alive, false);
+  assert.equal(requests.filter(r => r.op === 'shutdown').length, 1);
 });
 
 test('relay bounds live and replay socket queues while healthy readers catch up', { timeout: 15000 }, async t => {

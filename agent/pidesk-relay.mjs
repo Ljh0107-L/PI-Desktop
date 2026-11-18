@@ -5,16 +5,19 @@
 //   node pidesk-relay.mjs daemon   the long-lived owner of Pi processes (started on demand, detached)
 //   node pidesk-relay.mjs list     JSON summary of sessions
 //   node pidesk-relay.mjs stop ID  terminate a session's Pi process and its tools
-//   node pidesk-relay.mjs shutdown terminate every session, then the daemon (this Mac's relay, when the app quits)
+//   node pidesk-relay.mjs stop-compatible ID  administrative stop, even on a legacy relay
+//   node pidesk-relay.mjs shutdown terminate every session and both daemons (local app quit only)
 //
-// The daemon listens on ~/.pidesk/run/relay.sock (directory 0700, socket 0600). Every line Pi writes
+// New daemons use ~/.pidesk/run/relay2.sock (directory 0700, socket 0600). The CLI can still reach
+// sessions owned by an older daemon on relay.sock without starting or replacing that daemon.
+// Every line Pi writes
 // is numbered and kept in a bounded log; a re-attaching client sends the last number it saw and gets
 // everything after it, plus any extension dialogs (approvals) still waiting for an answer.
 //
 // Secrets: the attach handshake carries the session's boot record (provider keys). The daemon passes
 // it to Pi in the PIDESK_BOOT environment variable at spawn and does not keep it.
 import { execFile, spawn } from 'node:child_process';
-import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, closeSync, lstatSync, mkdirSync, openSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
@@ -23,7 +26,8 @@ import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 
 const RUN_DIR = process.env.PIDESK_RUN_DIR ?? join(homedir(), '.pidesk', 'run');
-const SOCKET = join(RUN_DIR, 'relay.sock');
+const SOCKET = join(RUN_DIR, 'relay2.sock');
+const LEGACY_SOCKET = join(RUN_DIR, 'relay.sock');
 const LOG_LIMIT_BYTES = 16 * 1024 * 1024;
 const CLIENT_CHUNK_BYTES = 64 * 1024;
 const CLIENT_DRAIN_MS = 30000;
@@ -82,32 +86,44 @@ async function readProcesses() {
   });
 }
 
-function updateGroups(groups, processes, verify) {
+function updateGroups(groups, processes, child) {
   const children = new Map(), members = new Map(), live = new Set(), owned = [], seen = new Set();
+  const previous = new Map();
+  for (const group of groups.values()) if (group) for (const [pid, started] of group) previous.set(pid, started);
+  const initial = groups.get(child.pid) === null && child.exitCode === null && child.signalCode === null;
   for (const p of processes) {
     if (!children.has(p.parent)) children.set(p.parent, []);
     children.get(p.parent).push(p);
-    if (!members.has(p.group)) members.set(p.group, new Map());
-    members.get(p.group).set(p.pid, p.started);
+    if (!members.has(p.group)) members.set(p.group, []);
+    members.get(p.group).push(p);
     // Zombies cannot run or write files, and an orphaned zombie may linger on Linux.
     if (!/^[ZXx]/.test(p.state)) live.add(p.group);
-    if (groups.has(p.group)) owned.push(p);
+    if ((p.started && previous.get(p.pid) === p.started) ||
+        (initial && p.pid === child.pid && p.group === child.pid && p.parent === process.pid)) owned.push(p);
   }
-  // A retry may arrive much later than a failed stop. Never signal a recycled
-  // group ID unless a member from the earlier observation is still present.
-  if (verify) for (const [group, previous] of groups) {
-    if (live.has(group) && (!previous || ![...members.get(group)].some(([pid, started]) => previous.get(pid) === started))) {
-      throw new Error(`Could not verify ownership of process group ${group}`);
-    }
-  }
+  // A PGID alone is not proof of ownership, even during escalation. Seed each scan
+  // from the original child or a process seen in an earlier scan with the same birth time.
+  const confirmed = new Set();
   while (owned.length) {
     const p = owned.pop();
     if (seen.has(p.pid)) continue;
     seen.add(p.pid);
-    if (p.group > 1) groups.set(p.group, members.get(p.group));
-    for (const child of children.get(p.pid) ?? []) owned.push(child);
+    if (p.group <= 1) continue;
+    if (!confirmed.has(p.group)) {
+      confirmed.add(p.group);
+      for (const member of members.get(p.group)) if (!seen.has(member.pid)) owned.push(member);
+    }
+    for (const descendant of children.get(p.pid) ?? []) owned.push(descendant);
   }
-  for (const group of groups.keys()) if (!live.has(group)) groups.delete(group);
+  for (const group of groups.keys()) {
+    if ((live.has(group) && !confirmed.has(group)) || (!members.has(group) && signalGroup(group, 0))) {
+      throw new Error(`Could not verify ownership of process group ${group}`);
+    }
+  }
+  groups.clear();
+  for (const group of confirmed) if (live.has(group)) {
+    groups.set(group, new Map(members.get(group).map(p => [p.pid, p.started])));
+  }
 }
 
 function signalGroup(group, signal) {
@@ -239,15 +255,12 @@ function runDaemon() {
   function stopSession(session) {
     if (session.stopping) return session.stopping;
     if (session.exit) return Promise.resolve();
-    const leaderExited = session.childExit || session.child.exitCode !== null || session.child.signalCode !== null;
-    let verify = session.stopRequested && (leaderExited || [...session.groups.values()].some(Boolean));
     session.stopRequested = true;
     session.stopping = (async () => {
       const start = performance.now();
       const terminated = new Set();
       for (;;) {
-        if (session.groups.size) updateGroups(session.groups, await snapshot(), verify);
-        verify = false;
+        if (session.groups.size) updateGroups(session.groups, await snapshot(), session.child);
         if (session.childExit && !session.groups.size) { finishSession(session); return; }
         // Keep polling through escalation: the leader closing its stdio is not proof
         // that independently reparented tools are gone.
@@ -367,9 +380,9 @@ function runDaemon() {
 }
 
 // ------------------------------------------------------------------ client side
-function connect() {
+function connect(address = SOCKET) {
   return new Promise((resolve, reject) => {
-    const socket = net.connect(SOCKET);
+    const socket = net.connect(address);
     socket.once('connect', () => resolve(socket));
     socket.once('error', reject);
   });
@@ -379,7 +392,7 @@ async function connectOrStart() {
   try { return await connect(); } catch { /* start below */ }
   mkdirSync(RUN_DIR, { recursive: true, mode: 0o700 });
   chmodSync(RUN_DIR, 0o700);
-  const lock = join(RUN_DIR, 'startup.lock');
+  const lock = join(RUN_DIR, 'startup2.lock');
   // Multiple pre-warms/reconnects can arrive together. Only one launcher may probe,
   // replace a stale socket and start a daemon; never unlink another starter's socket.
   for (let attempt = 0; attempt < 100; attempt++) {
@@ -402,7 +415,7 @@ async function connectOrStart() {
       writeFileSync(fd, String(process.pid));
       closeSync(fd); fd = undefined;
       try { return await connect(); } catch { /* still no daemon */ }
-      const log = openSync(join(RUN_DIR, 'relay.log'), 'a', 0o600);
+      const log = openSync(join(RUN_DIR, 'relay2.log'), 'a', 0o600);
       let launchError;
       try {
         const daemon = spawn(process.execPath, [fileURLToPath(import.meta.url), 'daemon'], { detached: true, stdio: ['ignore', log, log], cwd: homedir() });
@@ -414,18 +427,19 @@ async function connectOrStart() {
         if (launchError) throw launchError;
         try { return await connect(); } catch { /* not ready yet */ }
       }
-      throw new Error(`relay daemon did not start; see ${join(RUN_DIR, 'relay.log')}`);
+      throw new Error(`relay daemon did not start; see ${join(RUN_DIR, 'relay2.log')}`);
     } finally {
       if (fd !== undefined) closeSync(fd);
       try { unlinkSync(lock); } catch { /* already removed */ }
     }
   }
-  throw new Error(`relay startup timed out; see ${join(RUN_DIR, 'relay.log')}`);
+  throw new Error(`relay startup timed out; see ${join(RUN_DIR, 'relay2.log')}`);
 }
 
-function request(message) {
-  return new Promise((resolve, reject) => {
-    const socket = net.connect(SOCKET);
+const OFFLINE = ['ENOENT', 'ECONNREFUSED'];
+async function request(address, message, expected, absent = []) {
+  const out = await new Promise((resolve, reject) => {
+    const socket = net.connect(address);
     let out = '', connected = false;
     const timer = setTimeout(() => socket.destroy(new Error('Timed out waiting for relay acknowledgement')), CONTROL_TIMEOUT_MS);
     socket.on('connect', () => {
@@ -435,30 +449,79 @@ function request(message) {
     socket.setEncoding('utf8');
     socket.on('data', chunk => { out += chunk; });
     socket.on('error', error => {
-      // Listing/shutting down an absent daemon is harmless. A hard stop must not
-      // claim success when it could not reach the daemon that owns the process.
-      if (message.op !== 'stop-tree' && !connected && ['ENOENT', 'ECONNREFUSED'].includes(error.code)) {
-        resolve(JSON.stringify({ relay: message.op, sessions: [], found: false, daemon: false }));
-      } else reject(error);
+      if (!connected && absent.includes(error.code)) resolve(null);
+      else reject(error);
     });
     socket.on('close', () => { clearTimeout(timer); resolve(out.trim()); });
   });
+  if (out === null) return null;
+  let response;
+  try { response = JSON.parse(out); } catch { /* incomplete or unsupported reply */ }
+  if (response?.relay === 'error') throw new Error(response.error);
+  if (response?.relay !== expected) throw new Error(`No relay ${message.op} acknowledgement`);
+  return response;
+}
+
+function hasLegacySocket() {
+  let stat;
+  try { stat = lstatSync(LEGACY_SOCKET); }
+  catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+  if (!stat.isSocket()) throw new Error('Legacy relay path is not a socket');
+  return true;
+}
+
+async function listOn(address) {
+  const response = await request(address, { op: 'list' }, 'list', OFFLINE);
+  if (response && (!Array.isArray(response.sessions) || response.sessions.some(s =>
+    typeof s?.id !== 'string' || !s.id || typeof s.alive !== 'boolean'))) throw new Error('Invalid relay session list');
+  return response;
+}
+
+async function listLegacy() {
+  return hasLegacySocket() ? listOn(LEGACY_SOCKET) : null;
+}
+
+const isAlive = (list, id) => list?.sessions.some(s => s.id === id && s.alive);
+
+async function listSessions() {
+  const [legacy, current] = await Promise.all([listLegacy(), listOn(SOCKET)]);
+  const sessions = new Map(current?.sessions.map(s => [s.id, s]));
+  // Prefer a live entry over exit history. If both are live, show the owner attach
+  // will use; old clients can still be connected to the legacy daemon.
+  for (const s of legacy?.sessions ?? []) if (s.alive || !sessions.has(s.id)) sessions.set(s.id, s);
+  return { relay: 'list', sessions: [...sessions.values()], ...(!legacy && !current ? { daemon: false } : {}) };
+}
+
+async function stopForCli(sessionId, compatible) {
+  if (typeof sessionId !== 'string' || !sessionId) throw new Error('Invalid session id');
+  if (isAlive(await listLegacy(), sessionId)) {
+    if (!compatible) throw new Error('Session is running in the legacy relay, which cannot acknowledge a process-tree stop');
+    if (isAlive(await listOn(SOCKET), sessionId)) throw new Error('Session is live in both relay daemons; refusing an ambiguous stop');
+    const reply = await request(LEGACY_SOCKET, { op: 'stop', sessionId }, 'stopped');
+    if (reply.found !== true) throw new Error('Legacy relay did not acknowledge stopping the listed session');
+    return reply;
+  }
+  // Outside the legacy path, both verbs require the same process-tree acknowledgement.
+  const reply = await request(SOCKET, { op: 'stop-tree', sessionId }, 'stopped');
+  if (typeof reply.found !== 'boolean') throw new Error('Invalid process-tree stop acknowledgement');
+  return reply;
+}
+
+async function shutdownDaemons() {
+  const shutdown = address => request(address, { op: 'shutdown' }, 'shutdown', OFFLINE);
+  const legacy = async () => hasLegacySocket() ? shutdown(LEGACY_SOCKET) : null;
+  const results = await Promise.allSettled([shutdown(SOCKET), legacy()]);
+  const failure = results.find(result => result.status === 'rejected');
+  if (failure) throw failure.reason;
+  const replies = results.map(result => result.value).filter(Boolean);
+  return { relay: 'shutdown', stopped: replies.reduce((n, r) => n + (Number.isSafeInteger(r.stopped) ? r.stopped : 0), 0), ...(!replies.length ? { daemon: false } : {}) };
 }
 
 async function runControl(command, sessionId) {
   try {
-    // Legacy daemons know 'stop' but its acknowledgement covers only Pi itself.
-    // Do not send it: an old relay should reject the operation without killing Pi.
-    const out = await request({ op: command === 'stop' ? 'stop-tree' : command, sessionId });
-    let response;
-    try { response = JSON.parse(out); } catch { /* not an acknowledgement */ }
-    if (response?.relay === 'error') throw new Error(response.error);
-    if (command === 'stop') {
-      if (response?.relay !== 'stopped' || typeof response.found !== 'boolean') {
-        throw new Error('No process-tree stop acknowledgement; restart the relay if it is from an older version');
-      }
-    } else if (response?.relay !== command) throw new Error(`No relay ${command} acknowledgement`);
-    process.stdout.write(out + '\n');
+    const response = command === 'list' ? await listSessions() : command === 'shutdown' ? await shutdownDaemons()
+      : await stopForCli(sessionId, command === 'stop-compatible');
+    process.stdout.write(JSON.stringify(response) + '\n');
   } catch (error) {
     process.stdout.write(JSON.stringify({ relay: 'error', error: error.message }) + '\n');
     process.stderr.write(`pidesk-relay: ${error.message}\n`);
@@ -484,8 +547,18 @@ async function runAttach() {
     process.stdin.on('data', onData);
     process.stdin.once('end', () => reject(new Error('no handshake')));
   });
-  const socket = await connectOrStart();
-  socket.write(handshake.endsWith('\n') ? handshake : handshake + '\n');
+  let message;
+  try { message = JSON.parse(handshake); } catch { /* do not log the boot record */ }
+  if (message?.op !== 'attach' || typeof message.sessionId !== 'string' || !message.sessionId) throw new Error('Invalid attach handshake');
+  const legacy = isAlive(await listLegacy(), message.sessionId);
+  const socket = legacy ? await connect(LEGACY_SOCKET) : await connectOrStart();
+  if (legacy) {
+    // The listed process can exit before this connection. Never respawn it on the
+    // old daemon; a subsequent attach will route to v2 once the old ID is not live.
+    delete message.spawn;
+    delete message.boot;
+  }
+  socket.write((legacy ? JSON.stringify(message) : handshake) + '\n');
   process.stdin.resume();
   process.stdin.pipe(socket);
   socket.pipe(process.stdout);
@@ -500,5 +573,5 @@ async function runAttach() {
 const [command, arg] = process.argv.slice(2);
 if (command === 'daemon') runDaemon();
 else if (command === 'attach') runAttach().catch(error => { process.stderr.write(`pidesk-relay: ${error.message}\n`); process.exit(1); });
-else if (command === 'list' || command === 'stop' || command === 'shutdown') runControl(command, arg);
-else { process.stderr.write('usage: pidesk-relay.mjs attach|daemon|list|stop <id>|shutdown\n'); process.exit(2); }
+else if (['list', 'stop', 'stop-compatible', 'shutdown'].includes(command)) runControl(command, arg);
+else { process.stderr.write('usage: pidesk-relay.mjs attach|daemon|list|stop <id>|stop-compatible <id>|shutdown\n'); process.exit(2); }
