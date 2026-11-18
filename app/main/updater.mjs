@@ -32,7 +32,7 @@ const newer = (a, b) => {
 const run = (cmd, args) => new Promise((resolve, reject) => execFile(cmd, args, { timeout: 300000 }, (error, stdout, stderr) => error ? reject(new Error(stderr || error.message)) : resolve(stdout)));
 
 export class Updater {
-  status = { state: 'idle' }; // idle | checking | downloading | ready | current | error
+  status = { state: 'idle' }; // idle | checking | downloading | ready | installing | current | error
   #timer = null;
   constructor({ app, net, cacheDir, send }) { Object.assign(this, { app, net, cacheDir, send }); }
 
@@ -50,7 +50,7 @@ export class Updater {
   }
 
   async check({ manual = false } = {}) {
-    if (['checking', 'downloading', 'ready'].includes(this.status.state)) return this.status;
+    if (['checking', 'downloading', 'ready', 'installing'].includes(this.status.state)) return this.status;
     this.#set({ state: 'checking' });
     try {
       // No api.github.com call: unauthenticated REST requests share a 60/hour
@@ -130,19 +130,25 @@ export class Updater {
   }
 
   // Replace the running bundle once this process exits, then start the new version.
-  install() {
-    const target = this.bundlePath;
-    if (this.status.state !== 'ready' || !target || !existsSync(this.status.path)) return false;
+  async install({ prepare, onQuit } = {}) {
+    const target = this.bundlePath, ready = this.status;
+    if (ready.state !== 'ready' || !target || !existsSync(ready.path)) return false;
     try { accessSync(dirname(target), constants.W_OK); }
-    catch { this.#set({ ...this.status, state: 'error', message: `Can’t replace the app in ${dirname(target)}; move Pi Desktop to Applications and try again.` }); return false; }
+    catch { throw new Error(`Can’t replace the app in ${dirname(target)}; move Pi Desktop to Applications and try again.`); }
+    this.#set({ state: 'installing', version: ready.version });
     const script = `
       while kill -0 ${process.pid} 2>/dev/null; do sleep 0.2; done
       rm -rf "$T.old"
       mv "$T" "$T.old" && mv "$N" "$T" && rm -rf "$T.old" || { [ -d "$T.old" ] && [ ! -d "$T" ] && mv "$T.old" "$T"; }
       xattr -dr com.apple.quarantine "$T" 2>/dev/null
       open "$T"`;
-    const child = spawn('/bin/sh', ['-c', script], { detached: true, stdio: 'ignore', env: { ...process.env, T: target, N: this.status.path } });
-    child.unref();
+    try {
+      await prepare?.(ready.version);
+      const child = spawn('/bin/sh', ['-c', script], { detached: true, stdio: 'ignore', env: { ...process.env, T: target, N: ready.path } });
+      await new Promise((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+      child.unref();
+    } catch (error) { this.#set(ready); throw error; }
+    onQuit?.();
     this.app.quit();
     return true;
   }

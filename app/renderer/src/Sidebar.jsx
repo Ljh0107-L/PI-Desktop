@@ -78,6 +78,8 @@ export function Sidebar() {
   };
   const appearance = useStore(s => s.appearance);
   const update = useStore(s => s.update);
+  const sessionUpdate = useStore(s => s.sessionUpdate);
+  const updateError = error => notify(error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), 'error');
   const sessions = useStore(s => s.sessions);
   const activeId = useStore(s => s.activeId);
   const view = useStore(s => s.view);
@@ -119,7 +121,11 @@ export function Sidebar() {
           <span className="update-fill" style={{ width: `${Math.max(4, Math.round((update.progress ?? 0) * 100))}%` }} />
           <span className="update-label">{Math.round((update.progress ?? 0) * 100)}%</span>
         </div>}
-        {update?.state === 'ready' && <button className="update-button" onClick={() => api('installUpdate')} title={`Restart to update to ${update.version}`}><Icon name="download" size={13} /> Update</button>}
+        {update?.state === 'ready' && sessionUpdate?.state !== 'restarting' && <button className="update-button" onClick={() => api('installUpdate').catch(updateError)} title={`Update to ${update.version} and restart running conversations`}><Icon name="download" size={13} /> Update</button>}
+        {(update?.state === 'installing' || sessionUpdate?.state === 'restarting') && <span className="update-button downloading" role="status" title="Restarting running conversations"><Spinner size={12} /> Restarting…</span>}
+        {sessionUpdate?.state === 'complete' && !['ready', 'downloading', 'installing'].includes(update?.state) && <button className="update-button" onClick={() => api('showSessionUpdateReport').catch(updateError)} title={`${sessionUpdate.version} · ${sessionUpdate.restarted} restarted · ${sessionUpdate.failures} issues`}>
+          {sessionUpdate.failures ? 'Update issues' : 'Updated'}
+        </button>}
       </div>
     </aside>
   );

@@ -13,7 +13,8 @@ lines.on('line', line => {
     lines.close(); process.stdin.destroy();
     return;
   }
-  const data = r.type === 'get_state' ? { sessionId: 'fixture', isStreaming: false } : {};
+  const sessionArg = process.argv.indexOf('--session');
+  const data = r.type === 'get_state' ? { sessionId: 'fixture', isStreaming: false, ...(sessionArg >= 0 ? { sessionFile: process.argv[sessionArg + 1] } : {}) } : {};
   setTimeout(() => process.stdout.write(JSON.stringify({ type: 'response', id: r.id, success: true, data }) + '\n'),
     r.type === 'get_state' ? Number(process.env.TEST_READY_DELAY ?? 0) : 0);
 });

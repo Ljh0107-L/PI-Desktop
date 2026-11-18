@@ -441,7 +441,8 @@ export async function listRelaySessions(env, facts) {
   return JSON.parse(out.trim().split('\n').pop()).sessions ?? [];
 }
 
-export function stopRelaySession(env, facts, sessionId, { requireTree = false } = {}) {
-  const command = requireTree ? 'stop' : 'stop-compatible';
-  return runSsh(env, relayCmd(facts, `${command} ${shellQuote(sessionId)}`), { timeout: 30000 });
+export const stopRelayCommand = ({ forUpdate, requireTree } = {}) => forUpdate ? 'stop-for-update' : requireTree ? 'stop' : 'stop-compatible';
+
+export function stopRelaySession(env, facts, sessionId, options) {
+  return runSsh(env, relayCmd(facts, `${stopRelayCommand(options)} ${shellQuote(sessionId)}`), { timeout: 30000 });
 }

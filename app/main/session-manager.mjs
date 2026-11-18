@@ -9,7 +9,7 @@ import { homedir } from 'node:os';
 import { PiSession } from '../../core/pi-session.mjs';
 import { closeSshMux, egressEnv, localRelayTransport, localTransport, relaySpawnSpec, shellQuote, sshRelayTransport } from '../../core/transports.mjs';
 import { startEgressProxy, hostPortOf } from '../../core/egress-proxy.mjs';
-import { listRelaySessions, prepareRemote, readInstallHint, runSsh, stopRelaySession } from './remote-setup.mjs';
+import { listRelaySessions, prepareRemote, readInstallHint, runSsh, stopRelayCommand, stopRelaySession } from './remote-setup.mjs';
 import { providerBaseUrl } from './custom-providers.mjs';
 import { builtinModelRoute, listBuiltinModels } from './builtin-providers.mjs';
 import { isRetiredProvider, RETIRED_PROVIDER_MESSAGE } from '../../core/retired-providers.mjs';
@@ -113,6 +113,7 @@ export class SessionManager extends EventEmitter {
   prepared = new Map();   // environment id -> Promise<remote facts>
   preparing = new Map();  // in-flight setup; force/provider changes must not race deployments
   stopping = new Map();   // do not reattach while a hard stop of this session is pending
+  updateRestartFailed = new Set(); // don't silently reattach to a process the update couldn't replace
   catalogCache = null;
   providersVersion = 0;   // bumped whenever providers/keys change in Settings
   egress = null;
@@ -169,9 +170,9 @@ export class SessionManager extends EventEmitter {
     if (env.kind === 'local') return JSON.parse((await this.#localRelay(['list'])).trim().split('\n').pop()).sessions ?? [];
     return listRelaySessions(env, await this.prepare(env.id));
   }
-  async stopRelay(env, id, { requireTree = false } = {}) {
-    if (env.kind === 'local') return this.#localRelay([requireTree ? 'stop' : 'stop-compatible', id]);
-    return stopRelaySession(env, await this.prepare(env.id), id, { requireTree });
+  async stopRelay(env, id, options) {
+    if (env.kind === 'local') return this.#localRelay([stopRelayCommand(options), id]);
+    return stopRelaySession(env, await this.prepare(env.id), id, options);
   }
 
   // ---------------------------------------------------------------- providers and models
@@ -701,6 +702,7 @@ export class SessionManager extends EventEmitter {
   // Connect (or reconnect) a session. SSH sessions live in the host's relay, so a dropped connection is
   // retried with backoff and resumes from the last event seen; Pi keeps working in the meantime.
   ensureStarted(id, recordOverride) {
+    if (this.updateRestartFailed.has(id)) return Promise.reject(new Error('This conversation was not restarted. See Update issues to retry.'));
     const stopping = this.stopping.get(id);
     if (stopping) return stopping.then(() => this.ensureStarted(id, recordOverride));
     if (isRetiredProvider((recordOverride ?? this.#recordOf(id))?.model?.provider)) return Promise.reject(new Error(RETIRED_PROVIDER_MESSAGE));
@@ -914,11 +916,11 @@ export class SessionManager extends EventEmitter {
   }
 
   // After the app starts, re-attach to sessions that kept running in a relay (this machine's or a host's).
-  async resumeRemote() {
+  async resumeRemote({ skip = new Set() } = {}) {
     // Set up every added host in the background now, so the first message there doesn't pay for it.
     for (const env of this.environments().filter(e => e.kind === 'ssh' && e.added && e.enabled)) this.prepare(env.id).catch(() => {});
     const byEnv = new Map();
-    for (const record of this.store.sessions.filter(s => !s.archived)) {
+    for (const record of this.store.sessions.filter(s => !s.archived && !skip.has(s.id))) {
       if (!byEnv.has(record.environmentId)) byEnv.set(record.environmentId, []);
       byEnv.get(record.environmentId).push(record);
     }

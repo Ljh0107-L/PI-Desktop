@@ -13,6 +13,7 @@ import { PiSession } from '../core/pi-session.mjs';
 import { localRelayTransport, relaySpawnSpec } from '../core/transports.mjs';
 import { startEgressProxy } from '../core/egress-proxy.mjs';
 import { SessionManager } from '../app/main/session-manager.mjs';
+import { planSessionUpdate, restartUpdatedSessions } from '../app/main/session-update.mjs';
 import { Store } from '../app/main/store.mjs';
 
 const exec = promisify(execFile);
@@ -456,6 +457,29 @@ test('quitting the app leaves no local relay or Pi behind', { timeout: 15000 }, 
   await manager.shutdown();
   assert.equal((await f.relay('list')).daemon, false, 'the relay daemon exited');
   assert.equal(alive(pid), false);
+});
+
+test('updating reopens a local conversation in a new process with its saved file and settings', { timeout: 15000 }, async t => {
+  const f = await fixture(t, { startDaemon: false });
+  const old = managerFor(t, f);
+  const record = await old.create({ environmentId: 'local', cwd: f.dir, model: { provider: 'openai', id: 'gpt-6.2-sol' }, thinkingLevel: 'high', speed: 'ultrafast' });
+  const piSessionFile = join(f.dir, 'saved.jsonl');
+  const saved = { ...record, piSessionFile };
+  const previousPid = old.runtimes.get(record.id).session.attachInfo.pid;
+  const plan = await planSessionUpdate(old, '0.2.29');
+  await old.shutdown();
+  assert.equal(alive(previousPid), false);
+  const updated = managerFor(t, f);
+  updated.store.sessions.push(saved, { ...saved, id: 'inactive' });
+  const result = await restartUpdatedSessions(updated, plan);
+  assert.deepEqual(result.failures, []);
+  assert.deepEqual(result.restarted.map(s => s.id), [record.id]);
+  const replacement = updated.runtimes.get(record.id).session;
+  assert.notEqual(replacement.attachInfo.pid, previousPid);
+  assert.equal(replacement.initialState.sessionFile, piSessionFile);
+  assert.deepEqual(updated.record(record.id).model, record.model);
+  assert.equal(updated.record(record.id).speed, 'ultrafast');
+  assert.equal(updated.runtimes.has('inactive'), false);
 });
 
 test('quitting also ends a relay daemon from an older version, which has no shutdown', { timeout: 15000 }, async t => {

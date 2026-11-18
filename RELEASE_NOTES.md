@@ -2,6 +2,12 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.29 — Restart running conversations after Update
+
+- **Refresh running sessions.** Confirming **Update** restarts live Pi and Claude Code conversations on this Mac and enabled SSH connections so the new processes load the updated code. Conversation history, folders, and model settings are kept. In-flight work may be interrupted; servers are not rebooted. Normal quit and reconnect still leave SSH sessions running.
+- **See what happened.** The sidebar shows progress, then **Updated** or **Update issues** with a restart report. Retry only the failed restarts. An unreachable host or a legacy process with tools that cannot be safely stopped is reported rather than quietly reattached.
+- **Upgrading from 0.2.28 or earlier:** the in-app updater can discover and restart the SSH sessions that survived the old app quitting. The old app did not record which local conversations were running, so reopen those from their history as needed.
+
 ## 0.2.28 — Safer sends, stops, and conversation history
 
 - **Fail closed on model changes.** Sending a message or running Compact now stops if Pi cannot apply the selected model; it will not send your text or context to the previous provider. SSH egress requires CONNECT for HTTPS, keeping TLS end to end.

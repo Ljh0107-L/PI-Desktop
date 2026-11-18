@@ -13,6 +13,7 @@ import { shellQuote } from '../../core/transports.mjs';
 import { SessionManager } from './session-manager.mjs';
 import { Terminals } from './terminals.mjs';
 import { Updater } from './updater.mjs';
+import { clearSessionUpdate, loadSessionUpdate, planSessionUpdate, restartUpdatedSessions, saveSessionUpdate } from './session-update.mjs';
 import { Store } from './store.mjs';
 import { UsageLedger } from './usage.mjs';
 import { stageExtensions } from './extensions.mjs';
@@ -112,11 +113,36 @@ function publicSettings() {
 
 const send = (channel, payload) => { if (window && !window.isDestroyed()) window.webContents.send('pidesk:event', { channel, payload }); };
 const terminals = new Terminals({ send });
-let updater = null;
+let updater = null, confirmingUpdate = false, updateQuit = false;
+let sessionRecovery = null, sessionUpdate = null;
+let quitting = false;
+const setSessionUpdate = (state, version, restarted = 0, failures = 0) => {
+  sessionUpdate = { state, version, restarted, failures };
+  send('session-update', sessionUpdate);
+};
+
+function recoverUpdatedSessions(plan, prior = []) {
+  setSessionUpdate('restarting', plan.version, prior.length);
+  const dir = app.getPath('userData');
+  manager.updateRestartFailed.clear();
+  sessionRecovery = restartUpdatedSessions(manager, plan, { checkpoint: next => saveSessionUpdate(dir, next), cancelled: () => quitting })
+    .then(result => {
+      if (!quitting) {
+        try { clearSessionUpdate(dir); }
+        catch (error) { result.failures.push({ environment: 'Pi Desktop', message: `Could not clear the restart plan: ${error.message}` }); }
+      }
+      return { ...result, restarted: [...prior, ...result.restarted] };
+    }).catch(error => ({ version: plan.version, restarted: prior, failures: [{ environment: 'Pi Desktop', message: error.message }] }))
+    .then(result => {
+      manager.updateRestartFailed = result.failedIds ?? new Set();
+      setSessionUpdate('complete', plan.version, result.restarted.length, result.failures.length);
+      return result;
+    });
+}
 
 const api = {
   async bootstrap() {
-    return { settings: publicSettings(), environments: environments(), sessions: manager.list(), piVersion, platform: process.platform, home: app.getPath('home') };
+    return { settings: publicSettings(), environments: environments(), sessions: manager.list(), sessionUpdate, piVersion, platform: process.platform, home: app.getPath('home') };
   },
   environments: () => environments(),
   // SSH connections the user works with (Settings → Connections).
@@ -200,7 +226,7 @@ const api = {
     return publicSettings();
   },
   listSessions: () => manager.list(),
-  resumeRemote: () => manager.resumeRemote(),
+  resumeRemote: async () => manager.resumeRemote({ skip: (await sessionRecovery)?.skipResume }),
   prewarm: draft => manager.prewarm(draft),
   warmSessions: () => [...manager.spares.values()].filter(sp => manager.runtimes.get(sp.id)?.status === 'connected').length,
   createSession: options => manager.create(options),
@@ -231,7 +257,44 @@ const api = {
   // test builds only: show an update state without a real release
   testUpdateStatus: status => { if (process.env.PIDESK_INSECURE_TEST_STORAGE === '1') send('update', status); },
   checkForUpdates: () => updater?.check({ manual: true }),
-  installUpdate: () => updater?.install(),
+  async installUpdate() {
+    if (confirmingUpdate || updater?.status.state !== 'ready') return false;
+    confirmingUpdate = true;
+    try {
+      const { response } = await dialog.showMessageBox(window, {
+        type: 'warning', buttons: ['Update and Restart', 'Cancel'], defaultId: 0, cancelId: 1,
+        message: `Update to Pi Desktop ${updater.status.version}?`,
+        detail: 'The update restarts running conversations on this Mac and connected SSH hosts. In-progress replies, compactions, and tools may be interrupted. Saved history and model settings are kept. No server is rebooted.',
+      });
+      if (response !== 0 || quitting) return false;
+      return await updater.install({
+        prepare: async version => saveSessionUpdate(app.getPath('userData'), await planSessionUpdate(manager, version)),
+        onQuit: () => { updateQuit = true; },
+      });
+    } finally { confirmingUpdate = false; }
+  },
+  async showSessionUpdateReport() {
+    if (sessionUpdate?.state !== 'complete') {
+      await dialog.showMessageBox(window, { message: sessionUpdate?.state === 'restarting' ? 'Conversations are still restarting.' : 'There is no update report for this launch.' });
+      return;
+    }
+    const recovery = sessionRecovery, result = await recovery;
+    if (!result) return;
+    const canRetry = !!result.retryPlan?.only.length;
+    const lines = [
+      ...result.restarted.map(({ environment, title }) => `✓ ${environment} — ${title ?? 'Conversation'}`),
+      ...result.failures.map(({ environment, title, message }) => `${environment}${title ? ` — ${title}` : ''}: ${message}`),
+    ];
+    const { response } = await dialog.showMessageBox(window, {
+      type: result.failures.length ? 'warning' : 'info', buttons: canRetry ? ['OK', 'Retry Restarts'] : ['OK'],
+      message: `Pi Desktop ${result.version} installed · ${result.restarted.length} conversations restarted`,
+      detail: lines.join('\n\n') || 'No running conversations needed to be restarted.',
+    });
+    if (canRetry && response === 1 && recovery === sessionRecovery && !quitting) {
+      saveSessionUpdate(app.getPath('userData'), result.retryPlan);
+      recoverUpdatedSessions(result.retryPlan, result.restarted);
+    }
+  },
   appVersion: () => app.getVersion(),
   usageSummary: () => usage.summary(),
   // Terminal panel
@@ -286,9 +349,16 @@ const api = {
   showInFolder: path => shell.showItemInFolder(path),
 };
 
+// Build the renderer and show progress while recovery runs, but don't race it with
+// an IPC that could attach to an old process or otherwise modify the session.
+const updateReadOnly = new Set(['bootstrap', 'appVersion', 'updateStatus', 'showSessionUpdateReport', 'appearance', 'catalog', 'listSessions', 'environments']);
 ipcMain.handle('pidesk:invoke', async (_event, method, ...args) => {
   const fn = api[method];
   if (!fn) throw new Error(`Unknown method ${method}`);
+  if (!updateReadOnly.has(method)) {
+    if (sessionUpdate?.state === 'restarting') await sessionRecovery;
+    if (quitting || updater?.status.state === 'installing') throw new Error('Pi Desktop is restarting');
+  }
   return fn(...args);
 });
 
@@ -316,6 +386,7 @@ app.whenReady().then(async () => {
       { role: 'about' },
       { label: 'Check for Updates…', click: () => updater.check({ manual: true }).then(st => { if (st.state === 'current') dialog.showMessageBox(window, { message: `Pi Desktop ${app.getVersion()} is up to date.` }); else if (st.state === 'error') dialog.showMessageBox(window, { type: 'warning', message: 'Couldn’t check for updates', detail: st.message }); }) },
       { type: 'separator' },
+      { label: 'Session Update Report…', click: () => api.showSessionUpdateReport().catch(error => send('notice', { level: 'error', message: error.message })) },
       { label: 'Settings…', accelerator: 'CmdOrCtrl+,', click: () => send('open-settings', {}) },
       { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { role: 'unhide' }, { type: 'separator' }, { role: 'quit' },
     ] },
@@ -356,6 +427,13 @@ app.whenReady().then(async () => {
   manager.on('ultra', ultraChanged);
   manager.on('status', ultraPiStatus);
   manager.on('sessions', () => send('sessions', manager.list()));
+  try {
+    const plan = loadSessionUpdate(app.getPath('userData'), app.getVersion(), { legacyCache: app.isPackaged ? updater.cacheDir : undefined });
+    if (plan) recoverUpdatedSessions(plan);
+  } catch (error) {
+    sessionRecovery = Promise.resolve({ version: app.getVersion(), restarted: [], failures: [{ environment: 'Pi Desktop', message: error.message }] });
+    setSessionUpdate('complete', app.getVersion(), 0, 1);
+  }
   createWindow();
   updater.start();
   if (process.env.PIDESK_SMOKE_TEST) smokeTest();
@@ -382,10 +460,10 @@ function ultraChanged({ id, ultra, ended, title, local }) {
   }
 }
 
-let quitting = false;
 app.on('before-quit', event => {
   if (quitting || !manager) return;
-  if (ultraLocal.size && window && !window.isDestroyed()) {
+  if (updater?.status.state === 'installing' && !updateQuit) { event.preventDefault(); return; }
+  if (!updateQuit && ultraLocal.size && window && !window.isDestroyed()) {
     const choice = dialog.showMessageBoxSync(window, { type: 'warning', buttons: ['Quit', 'Cancel'], defaultId: 1, cancelId: 1,
       message: `Ultra is working in ${ultraLocal.size === 1 ? 'a conversation' : `${ultraLocal.size} conversations`} on this Mac`,
       detail: 'Quitting stops it. It carries on when you open the conversation again.' });

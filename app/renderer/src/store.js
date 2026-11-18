@@ -147,6 +147,9 @@ window.pidesk.subscribe(({ channel, payload }) => {
     case 'update':
       set({ update: payload });
       break;
+    case 'session-update':
+      set({ sessionUpdate: payload });
+      break;
     case 'goal':
       set(s => ({ goals: { ...s.goals, [payload.id]: payload.goal } }));
       break;
@@ -211,6 +214,7 @@ export async function bootstrap() {
   const d = boot.settings.defaults;
   set({
     ready: true, settings: boot.settings, environments: boot.environments, sessions: boot.sessions, home: boot.home, piVersion: boot.piVersion,
+    sessionUpdate: state.sessionUpdate ?? boot.sessionUpdate,
     questions: Object.fromEntries(boot.sessions.map(s => [s.id, s.pendingQuestions ?? []])),
     draft: {
       environmentId: d.environmentId ?? 'local',

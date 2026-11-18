@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { stringify } from 'yaml';
 import { Updater } from '../app/main/updater.mjs';
+import { clearSessionUpdate, loadSessionUpdate, planSessionUpdate, restartUpdatedSessions, saveSessionUpdate } from '../app/main/session-update.mjs';
 import { MAX_MANIFEST_BYTES, parseUpdateManifest, UPDATE_MANIFEST_URL } from '../core/update-manifest.mjs';
 
 const checksum = data => createHash('sha512').update(data).digest('base64');
@@ -174,4 +175,110 @@ test('a ZIP transfer dropped mid-stream is retried; a repeated drop fails withou
   assert.equal(f.calls.length, 4); // the manifest plus three download attempts
   assert.ok(!f.events.some(e => e.state === 'ready'));
   assert.ok(!existsSync(join(f.dir, 'updates/0.1.18/app')));
+});
+
+test('failed update preparation leaves the bundle running and makes install retryable', async t => {
+  const f = fixture(t);
+  const appBundle = join(f.dir, 'Pi Desktop.app'), downloaded = join(f.dir, 'New.app');
+  mkdirSync(appBundle); mkdirSync(downloaded);
+  f.updater.app.getPath = () => join(appBundle, 'Contents/MacOS/Pi Desktop');
+  f.updater.app.quit = () => assert.fail('must not quit if the restart plan was not saved');
+  f.updater.status = { state: 'ready', version: '0.2.29', path: downloaded };
+  await assert.rejects(f.updater.install({ prepare: async version => {
+    assert.equal(version, '0.2.29');
+    assert.equal((await f.updater.check()).state, 'installing');
+    assert.equal(await f.updater.install(), false, 'cannot launch two bundle replacers');
+    throw new Error('read-only profile');
+  } }), /read-only profile/);
+  assert.equal(f.updater.status.state, 'ready');
+  assert.ok(existsSync(downloaded));
+});
+
+test('the old updater leaves an empty staging directory; a newer updater writes a versioned restart plan', t => {
+  const { dir } = fixture(t);
+  const legacyCache = join(dir, 'updates'), stage = join(legacyCache, '0.2.29', 'app');
+  mkdirSync(join(stage, 'Pi Desktop.app'), { recursive: true });
+  assert.equal(loadSessionUpdate(dir, '0.2.29', { legacyCache }), null, 'downloaded is not installed');
+  rmSync(join(stage, 'Pi Desktop.app'), { recursive: true });
+  const plan = loadSessionUpdate(dir, '0.2.29', { legacyCache });
+  assert.deepEqual(plan, { version: '0.2.29', reopen: [], done: [] }, 'cannot guess which local sessions were live');
+  rmSync(legacyCache, { recursive: true });
+  assert.deepEqual(loadSessionUpdate(dir, '0.2.29', { legacyCache }), plan);
+  const pending = { version: '0.2.30', reopen: ['live-local'], done: [] };
+  saveSessionUpdate(dir, pending);
+  assert.equal(loadSessionUpdate(dir, '0.2.29'), null);
+  assert.deepEqual(loadSessionUpdate(dir, pending.version), pending);
+  clearSessionUpdate(dir);
+  assert.equal(loadSessionUpdate(dir, pending.version), null);
+});
+
+function restartFixture() {
+  const local = { id: 'local', kind: 'local', label: 'This Mac' };
+  const ssh = { id: 'ssh:gpu', kind: 'ssh', label: 'GPU', added: true, enabled: true };
+  const down = { ...ssh, id: 'ssh:down', label: 'Down' };
+  const disabled = { ...ssh, id: 'ssh:disabled', enabled: false };
+  const record = (id, env, fields = {}) => ({ id, title: id, environmentId: env.id, piSessionFile: `/sessions/${id}.jsonl`, ...fields });
+  const sessions = [record('local-live', local), record('local-idle', local), record('remote-live', ssh), record('remote-claude', ssh, { engine: 'claude-code' }), record('remote-idle', ssh),
+    record('archive', ssh, { archived: true }), record('cursor', ssh, { engine: 'cursor' }), record('disabled', disabled), record('offline', down)];
+  const live = new Set(['local-live', 'remote-live', 'remote-claude', 'archive', 'cursor', 'disabled']);
+  const trace = [], errors = new Map();
+  let online = false;
+  const manager = {
+    store: { sessions }, environments: () => [local, ssh, down, disabled],
+    async relaySessions(env) {
+      trace.push(['list', env.id]);
+      if (env === down && !online) throw new Error('SSH timeout');
+      return sessions.filter(r => r.environmentId === env.id).map(({ id }) => ({ id, alive: live.has(id) }));
+    },
+    async stopRelay(env, id, options) {
+      trace.push(['stop', id]); assert.equal(options.forUpdate, true);
+      if (errors.has(id)) return errors.get(id);
+      live.delete(id); return '{"relay":"stopped","found":true}\n';
+    },
+    async ensureStarted(id) {
+      trace.push(['start', id]);
+      assert.equal(live.has(id), false, 'never launch another writer before acknowledging the stop');
+      live.add(id);
+      return { attachInfo: { created: true } };
+    },
+  };
+  return { manager, trace, live, errors, setOnline: () => { online = true; } };
+}
+
+test('update reopens saved local history and restarts only live SSH sessions; retries only failures', async () => {
+  const f = restartFixture();
+  const plan = await planSessionUpdate(f.manager, '0.2.30');
+  assert.deepEqual(plan.reopen, ['local-live']);
+  assert.deepEqual(f.trace.splice(0), [['list', 'local']]);
+  f.live.delete('local-live'); // the old Mac app shut down
+  f.errors.set('remote-live', '{"relay":"error"}');
+  const checkpoints = [];
+  const result = await restartUpdatedSessions(f.manager, plan, { checkpoint: plan => checkpoints.push(plan) });
+  assert.deepEqual(result.restarted.map(r => r.id).sort(), ['local-live', 'remote-claude']);
+  assert.deepEqual(result.retryPlan.only.sort(), ['offline', 'remote-live']);
+  assert.ok(result.failures.some(failure => /SSH timeout/.test(failure.message)));
+  assert.ok(result.failures.some(failure => /did not acknowledge/.test(failure.message)));
+  assert.ok(result.skipResume.has('remote-live'));
+  assert.ok(!f.trace.some(([op, id]) => op === 'list' && id === 'ssh:disabled'));
+  assert.deepEqual(f.trace.filter(([op]) => op === 'stop').map(([, id]) => id).sort(), ['remote-claude', 'remote-live']);
+  assert.deepEqual(f.trace.filter(([op]) => op === 'start').map(([, id]) => id).sort(), ['local-live', 'remote-claude']);
+  assert.ok(checkpoints.some(p => p.reopen.includes('remote-claude') && !p.done.includes('remote-claude')));
+  f.setOnline(); f.errors.clear(); f.trace.length = 0;
+  const retried = await restartUpdatedSessions(f.manager, result.retryPlan);
+  assert.deepEqual(retried.restarted.map(r => r.id), ['remote-live']);
+  assert.deepEqual(retried.failures, []);
+  assert.deepEqual(f.trace.filter(([op]) => op === 'stop' || op === 'start'), [['stop', 'remote-live'], ['start', 'remote-live']]);
+});
+
+test('quitting after a remote stop keeps that session in the persisted reopen set', async () => {
+  const { manager, live } = restartFixture();
+  let checkpoint, quitting = false;
+  const stop = manager.stopRelay;
+  manager.stopRelay = async (...args) => { const ack = await stop(...args); quitting = true; return ack; };
+  const plan = { version: '0.2.29', reopen: [], done: [], only: ['remote-live'] };
+  await restartUpdatedSessions(manager, plan, { checkpoint: plan => { checkpoint = plan; }, cancelled: () => quitting });
+  assert.equal(live.has('remote-live'), false);
+  assert.deepEqual(checkpoint.reopen, ['remote-live']);
+  const result = await restartUpdatedSessions(manager, checkpoint);
+  assert.deepEqual(result.restarted.map(r => r.id), ['remote-live']);
 });
