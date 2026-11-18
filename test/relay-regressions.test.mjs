@@ -142,31 +142,66 @@ test('relay stop waits for detached tool groups after the session leader exits',
   assert.equal(replacement.records[0].created, true);
 });
 
-test('relay shutdown returns a bounded error instead of acknowledging a surviving process', { timeout: 15000 }, async t => {
+test('relay stop and shutdown fail instead of acknowledging a surviving process', { timeout: 15000 }, async t => {
   const f = await fixture(t, dir => `
-    import { existsSync } from 'node:fs';
+    import { existsSync, readFileSync } from 'node:fs';
+    const block = ${JSON.stringify(join(dir, 'block-signals'))};
     const kill = process.kill;
-    process.kill = (pid, signal) => pid < 0 && signal !== 0 && existsSync(${JSON.stringify(join(dir, 'block-signals'))})
-      ? true : kill(pid, signal);
+    process.kill = (pid, signal) => {
+      if (pid >= 0 || signal === 0 || !existsSync(block)) return kill(pid, signal);
+      if (readFileSync(block, 'utf8') === 'timeout') return true;
+      throw Object.assign(new Error('signal refused'), { code: 'EPERM' });
+    };
   `);
   const a = await f.attach('stubborn', `${stubborn} process.stdin.resume(); console.log('{"type":"ready"}');`);
   await waitFor(() => a.records.length === 2, 'stubborn child to start');
   const pid = a.records[0].pid;
   const block = join(f.dir, 'block-signals');
-  writeFileSync(block, '');
+  writeFileSync(block, 'timeout');
   try {
-    await assert.rejects(f.control('shutdown'), error => {
+    const failed = reason => error => {
       assert.equal(error.code, 1);
-      assert.deepEqual(JSON.parse(error.stdout), { relay: 'error', error: 'Timed out stopping session stubborn' });
-      assert.match(error.stderr, /Timed out stopping/);
+      assert.deepEqual(JSON.parse(error.stdout), { relay: 'error', error: reason });
+      assert.ok(error.stderr.includes(reason));
       return true;
-    });
+    };
+    await assert.rejects(f.control('stop', 'stubborn'), failed('Timed out stopping session stubborn'));
+    writeFileSync(block, 'refuse');
+    await assert.rejects(f.control('shutdown'), failed('signal refused'));
     assert.equal(running(pid), true);
     assert.equal((await f.list()).find(s => s.id === 'stubborn').alive, true);
   } finally { rmSync(block); }
   assert.equal(JSON.parse((await f.control('shutdown')).stdout).relay, 'shutdown');
   assert.equal(running(pid), false);
   assert.deepEqual(await f.closed, [0, null]);
+});
+
+test('hard stop does not send a legacy parent-only stop or succeed when no daemon answers', { timeout: 10000 }, async t => {
+  const dir = mkdtempSync('/tmp/pidesk-relay-old-');
+  const env = { ...process.env, PIDESK_RUN_DIR: dir };
+  const stop = () => exec(process.execPath, [relay, 'stop', 'session'], { env, timeout: 8000 });
+  const operations = [];
+  const server = net.createServer(socket => socket.once('data', data => {
+    const { op } = JSON.parse(data);
+    operations.push(op);
+    if (op === 'stop') socket.end('{"relay":"stopped","found":true}\n');
+    else socket.end(); // a pre-process-tree relay ignores the unknown operation
+  }));
+  t.after(async () => {
+    if (server.listening) await new Promise(resolve => server.close(resolve));
+    rmSync(dir, { recursive: true, force: true });
+  });
+  const failed = reason => error => {
+    assert.equal(error.code, 1);
+    assert.equal(JSON.parse(error.stdout).relay, 'error');
+    assert.match(error.stderr, reason);
+    return true;
+  };
+  await assert.rejects(stop(), failed(/ENOENT/));
+  server.listen(join(dir, 'relay.sock'));
+  await once(server, 'listening');
+  await assert.rejects(stop(), failed(/restart the relay/));
+  assert.deepEqual(operations, ['stop-tree']);
 });
 
 test('relay bounds live and replay socket queues while healthy readers catch up', { timeout: 15000 }, async t => {

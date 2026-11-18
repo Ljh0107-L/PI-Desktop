@@ -30,6 +30,7 @@ const CLIENT_DRAIN_MS = 30000;
 const STOP_TERM_MS = 500;
 const STOP_KILL_MS = 2000;
 const STOP_TIMEOUT_MS = 5000;
+const CONTROL_TIMEOUT_MS = STOP_TIMEOUT_MS + 3000;
 const EXITED_RETENTION_MS = 30 * 60 * 1000;
 const IDLE_EXIT_MS = 15 * 60 * 1000;
 const DIALOGS = new Set(['select', 'confirm', 'input', 'editor']);
@@ -307,7 +308,11 @@ function runDaemon() {
           reply(socket, { relay: 'list', sessions: [...sessions.values()].map(s => ({ id: s.id, pid: s.child.pid, cwd: s.cwd, alive: !s.exit, exit: s.exit, startedAt: s.startedAt, lastSeq: s.seq, clients: s.clients.size, pendingUi: s.pendingUi.size })) });
           return;
         }
-        if (message.op === 'stop') {
+        if (message.op === 'stop-tree' || message.op === 'stop') {
+          if (typeof message.sessionId !== 'string' || !message.sessionId) {
+            reply(socket, { relay: 'error', error: 'Invalid session id' });
+            return;
+          }
           const s = sessions.get(message.sessionId);
           // Acknowledgement means neither Pi nor its tools can still write the session.
           const stopped = s ? stopSession(s) : Promise.resolve();
@@ -418,25 +423,45 @@ async function connectOrStart() {
   throw new Error(`relay startup timed out; see ${join(RUN_DIR, 'relay.log')}`);
 }
 
-async function request(message) {
-  let socket;
-  try { socket = await connect(); } catch { return JSON.stringify({ relay: message.op, sessions: [], found: false, daemon: false }); }
-  socket.write(JSON.stringify(message) + '\n');
-  let out = '';
-  socket.setEncoding('utf8');
-  socket.on('data', d => { out += d; });
-  await new Promise(r => socket.on('close', r));
-  return out.trim();
+function request(message) {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(SOCKET);
+    let out = '', connected = false;
+    const timer = setTimeout(() => socket.destroy(new Error('Timed out waiting for relay acknowledgement')), CONTROL_TIMEOUT_MS);
+    socket.on('connect', () => {
+      connected = true;
+      socket.write(JSON.stringify(message) + '\n');
+    });
+    socket.setEncoding('utf8');
+    socket.on('data', chunk => { out += chunk; });
+    socket.on('error', error => {
+      // Listing/shutting down an absent daemon is harmless. A hard stop must not
+      // claim success when it could not reach the daemon that owns the process.
+      if (message.op !== 'stop-tree' && !connected && ['ENOENT', 'ECONNREFUSED'].includes(error.code)) {
+        resolve(JSON.stringify({ relay: message.op, sessions: [], found: false, daemon: false }));
+      } else reject(error);
+    });
+    socket.on('close', () => { clearTimeout(timer); resolve(out.trim()); });
+  });
 }
 
-async function runControl(message) {
-  const out = await request(message);
-  process.stdout.write(out + '\n');
-  if (message.op === 'list') return;
-  let response;
-  try { response = JSON.parse(out); } catch { /* old daemons may not answer shutdown */ }
-  if (!response || response.relay === 'error') {
-    process.stderr.write(`pidesk-relay: ${response?.error ?? 'no relay acknowledgement'}\n`);
+async function runControl(command, sessionId) {
+  try {
+    // Legacy daemons know 'stop' but its acknowledgement covers only Pi itself.
+    // Do not send it: an old relay should reject the operation without killing Pi.
+    const out = await request({ op: command === 'stop' ? 'stop-tree' : command, sessionId });
+    let response;
+    try { response = JSON.parse(out); } catch { /* not an acknowledgement */ }
+    if (response?.relay === 'error') throw new Error(response.error);
+    if (command === 'stop') {
+      if (response?.relay !== 'stopped' || typeof response.found !== 'boolean') {
+        throw new Error('No process-tree stop acknowledgement; restart the relay if it is from an older version');
+      }
+    } else if (response?.relay !== command) throw new Error(`No relay ${command} acknowledgement`);
+    process.stdout.write(out + '\n');
+  } catch (error) {
+    process.stdout.write(JSON.stringify({ relay: 'error', error: error.message }) + '\n');
+    process.stderr.write(`pidesk-relay: ${error.message}\n`);
     process.exitCode = 1;
   }
 }
@@ -475,5 +500,5 @@ async function runAttach() {
 const [command, arg] = process.argv.slice(2);
 if (command === 'daemon') runDaemon();
 else if (command === 'attach') runAttach().catch(error => { process.stderr.write(`pidesk-relay: ${error.message}\n`); process.exit(1); });
-else if (command === 'list' || command === 'stop' || command === 'shutdown') runControl({ op: command, sessionId: arg });
+else if (command === 'list' || command === 'stop' || command === 'shutdown') runControl(command, arg);
 else { process.stderr.write('usage: pidesk-relay.mjs attach|daemon|list|stop <id>|shutdown\n'); process.exit(2); }
