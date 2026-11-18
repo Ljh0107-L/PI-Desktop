@@ -685,7 +685,7 @@ function WorkingRow({ session, transcript }) {
   const lastBlock = live?.content?.filter(Boolean).at(-1);
   const pending = messages.at(-1)?.__optimistic;
   const state = pending ? 'Interrupting…'
-    : session?.compacting || transcript.compacting ? 'Compacting conversation'
+    : (session?.compacting ?? transcript.compacting) ? 'Compacting conversation'
     : transcript.retry ? `Reconnecting to model · retry ${transcript.retry.attempt}/${transcript.retry.maxAttempts}`
     : !live || !live.content?.length || lastBlock?.type === 'thinking' ? 'Thinking'
     : lastBlock?.type === 'toolCall' ? 'Working' : 'Writing';
@@ -854,7 +854,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
     setFileMenu({ path, dir: String(path).endsWith('/'), anchor: pointAnchor(e.clientX, e.clientY) });
   }, []);
   const disclosure = useMemo(() => ({ expanded, setExpanded, pauseFollowing, onOpenFile, onFileContextMenu, sessionId: session?.id }), [expanded, pauseFollowing, onOpenFile, onFileContextMenu, session?.id]);
-  const working = session?.streaming || session?.compacting || transcript.compacting || session?.status === 'connecting';
+  const working = session?.streaming || (session?.compacting ?? transcript.compacting) || session?.status === 'connecting';
   // Only while there is nothing to show yet: history now comes from the session file while Pi starts, and
   // a new conversation already shows your message.
   const loading = !transcript.error && !transcript.loaded;

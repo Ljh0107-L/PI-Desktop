@@ -58,7 +58,7 @@ async function fixture(t, { startDaemon = true, mode, delay = 0 } = {}) {
 function managerFor(t, f, extraEnv = {}) {
   const store = { sessions: [], settings: { providers: [], environments: {} }, saveSessions() {}, touchRecent() {} };
   const manager = new SessionManager({ store, environments: () => [{ id: 'local', kind: 'local', label: 'Local' }, { id: 'remote', kind: 'ssh', enabled: true }],
-    local: { node: process.execPath, piCli: peer, agentDir: f.dir, runDir: f.runDir, extraEnv }, relayPath: f.relayPath, bridgePath: peer });
+    local: { node: process.execPath, piCli: peer, agentDir: f.dir, runDir: f.runDir, uploadDir: join(f.dir, 'uploads'), extraEnv }, relayPath: f.relayPath, bridgePath: peer });
   f.cleanups.push(() => manager.shutdown());
   return manager;
 }
@@ -183,6 +183,126 @@ test('interrupt deadline includes a hung abort RPC', { timeout: 15000 }, async t
   assert.notEqual(manager.runtimes.get(record.id).session.attachInfo.pid, pid);
 });
 
+test('an unapplied model blocks both prompt and compaction RPCs until it can be selected', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const manager = managerFor(t, f);
+  const record = await manager.create({ environmentId: 'local', cwd: f.dir, model: { provider: 'old', id: 'model' } });
+  const session = manager.runtimes.get(record.id).session;
+  // A model can be saved while a process is detached, before Pi tries to apply it.
+  manager.record(record.id).model = { provider: 'selected', id: 'model' };
+  const request = session.request.bind(session);
+  const sent = [];
+  let available = false;
+  t.mock.method(session, 'request', async (type, payload, options) => {
+    if (type === 'set_model' && payload.provider === 'selected' && !available) throw new Error('Selected model unavailable');
+    if (type === 'prompt' || type === 'compact') sent.push(type);
+    return request(type, payload, options);
+  });
+  await assert.rejects(manager.prompt(record.id, 'Private text'), /Selected model unavailable/);
+  await assert.rejects(manager.compact(record.id), /Selected model unavailable/);
+  assert.deepEqual(sent, []);
+  assert.equal(manager.record(record.id).title, 'New session');
+  available = true;
+  await manager.prompt(record.id, 'Private text');
+  await manager.compact(record.id);
+  assert.deepEqual(sent.filter(type => type === 'compact'), ['compact']);
+  assert.ok(sent.includes('prompt'));
+  assert.equal(manager.runtimes.get(record.id).applied.model.provider, 'selected');
+});
+
+test('Stop hard-stops after rejected Abort even when streaming state is stale', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const manager = managerFor(t, f);
+  const record = await manager.create({ environmentId: 'local', cwd: f.dir });
+  const runtime = manager.runtimes.get(record.id);
+  const pid = runtime.session.attachInfo.pid;
+  assert.equal(runtime.streaming, false);
+  t.mock.method(runtime.session, 'abort', async () => { throw new Error('Abort rejected'); });
+  const stopRelay = manager.stopRelay.bind(manager);
+  const stop = t.mock.method(manager, 'stopRelay', async () => { throw new Error('Relay offline'); });
+  const statuses = [];
+  manager.on('status', status => statuses.push(status));
+  await assert.rejects(manager.abort(record.id), /Relay offline/);
+  assert.equal(stop.mock.callCount(), 1);
+  assert.equal(manager.runtimes.get(record.id), runtime);
+  assert.ok(alive(pid));
+  assert.ok(!statuses.some(status => status.status === 'disconnected'));
+  stop.mock.restore();
+  const resolved = t.mock.method(manager, 'stopRelay', stopRelay);
+  await manager.abort(record.id);
+  assert.equal(resolved.mock.callCount(), 1);
+  assert.equal(alive(pid), false);
+  assert.equal(manager.runtimes.has(record.id), false);
+  assert.equal(statuses.at(-1).status, 'disconnected');
+});
+
+test('startup state and compaction events keep an unfocused Pi out of the idle sweep', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const manager = managerFor(t, f);
+  const start = PiSession.prototype.start;
+  t.mock.method(PiSession.prototype, 'start', async function (...args) {
+    await start.apply(this, args);
+    this.initialState.isCompacting = true;
+    return this;
+  });
+  const statuses = [];
+  manager.on('status', status => statuses.push(status));
+  const record = await manager.create({ environmentId: 'local', cwd: f.dir });
+  assert.equal(record.compacting, true);
+  const { session } = manager.runtimes.get(record.id);
+  const sweepStale = () => manager.sweep(Date.now() + 60 * 60 * 1000);
+  assert.deepEqual(await sweepStale(), []);
+  session.emit('event', { type: 'compaction_end' });
+  session.emit('event', { type: 'compaction_start' });
+  session.emit('event', { type: 'agent_settled' });
+  assert.equal(statuses.at(-1).compacting, true);
+  assert.deepEqual(await sweepStale(), []);
+  session.emit('event', { type: 'compaction_end' });
+  assert.equal(statuses.at(-1).compacting, false);
+  assert.deepEqual(await sweepStale(), [record.id]);
+});
+
+test('manual compaction stays busy before its first event and after the RPC times out', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const manager = managerFor(t, f);
+  const record = await manager.create({ environmentId: 'local', cwd: f.dir });
+  const { session } = manager.runtimes.get(record.id);
+  const request = session.request.bind(session);
+  let started, fail;
+  const pending = new Promise(resolve => { started = resolve; });
+  t.mock.method(session, 'request', (type, ...args) => type !== 'compact' ? request(type, ...args) : new Promise((_, reject) => {
+    fail = reject;
+    started();
+  }));
+  const compaction = manager.compact(record.id);
+  await pending;
+  const sweepStale = () => manager.sweep(Date.now() + 60 * 60 * 1000);
+  assert.deepEqual(await sweepStale(), []);
+  session.emit('event', { type: 'compaction_start', reason: 'manual' });
+  fail(new Error('timeout waiting for compact'));
+  await assert.rejects(compaction, /timeout waiting for compact/);
+  assert.deepEqual(await sweepStale(), []);
+  session.emit('event', { type: 'compaction_end', reason: 'manual' });
+  assert.deepEqual(await sweepStale(), [record.id]);
+});
+
+test('attachments with identical sanitized names keep their own bytes across sends', { timeout: 10000 }, async t => {
+  const f = await fixture(t);
+  const manager = managerFor(t, f);
+  const record = await manager.create({ environmentId: 'local', cwd: f.dir });
+  const { session } = manager.runtimes.get(record.id);
+  const text = [];
+  t.mock.method(session, 'prompt', async message => { if (message.includes('Attached files:')) text.push(message); });
+  const attachment = (name, value) => ({ kind: 'file', name, data: Buffer.from(value).toString('base64') });
+  await Promise.all([
+    manager.prompt(record.id, 'first', [attachment('a b.txt', 'one'), attachment('a?b.txt', 'two')]),
+    manager.prompt(record.id, 'second', [attachment('a_b.txt', 'three'), attachment('..', 'four')]),
+  ]);
+  const paths = text.flatMap(message => [...message.matchAll(/^- (.+)$/gm)].map(match => match[1]));
+  assert.equal(new Set(paths).size, 4);
+  assert.deepEqual(paths.map(path => readFileSync(path, 'utf8')).sort(), ['four', 'one', 'three', 'two']);
+});
+
 test('cancelled forks never persist a second record pointing at the source file', { timeout: 10000 }, async t => {
   const f = await fixture(t);
   const manager = managerFor(t, f);
@@ -261,28 +381,29 @@ test('egress shutdown destroys CONNECT tunnels and handles listen errors', { tim
   await waitFor(() => client.destroyed && peers.size === 0);
 });
 
-test('egress proxy forwards allowlisted HTTP URLs, IPv6 CONNECT targets, and rejects disallowed hosts', { timeout: 5000 }, async t => {
+test('egress proxy forwards allowed HTTP and requires CONNECT for HTTPS', { timeout: 5000 }, async t => {
   const http = await import('node:http');
-  const upstream = http.createServer((req, res) => res.writeHead(200, { 'content-type': 'text/plain' }).end(`ok:${req.url}`));
+  let requests = 0;
+  const upstream = http.createServer((req, res) => {
+    requests++;
+    res.writeHead(200, { 'content-type': 'text/plain' }).end(`ok:${req.url}`);
+  });
   upstream.listen(0, '127.0.0.1'); await once(upstream, 'listening');
   t.after(() => { upstream.closeAllConnections?.(); upstream.close(); });
   const target = `127.0.0.1:${upstream.address().port}`;
   const proxy = await startEgressProxy({ allow: [target] });
   t.after(() => proxy.close());
-  const viaProxy = await new Promise((resolve, reject) => {
-    const req = http.request({ host: '127.0.0.1', port: proxy.port, method: 'GET', path: `http://${target}/v1/models` }, res => {
+  const viaProxy = path => new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: proxy.port, method: 'GET', path }, res => {
       let body = ''; res.on('data', d => { body += d; }); res.on('end', () => resolve({ status: res.statusCode, body }));
     });
     req.on('error', reject);
     req.end();
   });
-  assert.deepEqual(viaProxy, { status: 200, body: 'ok:/v1/models' });
-  const denied = await new Promise((resolve, reject) => {
-    const req = http.request({ host: '127.0.0.1', port: proxy.port, method: 'GET', path: 'http://evil.invalid/v1/models' }, res => resolve(res.statusCode));
-    req.on('error', reject);
-    req.end();
-  });
-  assert.equal(denied, 403);
+  assert.deepEqual(await viaProxy(`http://${target}/v1/models`), { status: 200, body: 'ok:/v1/models' });
+  assert.equal((await viaProxy(`https://${target}/v1/models`)).status, 405);
+  assert.equal((await viaProxy('http://disallowed.invalid/v1/models')).status, 403);
+  assert.equal(requests, 1, 'an HTTPS URL must never reach the plaintext upstream');
 });
 
 // Nothing of the app keeps running on this Mac after it quits; sessions on SSH hosts keep their relays.

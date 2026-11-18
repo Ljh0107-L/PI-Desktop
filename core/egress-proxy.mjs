@@ -4,7 +4,8 @@
 // A loopback-only HTTP CONNECT proxy that tunnels raw TCP to an allowlist of host:port pairs.
 // The SSH session reverse-forwards a remote loopback port to it (ssh -R), and the remote Pi gets
 // HTTPS_PROXY pointing there. TLS stays end-to-end between the remote Pi and the provider, so the
-// desktop never sees request bodies or the API key in clear text.
+// desktop never sees HTTPS request bodies or the API key in clear text. Intentionally
+// unencrypted HTTP providers can also use ordinary HTTP forwarding.
 import http from 'node:http';
 import net from 'node:net';
 
@@ -16,8 +17,11 @@ export function startEgressProxy({ allow = [], port = 0 } = {}) {
   const server = http.createServer((req, res) => {
     let targetUrl;
     try { targetUrl = new URL(req.url ?? ''); } catch { res.writeHead(405).end('CONNECT only'); return; }
-    if (!['http:', 'https:'].includes(targetUrl.protocol)) { res.writeHead(405).end('CONNECT only'); return; }
-    const target = `${targetUrl.hostname}:${targetUrl.port || (targetUrl.protocol === 'https:' ? 443 : 80)}`.toLowerCase();
+    // CONNECT is the only supported way to reach an HTTPS provider. Never downgrade
+    // an absolute HTTPS URL to HTTP or authorize a different port than we dial.
+    if (targetUrl.protocol !== 'http:') { res.writeHead(405).end('Use CONNECT for HTTPS'); return; }
+    const port = Number(targetUrl.port || 80);
+    const target = `${targetUrl.hostname}:${port}`.toLowerCase();
     if (!allowed.has(target)) {
       stats.rejected.push(target);
       if (stats.rejected.length > 100) stats.rejected.shift();
@@ -30,7 +34,7 @@ export function startEgressProxy({ allow = [], port = 0 } = {}) {
     delete headers['proxy-authorization'];
     const upstream = http.request({
       hostname: targetUrl.hostname.replace(/^\[|\]$/g, ''),
-      port: Number(targetUrl.port || 80),
+      port,
       method: req.method,
       path: `${targetUrl.pathname}${targetUrl.search}`,
       headers,

@@ -343,7 +343,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   const [mentionIndex, setMentionIndex] = useState(0);
   const ref = useRef(null);
   const fileInput = useRef(null);
-  const streaming = session?.streaming;
+  const working = session?.streaming || session?.compacting;
   const size = useRef(null);
   useEffect(() => { if (autoFocus) ref.current?.focus({ preventScroll: true }); }, [autoFocus, session?.id]);
   useLayoutEffect(() => {
@@ -446,11 +446,14 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   };
   const canSend = !!(text.trim() || attachments.length);
   const attachmentControl = <button type="button" className="composer-plus" aria-label="Add attachment" title="Add files or images" onClick={() => fileInput.current?.click()}><Icon name="plus" size={17} /></button>;
-  const stopButton = streaming && !onCancel
-    ? <button type="button" className="send-button stop" onClick={() => { clearQueued(session.id); api('abort', session.id); }} aria-label="Stop" title="Stop generation"><Icon name="stop" size={16} /></button>
+  const stopButton = working && !onCancel
+    ? <button type="button" className="send-button stop" onClick={() => {
+      clearQueued(session.id);
+      api('abort', session.id).catch(error => notify(error.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), 'error'));
+    }} aria-label="Stop" title={session?.compacting ? 'Stop compaction' : 'Stop generation'}><Icon name="stop" size={16} /></button>
     : null;
-  const sendButton = (!streaming || canSend || onCancel)
-    ? <button type="button" className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={submit} aria-label="Send" title={streaming ? 'Send to interrupt (Enter)' : 'Send (Enter)'}><Icon name="arrowUp" size={15} stroke={2.4} /></button>
+  const sendButton = (!working || canSend || onCancel)
+    ? <button type="button" className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={submit} aria-label="Send" title={working ? 'Send to interrupt (Enter)' : 'Send (Enter)'}><Icon name="arrowUp" size={15} stroke={2.4} /></button>
     : null;
   const sendControl = <div className="composer-actions">{sendButton}{stopButton}</div>;
   const showMentionMenu = !!mention && (mentionLoading || mentionFiles.length > 0);

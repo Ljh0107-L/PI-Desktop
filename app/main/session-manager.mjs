@@ -100,6 +100,8 @@ export function branchMessages(entries, leafId) {
 // Conversations from the removed Cursor CLI engine remain readable from their history file, and deletable.
 const CURSOR_REMOVED = 'Cursor CLI was removed from Pi Desktop; this conversation is read-only.';
 const ACTIVE_AGENT = new Set(['queued', 'running', 'retrying']);
+const isCompacting = runtime => !!(runtime?.compacting || runtime?.compactRequests);
+const sameModel = (a, b) => a?.provider === b?.provider && a?.id === b?.id;
 
 // Process lifecycle: a Pi is kept running while it may be needed soon, and stopped when it is not.
 const IDLE_STOP_MS = 20 * 60 * 1000; // an idle Pi nobody has looked at for this long is stopped
@@ -110,6 +112,7 @@ export class SessionManager extends EventEmitter {
   runtimes = new Map();   // session id -> { session, status, streaming, questions: Map, starting, lastSeq }
   prepared = new Map();   // environment id -> Promise<remote facts>
   preparing = new Map();  // in-flight setup; force/provider changes must not race deployments
+  stopping = new Map();   // do not reattach while a hard stop of this session is pending
   catalogCache = null;
   providersVersion = 0;   // bumped whenever providers/keys change in Settings
   egress = null;
@@ -232,7 +235,7 @@ export class SessionManager extends EventEmitter {
   // kept running may have missed a change), after each change and before each prompt. One change at a
   // time and the effort after the model, because Pi resets the effort when the model changes. What the
   // Pi has is tracked in runtime.applied, so a prompt with nothing to change costs no request.
-  #applyModel(record, runtime) {
+  #applyModel(record, runtime, afterApply) {
     const session = runtime?.session;
     if (!session) return Promise.resolve();
     const run = async () => {
@@ -241,9 +244,14 @@ export class SessionManager extends EventEmitter {
       const want = record.model;
       if (isRetiredProvider(want?.provider)) throw new Error(RETIRED_PROVIDER_MESSAGE);
       let applied = runtime.applied ?? {};
-      if (want?.provider && want.id && (applied.model?.provider !== want.provider || applied.model?.id !== want.id)) {
+      if (want?.provider && want.id && !sameModel(applied.model, want)) {
         await this.#syncProviders(runtime);
-        await session.setModel(want.provider, want.id);
+        try { await session.setModel(want.provider, want.id); }
+        catch (error) {
+          // A failed RPC may have changed the model before its acknowledgement was lost.
+          if (runtime.session === session) runtime.applied = {};
+          throw error;
+        }
         applied = { model: { provider: want.provider, id: want.id } };
         if (runtime.session === session) runtime.applied = applied;
       }
@@ -256,7 +264,8 @@ export class SessionManager extends EventEmitter {
       }
       if (runtime.session === session) runtime.applied = applied;
     };
-    const queued = (runtime.applying ?? Promise.resolve()).catch(() => {}).then(run);
+    let queued = (runtime.applying ?? Promise.resolve()).catch(() => {}).then(run);
+    if (afterApply) queued = queued.then(afterApply);
     runtime.applying = queued;
     return queued;
   }
@@ -474,7 +483,7 @@ export class SessionManager extends EventEmitter {
   }
   #view(record) {
     const runtime = this.runtimes.get(record.id);
-    return { ...record, engine: record.engine === 'cursor' ? 'cursor' : isClaude(record) ? CLAUDE_ENGINE : 'pi', status: runtime?.status ?? 'idle', phase: runtime?.phase ?? null, streaming: !!runtime?.streaming, pendingQuestions: runtime ? [...runtime.questions.values()] : [] };
+    return { ...record, engine: record.engine === 'cursor' ? 'cursor' : isClaude(record) ? CLAUDE_ENGINE : 'pi', status: runtime?.status ?? 'idle', phase: runtime?.phase ?? null, streaming: !!runtime?.streaming, compacting: isCompacting(runtime), pendingQuestions: runtime ? [...runtime.questions.values()] : [] };
   }
   record(id) {
     const record = this.store.sessions.find(s => s.id === id);
@@ -678,7 +687,7 @@ export class SessionManager extends EventEmitter {
     await this.#applyModel(record, this.runtimes.get(record.id)).catch(error => this.emit('notice', { id: record.id, level: 'warning', message: error.message }));
     return this.#view(record);
   }
-  #current(record, runtime) { return !runtime.closing && this.runtimes.get(record.id) === runtime; }
+  #current(record, runtime) { return !!runtime && !runtime.closing && this.runtimes.get(record.id) === runtime; }
   #assertCurrent(record, runtime) {
     if (!this.#current(record, runtime)) throw Object.assign(new Error('Session start cancelled'), { code: 'SESSION_CANCELLED' });
   }
@@ -692,6 +701,8 @@ export class SessionManager extends EventEmitter {
   // Connect (or reconnect) a session. SSH sessions live in the host's relay, so a dropped connection is
   // retried with backoff and resumes from the last event seen; Pi keeps working in the meantime.
   ensureStarted(id, recordOverride) {
+    const stopping = this.stopping.get(id);
+    if (stopping) return stopping.then(() => this.ensureStarted(id, recordOverride));
     if (isRetiredProvider((recordOverride ?? this.#recordOf(id))?.model?.provider)) return Promise.reject(new Error(RETIRED_PROVIDER_MESSAGE));
     let runtime = this.runtimes.get(id);
     if (runtime?.status === 'connected') return Promise.resolve(runtime.session);
@@ -709,7 +720,7 @@ export class SessionManager extends EventEmitter {
     runtime.starting = this.#start(record, runtime).then(session => {
       this.#assertCurrent(record, runtime);
       runtime.status = 'connected'; runtime.starting = null; runtime.retry = 0; runtime.lastUsed = Date.now();
-      this.#status(record, runtime, { status: 'connected', phase: null, streaming: runtime.streaming });
+      this.#status(record, runtime, { status: 'connected', phase: null, streaming: runtime.streaming, compacting: isCompacting(runtime) });
       // A Settings edit, or a model or effort chosen, can land after configuration's last await but
       // before this callback.
       this.#syncProviders(runtime).catch(() => {});
@@ -730,7 +741,7 @@ export class SessionManager extends EventEmitter {
     const delay = Math.min(30000, 1000 * 2 ** runtime.retry);
     runtime.retry += 1;
     runtime.status = 'reconnecting';
-    this.#status(record, runtime, { status: 'reconnecting', phase: 'connecting', message: reason, retryIn: delay });
+    this.#status(record, runtime, { status: 'reconnecting', phase: 'connecting', message: reason, retryIn: delay, streaming: false, compacting: false });
     clearTimeout(runtime.retryTimer);
     runtime.retryTimer = setTimeout(() => this.ensureStarted(record.id).catch(() => {}), delay);
   }
@@ -781,6 +792,8 @@ export class SessionManager extends EventEmitter {
     }
     if (claude) runtime.claudeBootKey = JSON.stringify(claudeConfig);
     runtime.session = session;
+    runtime.compacting = false;
+    runtime.compactRequests = 0;
     runtime.questions.clear();
     const current = () => this.#current(record, runtime) && runtime.session === session;
     session.on('attached', info => {
@@ -800,13 +813,21 @@ export class SessionManager extends EventEmitter {
       if (this.runtimes.get(record.id) !== runtime || runtime.session !== session || runtime.closing) return;
       runtime.lastSeq = session.lastSeq;
       runtime.streaming = false;
+      runtime.compacting = false;
+      runtime.compactRequests = 0;
       if (runtime.questions.size) { runtime.questions.clear(); this.emit('questions-cleared', { id: record.id }); }
+      if (this.stopping.has(record.id)) {
+        runtime.status = 'disconnected';
+        if (piExited) runtime.lastSeq = null;
+        this.#status(record, runtime, { status: 'disconnected', phase: null, streaming: false, compacting: false });
+        return;
+      }
       const message = (session.piExit?.stderr || session.stderr).trim().split('\n').slice(-2).join(' ');
       if (!piExited && runtime.status === 'connected' && !record.spare) { this.#scheduleReconnect(record, runtime, message || 'Connection lost'); return; }
       if (runtime.starting) return; // the start promise reports this failure
       runtime.status = 'disconnected';
       if (piExited) runtime.lastSeq = null; // a new Pi process numbers its events from scratch
-      this.#status(record, runtime, { status: 'disconnected', phase: null, message: piExited ? 'Pi stopped' + (message ? `: ${message}` : '') : message });
+      this.#status(record, runtime, { status: 'disconnected', phase: null, streaming: false, compacting: false, message: piExited ? 'Pi stopped' + (message ? `: ${message}` : '') : message });
     });
     try {
       this.#status(record, runtime, { status: runtime.status, phase: 'connecting' });
@@ -853,6 +874,7 @@ export class SessionManager extends EventEmitter {
     runtime.autoReconnect = true;
     const state = session.initialState ?? await session.state();
     runtime.streaming = !!state.isStreaming;
+    runtime.compacting = !!state.isCompacting;
     runtime.applied = { model: state.model ? { provider: state.model.provider, id: state.model.id } : null, thinkingLevel: state.thinkingLevel };
     const info = session.attachInfo;
     const processKey = info?.pid && info?.startedAt ? `${info.pid}:${info.startedAt}` : null;
@@ -910,10 +932,18 @@ export class SessionManager extends EventEmitter {
     }));
   }
 
+  #busyStatus(record, runtime) {
+    this.#status(record, runtime, { status: runtime.status, streaming: !!runtime.streaming, compacting: isCompacting(runtime) });
+  }
+
   #onEvent(record, runtime, event) {
     runtime.lastUsed = Date.now();
-    if (event.type === 'agent_start') { runtime.streaming = true; this.emit('status', { id: record.id, status: runtime.status, streaming: true }); }
-    if (event.type === 'agent_settled') { runtime.streaming = false; this.#save(record, { lastActiveAt: Date.now() }); this.emit('status', { id: record.id, status: runtime.status, streaming: false }); }
+    if (event.type === 'agent_start') { runtime.streaming = true; this.#busyStatus(record, runtime); }
+    if (event.type === 'agent_settled') { runtime.streaming = false; this.#save(record, { lastActiveAt: Date.now() }); this.#busyStatus(record, runtime); }
+    if (event.type === 'compaction_start' || event.type === 'compaction_end') {
+      runtime.compacting = event.type === 'compaction_start';
+      this.#busyStatus(record, runtime);
+    }
     const visible = historyEvent(event);
     if (visible) this.emit('event', { id: record.id, event: visible });
   }
@@ -978,35 +1008,45 @@ export class SessionManager extends EventEmitter {
   }
 
 
+  // Verify the selected model on the same connection that will send the request. A change or
+  // rollback while we waited must not send a message (or history) to a different provider.
+  async #withModel(record, runtime, session, selected, send) {
+    const verify = () => {
+      this.#assertCurrent(record, runtime);
+      if (runtime.session !== session || this.stopping.has(record.id) || !sameModel(record.model, selected)) {
+        throw new Error('The model or connection changed before the request was sent. Please try again.');
+      }
+    };
+    verify();
+    await this.#syncProviders(runtime);
+    await this.#syncConfig(runtime, record).catch(() => {});
+    verify();
+    let sent;
+    await this.#applyModel(record, runtime, () => {
+      verify();
+      if (selected?.provider && selected?.id && !sameModel(runtime.applied?.model, selected)) {
+        throw new Error('The selected model was not applied. No request was sent.');
+      }
+      // Dispatch in the model queue, but don't block later model updates on the request itself.
+      sent = send();
+    });
+    return sent;
+  }
+
   // attachments: [{ kind: 'image', name, mimeType, data (base64) } | { kind: 'file', name, path?, data? }]
   // interrupt: a message sent while Pi works replaces the active run (as in Codex/ChatGPT), instead of
   // waiting for the current assistant turn and its tool calls to finish like a steering message does.
   async prompt(id, text, attachments = [], { interrupt = false } = {}) {
     const record = this.record(id);
+    const selected = record.model;
     let session = await this.ensureStarted(id);
     let runtime = this.runtimes.get(id);
     let interrupted = false;
     // While an Ultra task runs, a message joins it (Pi steers it in before the next model call); an
     // interruption would read as Stop and pause the task.
-    if (interrupt && runtime?.streaming && runtime.ultra?.task?.status !== 'active') {
+    if (interrupt && (runtime?.streaming || isCompacting(runtime)) && runtime.ultra?.task?.status !== 'active') {
       ({ session, runtime } = await this.#interruptForPrompt(id, session, runtime));
       interrupted = true;
-    }
-    await this.#syncProviders(this.runtimes.get(id));
-    await this.#syncConfig(this.runtimes.get(id), record).catch(() => {});
-    await this.#applyModel(record, this.runtimes.get(id)).catch(error => {
-      // Claude Code cannot run without its Anthropic Messages model and key: say so instead of sending.
-      if (isRetiredProvider(record.model?.provider) || isClaude(record)) throw error;
-      this.emit('notice', { id, level: 'warning', message: error.message });
-    });
-    // The first message names the conversation at once (its first line), and the model then suggests a
-    // better title, as Claude does; a title the user set by hand is never replaced.
-    let nameIt = null;
-    if (record.title === 'New session' && text.trim()) {
-      const title = titleFrom(text);
-      this.#save(record, { title, autoTitle: title });
-      session.request('set_session_name', { name: title }).catch(() => {});
-      nameIt = text.trim().replace(/^\/goal\s+/, '');
     }
     const images = attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }));
     const files = attachments.filter(a => a.kind === 'file');
@@ -1018,39 +1058,61 @@ export class SessionManager extends EventEmitter {
     // Always 'steer' (Pi ignores it when idle): a message sent while Pi works reaches the model before its
     // next call, as in Claude Code, instead of waiting for the whole run to finish ('followUp'). Not keyed on
     // runtime.streaming, which can lag a moment behind Pi and then made the prompt fail.
-    const send = target => target.prompt(message, { ...(images.length ? { images } : {}), streamingBehavior: 'steer' });
-    let sent = await send(session);
+    let nameIt = null;
+    const send = () => this.#withModel(record, runtime, session, selected, () => {
+      // Name the conversation only once its first prompt is ready to send.
+      if (record.title === 'New session' && text.trim()) {
+        const title = titleFrom(text);
+        this.#save(record, { title, autoTitle: title });
+        session.request('set_session_name', { name: title }).catch(() => {});
+        nameIt = text.trim().replace(/^\/goal\s+/, '');
+      }
+      return session.prompt(message, { ...(images.length ? { images } : {}), streamingBehavior: 'steer' });
+    });
+    let sent = await send();
     // The renderer can be a moment behind Pi. If the prompt was queued instead of starting a fresh
     // turn, abort the run that accepted it and send it again; otherwise a stale flag brings back the
     // old "new message waits for the current reply" behaviour.
     if (interrupt && !interrupted && runtime?.ultra?.task?.status !== 'active' && sent?.disposition === 'queued') {
       ({ session, runtime } = await this.#interruptForPrompt(id, session, runtime));
       interrupted = true;
-      sent = await send(session);
+      sent = await send();
     }
     if (nameIt && !nameIt.startsWith('/') && !isClaude(record)) session.prompt(`/pidesk-title ${Buffer.from(nameIt).toString('base64')}`).catch(() => {});
     return { ...(sent && typeof sent === 'object' ? sent : {}), interrupted };
   }
 
-  // Stop the active run before sending a replacement prompt. Wait for agent_settled so the next prompt
-  // starts a fresh turn; if a tool ignores the abort, hard-stop this Pi and reconnect from its session file.
-  async #interruptForPrompt(id, session, runtime) {
+  // A successful Abort RPC waits for the engine to be idle. A rejection or deadline does not.
+  async #abortRun(session) {
     session.abortBash().catch(() => {});
     session.clearQueue().catch(() => {});
-    const controller = new AbortController();
-    const settled = session.nextSettled(4000, { signal: controller.signal }).then(() => true, () => false);
-    // A turn may have ended just before we subscribed: successful abort also proves
-    // idle. Rejected aborts do not prove it and must still wait for the bounded fallback.
-    const aborted = session.abort().then(() => true, () => settled);
-    const finished = await Promise.race([settled, aborted]);
-    controller.abort();
-    if (finished) return { session, runtime: this.runtimes.get(id) ?? runtime };
-    // A tool that ignores the abort signal must not make the new message wait for it.
-    const record = this.record(id);
-    const env = this.env(record.environmentId);
-    await this.close(id).catch(() => {});
-    if (env) await this.stopRelay(env, id).catch(() => {});
-    this.emit('status', { id, status: 'disconnected', message: 'Stopped' });
+    let timer;
+    try {
+      return await Promise.race([
+        session.abort().then(() => true, () => false),
+        new Promise(resolve => { timer = setTimeout(() => resolve(false), 4000); }),
+      ]);
+    } finally { clearTimeout(timer); }
+  }
+
+  async #hardStop(record, runtime, session) {
+    if (!this.#current(record, runtime) || runtime.session !== session) return;
+    const id = record.id;
+    if (this.stopping.has(id)) return this.stopping.get(id);
+    const stopping = (async () => {
+      // Do not disconnect or claim success before the relay confirms the process is gone.
+      await this.stopRelay(this.env(record.environmentId), id);
+      if (this.runtimes.get(id) === runtime) await this.close(id);
+      this.emit('status', { id, status: 'disconnected', streaming: false, compacting: false });
+    })().finally(() => this.stopping.delete(id));
+    this.stopping.set(id, stopping);
+    return stopping;
+  }
+
+  // Stop the active run before sending a replacement; reconnect from history only after a hard stop.
+  async #interruptForPrompt(id, session, runtime) {
+    await this.abort(id);
+    if (this.runtimes.get(id) === runtime && runtime.session === session && runtime.status !== 'disconnected') return { session, runtime };
     const fresh = await this.ensureStarted(id);
     return { session: fresh, runtime: this.runtimes.get(id) };
   }
@@ -1058,25 +1120,29 @@ export class SessionManager extends EventEmitter {
   // Put attached files where the session's Pi can read them: as-is on this machine, uploaded to the host.
   async #placeFiles(record, files) {
     const env = this.env(record.environmentId);
-    const safe = name => String(name || 'file').replace(/[^\w.@+-]+/g, '_').slice(-120);
-    const stamp = Date.now().toString(36);
+    const safe = name => {
+      const file = String(name ?? '').replace(/[^\w.@+-]+/g, '_').slice(-120);
+      return !file || file === '.' || file === '..' ? 'file' : file;
+    };
+    // Separate both messages and attachments, including on case-insensitive filesystems.
+    const batch = randomUUID();
     if (env.kind === 'local') {
-      const dir = join(this.local.uploadDir, record.id, stamp);
-      return files.map(f => {
+      return files.map((f, i) => {
         if (f.path) return f.path;
+        const dir = join(this.local.uploadDir, record.id, batch, String(i + 1));
         mkdirSync(dir, { recursive: true });
         const path = join(dir, safe(f.name));
-        writeFileSync(path, Buffer.from(f.data, 'base64'));
+        writeFileSync(path, Buffer.from(f.data, 'base64'), { flag: 'wx' });
         return path;
       });
     }
     const facts = await this.prepare(env.id);
-    const dir = `${facts.root}/uploads/${record.id}/${stamp}`;
     const paths = [];
-    for (const f of files) {
+    for (const [i, f] of files.entries()) {
+      const dir = `${facts.root}/uploads/${record.id}/${batch}/${i + 1}`;
       const path = `${dir}/${safe(f.name)}`;
       const data = f.path ? readFileSync(f.path) : Buffer.from(f.data, 'base64');
-      await runSsh(env, `mkdir -p ${shellQuote(dir)} && cat > ${shellQuote(path)}`, { input: data, timeout: 600000 });
+      await runSsh(env, `mkdir -p ${shellQuote(dir)} && (set -C; cat > ${shellQuote(path)})`, { input: data, timeout: 600000 });
       paths.push(path);
     }
     return paths;
@@ -1093,27 +1159,13 @@ export class SessionManager extends EventEmitter {
   }
 
   async abort(id) {
+    if (this.stopping.has(id)) return this.stopping.get(id);
     const runtime = this.runtimes.get(id);
     if (!runtime?.session) return;
     const session = runtime.session;
-    // Codex-style interrupt: stop the running command and discard queued steering/follow-up
-    // messages immediately, instead of letting the current tool finish and then consuming them.
-    session.abortBash().catch(() => {});
-    session.clearQueue().catch(() => {});
-    const finished = await Promise.race([
-      session.abort().then(() => true, () => true),
-      new Promise(resolve => setTimeout(() => resolve(false), 4000)),
-    ]);
-    // A tool that ignores the abort signal must not leave the UI waiting forever.
-    // Stop this Pi (the session file remains the source of truth; the next prompt
-    // reconnects) so an interrupt is actually an interrupt.
-    if (!finished && this.runtimes.get(id) === runtime && runtime.streaming) {
-      const record = this.record(id);
-      const env = this.env(record.environmentId);
-      await this.close(id).catch(() => {});
-      if (env) await this.stopRelay(env, id).catch(() => {});
-      this.emit('status', { id, status: 'disconnected', message: 'Stopped' });
-    }
+    const record = this.record(id);
+    runtime.compactEpoch = (runtime.compactEpoch ?? 0) + 1;
+    if (!await this.#abortRun(session)) await this.#hardStop(record, runtime, session);
   }
 
   async setModel(id, provider, modelId) {
@@ -1128,7 +1180,7 @@ export class SessionManager extends EventEmitter {
       const baseUrl = (await this.catalog().catch(() => [])).find(m => m.provider === provider && m.id === modelId)?.baseUrl;
       const facts = /^https?:\/\//i.test(baseUrl ?? '') ? await this.prepare(env.id) : null;
       if (facts?.unreachable?.includes(hostPortOf(baseUrl))) {
-        if (runtime.streaming) throw new Error('Wait for the current reply to finish, then switch models.');
+        if (runtime.streaming || isCompacting(runtime)) throw new Error('Wait for the current operation to finish, then switch models.');
         this.#save(record, { model: { provider, id: modelId } });
         await this.close(id);
         await stopRelaySession(env, facts, id).catch(() => {});
@@ -1221,7 +1273,31 @@ export class SessionManager extends EventEmitter {
 
 
 
-  async compact(id) { const session = await this.ensureStarted(id); return session.request('compact', {}, { timeout: 300000 }); }
+  async compact(id) {
+    const record = this.record(id);
+    const selected = record.model;
+    const session = await this.ensureStarted(id);
+    const runtime = this.runtimes.get(id);
+    this.#assertCurrent(record, runtime);
+    // Cover the gap before compaction_start arrives. Once started, the event/state flag
+    // continues to protect the operation even if the desktop RPC times out first.
+    const epoch = runtime.compactEpoch;
+    runtime.compactRequests = (runtime.compactRequests ?? 0) + 1;
+    this.touch(id);
+    this.#busyStatus(record, runtime);
+    try {
+      return await this.#withModel(record, runtime, session, selected, () => {
+        if (runtime.compactEpoch !== epoch) return { aborted: true };
+        return session.request('compact', {}, { timeout: 300000 });
+      });
+    } finally {
+      if (this.#current(record, runtime) && runtime.session === session && runtime.compactRequests > 0) {
+        runtime.compactRequests--;
+        this.touch(id);
+        this.#busyStatus(record, runtime);
+      }
+    }
+  }
 
 
   // UI pages are projected on the session's machine; never transport get_entries for opening a chat.
@@ -1318,7 +1394,7 @@ export class SessionManager extends EventEmitter {
     return this.prewarm({ environmentId: record.environmentId, cwd: record.cwd, model: record.model, thinkingLevel: record.thinkingLevel, speed: record.speed, noFolder: record.noFolder, engine: record.engine });
   }
   #idle(runtime) {
-    return runtime.status === 'connected' && !runtime.streaming && !runtime.starting && !runtime.questions.size && runtime.goal?.status !== 'active' && runtime.ultra?.task?.status !== 'active'
+    return runtime.status === 'connected' && !runtime.streaming && !isCompacting(runtime) && !runtime.starting && !runtime.questions.size && runtime.goal?.status !== 'active' && runtime.ultra?.task?.status !== 'active'
       && ![...(runtime.agents?.values() ?? [])].some(agent => ACTIVE_AGENT.has(agent.status))
       && !(runtime.jobs?.jobs ?? []).some(job => job.status === 'running'); // background work keeps it busy
   }
@@ -1328,7 +1404,7 @@ export class SessionManager extends EventEmitter {
     const spareIds = new Set([...this.spares.values()].map(sp => sp.id));
     const idle = [];
     for (const [id, runtime] of this.runtimes) {
-      if (id === this.focused || spareIds.has(id) || !this.#idle(runtime)) continue;
+      if (id === this.focused || spareIds.has(id) || this.stopping.has(id) || !this.#idle(runtime)) continue;
       const record = this.store.sessions.find(s => s.id === id);
       if (record) idle.push({ id, record, used: runtime.lastUsed ?? 0 });
     }
