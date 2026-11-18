@@ -11,6 +11,7 @@ import { closeSshMux, egressEnv, localRelayTransport, localTransport, relaySpawn
 import { startEgressProxy, hostPortOf } from '../../core/egress-proxy.mjs';
 import { listRelaySessions, prepareRemote, readInstallHint, runSsh, stopRelaySession } from './remote-setup.mjs';
 import { providerBaseUrl } from './custom-providers.mjs';
+import { builtinModelRoute, listBuiltinModels } from './builtin-providers.mjs';
 import { isRetiredProvider, RETIRED_PROVIDER_MESSAGE } from '../../core/retired-providers.mjs';
 import { SPEEDS, speedOptions } from '../../agent/pidesk-speed.mjs';
 import { readHistory } from '../../agent/pidesk-history.mjs';
@@ -179,7 +180,7 @@ export class SessionManager extends EventEmitter {
       // The base its SDK needs (e.g. an Anthropic base saved with /v1), for providers saved before too.
       if (provider.kind === 'custom') Object.assign(entry, { name: provider.name, api: provider.api, baseUrl: providerBaseUrl(provider.api, provider.baseUrl), models: provider.models, headers: provider.headers });
       // A built-in provider with a chosen model list replaces its catalog with exactly those models.
-      else if (provider.models?.length) entry.models = provider.models;
+      else if (provider.models?.length) entry.models = provider.models.map(model => builtinModelRoute(provider.id, model));
       return [entry];
     });
   }
@@ -315,13 +316,17 @@ export class SessionManager extends EventEmitter {
     return cached;
   }
 
-  // Every model Pi knows for one built-in provider (used by Settings to pick models).
-  async builtinModels(providerId, apiKey) {
+  builtinModels(providerId, apiKey) {
+    return listBuiltinModels(providerId, apiKey, () => this.#builtinCatalog(providerId, apiKey));
+  }
+
+  // Pi's full definitions supply parameters and protocol settings for models returned by the API.
+  async #builtinCatalog(providerId, apiKey) {
     const session = new PiSession({ id: 'models-' + providerId, boot: { providers: [{ id: providerId, apiKey }] }, transport: this.#localTransport({ cwd: this.local.agentDir }) });
     try {
       await session.start();
       const models = await session.request('get_available_models').then(d => d.models);
-      return models.filter(m => m.provider === providerId).map(({ provider, type, ...m }) => m); // full definitions: edits keep compat, cost, …
+      return models.filter(m => m.provider === providerId).map(({ provider, type, ...m }) => m);
     } finally { await session.stop(); }
   }
 

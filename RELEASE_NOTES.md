@@ -2,6 +2,12 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.26 — Live model discovery
+
+- **Fetch models from your provider.** Model settings query the selected provider's live API using its configured credentials. OpenAI can discover GPT-6.2 Sol and Astra as soon as the API lists them for your project. Models already known to Pi keep their full parameters.
+- **Refresh gateway lists.** Choose models now fetches the current list each time. Anthropic-compatible endpoints can return multiple pages, and an unrelated JSON response no longer hides a working versioned endpoint.
+- **Faster release pipeline.** Packaging runs alongside CI for the same commit. Git review checks run on the core runner alongside the Electron UI suite, and publication requires both full CI and packaged-app verification.
+
 ## 0.2.25 — Compact inherits OpenAI Fast and Ultrafast
 
 - **Use the conversation's selected speed for Compact.** OpenAI summary requests now inherit Fast or Ultrafast instead of silently omitting the service tier. This covers manual and automatic compaction, both requests in split-turn summaries, and speed changes made after earlier replies.

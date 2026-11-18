@@ -127,23 +127,19 @@ function ProviderEditor({ initial, onDone }) {
   const [fetching, setFetching] = useState(false);
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
-  const draft = () => kind === 'builtin' ? { kind, id: builtinId } : { kind, id: initial?.id ?? slug(name || 'custom'), api: apiType, baseUrl: baseUrl.trim() };
+  const draft = () => kind === 'builtin' ? { kind, id: builtinId } : { kind, id: initial?.id ?? slug(name), api: apiType, baseUrl: baseUrl.trim(), headers: initial?.headers };
   const reset = () => { setAvailable(null); setModels([]); setError(null); };
 
-  const fetchModels = async ({ autoSelect = false } = {}) => {
+  const fetchModels = async () => {
     setFetching(true); setError(null);
     try {
       const list = await api('listProviderModels', draft(), key.trim() || undefined);
       setAvailable(list);
       if (!list.length) setError({ message: 'The provider returned no models.' });
-      else if (autoSelect && !models.length) setModels(list.map(toRow));
       else setPicking(true);
     } catch (err) { setError({ message: err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '') }); }
     finally { setFetching(false); }
   };
-  // A built-in provider saved before model lists existed: load its catalog so it can be edited.
-  useEffect(() => { if (editing && initial.kind === 'builtin' && initial.hasKey && !models.length) fetchModels({ autoSelect: true }); }, []); // eslint-disable-line react-hooks/exhaustive-deps
-
   const applyPicked = picked => {
     setModels(pickedRows(models, available ?? [], picked));
     setPicking(false);
@@ -155,12 +151,13 @@ function ProviderEditor({ initial, onDone }) {
     const rows = models.filter(m => m.id.trim());
     let provider;
     if (kind === 'builtin') {
+      if (!rows.length && (!editing || initial.models?.length)) return setError({ message: 'Choose or add at least one model.' });
       provider = { id: builtinId, name: builtin[builtinId], kind: 'builtin', models: rows.length ? rows.map(fromRow) : undefined };
     } else {
       if (!name.trim()) return setError({ field: 'name', message: 'Give this provider a name.' });
       if (!/^https?:\/\//.test(baseUrl.trim())) return setError({ field: 'baseUrl', message: 'Enter a URL starting with https://' });
       if (!rows.length) return setError({ message: 'Add at least one model.' });
-      provider = { id: initial?.id ?? slug(name), name: name.trim(), kind: 'custom', api: apiType, baseUrl: baseUrl.trim().replace(/\/$/, ''), models: rows.map(fromRow) };
+      provider = { ...draft(), name: name.trim(), baseUrl: baseUrl.trim().replace(/\/$/, ''), models: rows.map(fromRow) };
     }
     if (!editing && !key.trim()) return setError({ field: 'key', message: 'Paste the API key for this provider.' });
     setBusy(true);
@@ -176,18 +173,18 @@ function ProviderEditor({ initial, onDone }) {
   const keyHint = kind === 'custom' ? protocol?.key : builtinId === 'google' ? 'AIza…' : undefined;
   const keyField = (
     <label className={`field ${error?.field === 'key' ? 'invalid' : ''}`}><span className="field-label">API key</span>
-      <input type="password" value={key} onChange={e => setKey(e.target.value)} placeholder={editing ? '•••••••• saved' : keyHint ?? 'sk-…'} autoComplete="off" spellCheck={false} />{fieldError('key')}</label>
+      <input type="password" value={key} onChange={e => setKey(e.target.value)} disabled={fetching} placeholder={editing ? '•••••••• saved' : keyHint ?? 'sk-…'} autoComplete="off" spellCheck={false} />{fieldError('key')}</label>
   );
   return (
     <form className="editor" onSubmit={save}>
       {!editing && <div className="segmented">
-        <button type="button" className={kind === 'builtin' ? 'on' : ''} onClick={() => { setKind('builtin'); reset(); }}>Built-in provider</button>
-        <button type="button" className={kind === 'custom' ? 'on' : ''} onClick={() => { setKind('custom'); reset(); }}>Custom endpoint</button>
+        <button type="button" className={kind === 'builtin' ? 'on' : ''} disabled={fetching} onClick={() => { setKind('builtin'); reset(); }}>Built-in provider</button>
+        <button type="button" className={kind === 'custom' ? 'on' : ''} disabled={fetching} onClick={() => { setKind('custom'); reset(); }}>Custom endpoint</button>
       </div>}
       {kind === 'builtin' ? (
         <div className="field-pair">
           <label className="field"><span className="field-label">Provider</span>
-            <select value={builtinId} onChange={e => { setBuiltinId(e.target.value); reset(); }} disabled={editing}>
+            <select value={builtinId} onChange={e => { setBuiltinId(e.target.value); reset(); }} disabled={editing || fetching}>
               {Object.entries(builtin).map(([id, label]) => <option key={id} value={id}>{label}</option>)}
             </select>
           </label>
@@ -197,23 +194,22 @@ function ProviderEditor({ initial, onDone }) {
         <div className="field-pair">
           <label className={`field ${error?.field === 'name' ? 'invalid' : ''}`}><span className="field-label">Name</span><input value={name} onChange={e => setName(e.target.value)} placeholder="Company relay" />{fieldError('name')}</label>
           <label className="field"><span className="field-label">API protocol</span>
-            <select value={apiType} onChange={e => setApiType(e.target.value)}>{CUSTOM_APIS.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}</select>
+            <select value={apiType} onChange={e => setApiType(e.target.value)} disabled={fetching}>{CUSTOM_APIS.map(a => <option key={a.id} value={a.id}>{a.label}</option>)}</select>
           </label>
         </div>
         <div className="field-pair">
-          <label className={`field ${error?.field === 'baseUrl' ? 'invalid' : ''}`}><span className="field-label">Base URL</span><input value={baseUrl} onChange={e => setBaseUrl(e.target.value)} placeholder={protocol?.baseUrl ?? 'https://example.com/v1'} spellCheck={false} />{fieldError('baseUrl')}</label>
+          <label className={`field ${error?.field === 'baseUrl' ? 'invalid' : ''}`}><span className="field-label">Base URL</span><input value={baseUrl} onChange={e => setBaseUrl(e.target.value)} disabled={fetching} placeholder={protocol?.baseUrl ?? 'https://example.com/v1'} spellCheck={false} />{fieldError('baseUrl')}</label>
           {keyField}
         </div>
       </>}
 
-      <ModelCatalog models={models} setModels={setModels} choose={() => available ? setPicking(true) : fetchModels()}
-        fetchModels={() => fetchModels({ autoSelect: false })} fetching={fetching} />
+      <ModelCatalog models={models} setModels={setModels} choose={fetchModels} fetching={fetching} />
       {picking && available && <ModelPicker available={available} selected={models.map(m => m.id)} onDone={applyPicked} onClose={() => setPicking(false)} />}
 
       {error && !error.field && <div className="form-error"><Icon name="alert" size={14} /> {error.message}</div>}
       <div className="editor-actions">
         <button type="button" className="button ghost" onClick={onDone}>Cancel</button>
-        <button type="submit" className="button primary" disabled={busy}>{busy ? <Spinner size={13} /> : editing ? 'Save' : 'Add provider'}</button>
+        <button type="submit" className="button primary" disabled={busy || fetching}>{busy ? <Spinner size={13} /> : editing ? 'Save' : 'Add provider'}</button>
       </div>
     </form>
   );

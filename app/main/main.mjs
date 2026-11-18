@@ -17,6 +17,7 @@ import { Store } from './store.mjs';
 import { UsageLedger } from './usage.mjs';
 import { stageExtensions } from './extensions.mjs';
 import { listCustomModels, resolveProviderBaseUrl } from './custom-providers.mjs';
+import { BUILTIN_PROVIDERS } from './builtin-providers.mjs';
 import { isRetiredProvider, RETIRED_PROVIDER_MESSAGE } from '../../core/retired-providers.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -75,11 +76,6 @@ async function downloadSessionFile(id, rel) {
   const { node } = await manager.prepare(record.environmentId);
   return downloadRemote(env, node, record.cwd, rel, target);
 }
-
-const BUILTIN_PROVIDERS = {
-  anthropic: 'Anthropic', openai: 'OpenAI', deepseek: 'DeepSeek', google: 'Google Gemini', openrouter: 'OpenRouter',
-  xai: 'xAI', groq: 'Groq', mistral: 'Mistral', moonshotai: 'Moonshot (Kimi)', zai: 'Z.ai (GLM)', fireworks: 'Fireworks', together: 'Together',
-};
 
 // Pi's compaction trigger is contextTokens > contextWindow - reserveTokens. Equalising
 // the reserve with each model's max output makes it exactly "compact when the remaining
@@ -163,7 +159,7 @@ const api = {
     return result.canceled ? null : result.filePaths[0];
   },
   catalog: () => manager.catalog(),
-  // Models a provider offers: Pi's catalog for built-in providers, GET /models for custom endpoints.
+  // Models the provider's endpoint offers for this credential.
   async listProviderModels(draft, key) {
     const apiKey = key || store.getKey(draft.id);
     if (!apiKey) throw new Error('Enter the API key first.');

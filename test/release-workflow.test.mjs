@@ -6,10 +6,15 @@ import { parse } from 'yaml';
 const release = parse(readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8'));
 const ci = parse(readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8'));
 
-test('release verification uses a declared reusable-workflow input, not an unsupported jobs selector', () => {
-  assert.equal(release.jobs.verify.uses, './.github/workflows/ci.yml');
-  assert.equal(release.jobs.verify.jobs, undefined);
-  assert.deepEqual(release.jobs.verify.with, { skip_ui: true });
+test('release checks the exact main push CI and previews still run the reusable offline suites', () => {
+  const verify = release.jobs.verify.steps[0].run;
+  assert.equal(release.permissions.actions, 'read');
+  assert.match(verify, /actions\/workflows\/ci\.yml\/runs\?head_sha=\$GITHUB_SHA&branch=main&event=push/);
+  assert.match(verify, /\[\[ "\$conclusion" == success \]\]/);
+  assert.match(verify, /exit 1/);
+  assert.equal(release.jobs.verify_preview.if, "github.event_name == 'workflow_dispatch'");
+  assert.equal(release.jobs.verify_preview.uses, './.github/workflows/ci.yml');
+  assert.deepEqual(release.jobs.verify_preview.with, { skip_ui: true });
   assert.equal(ci.on.workflow_call.inputs.skip_ui.type, 'boolean');
   assert.equal(ci.on.workflow_call.inputs.skip_ui.default, false);
   assert.equal(ci.jobs.ui.if, '${{ !inputs.skip_ui }}');

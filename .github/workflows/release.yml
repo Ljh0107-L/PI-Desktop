@@ -1,21 +1,48 @@
 name: Release
 
-# Push a tag like v0.2.0 to build, smoke-test and publish a release; run manually to build without publishing.
+# Push main and its release tag together to overlap CI with packaging. Manual runs build previews.
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
 
 permissions:
+  actions: read
   contents: write
 
 jobs:
-  # Re-runs the offline suites; the end-to-end UI suite already ran when this commit was pushed to main.
-  verify:
+  verify_preview:
+    if: github.event_name == 'workflow_dispatch'
     uses: ./.github/workflows/ci.yml
     with:
       skip_ui: true
-  # The build does not depend on the suites, so it runs alongside them; only publishing is gated on both.
+  verify:
+    name: Verify CI for release commit
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Wait for the matching main push CI
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          runs="repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&branch=main&event=push&per_page=1"
+          deadline=$((SECONDS + 25 * 60))
+          while (( SECONDS < deadline )); do
+            if result=$(gh api "$runs" --jq '.workflow_runs[0] | [.status, .conclusion, .html_url] | @tsv'); then
+              IFS=$'\t' read -r status conclusion url <<< "$result"
+              if [[ "$status" == completed ]]; then
+                echo "CI $conclusion for $GITHUB_SHA ($url)"
+                [[ "$conclusion" == success ]]
+                exit
+              fi
+            fi
+            sleep 10
+          done
+          echo "::error::Timed out waiting for main push CI for $GITHUB_SHA"
+          exit 1
+  # Packaging and smoke tests overlap with CI. Publication requires both jobs to pass.
   mac:
     name: macOS app (arm64 + x64)
     runs-on: macos-latest
@@ -69,6 +96,7 @@ jobs:
         if: always()
         with:
           name: pi-desktop-mac
+          compression-level: 0 # DMGs and ZIPs are already compressed.
           path: |
             release/*.dmg
             release/*.zip

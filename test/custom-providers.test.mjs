@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import http from 'node:http';
 import { once } from 'node:events';
 import { listCustomModels, providerBaseUrl, resolveProviderBaseUrl } from '../app/main/custom-providers.mjs';
+import { BUILTIN_PROVIDERS, listBuiltinModels } from '../app/main/builtin-providers.mjs';
 import { SessionManager } from '../app/main/session-manager.mjs';
 
 // A local endpoint serving only `routes`: API calls answer 400 (as to an empty request), GETs a model
@@ -191,4 +192,60 @@ test('a server this Mac cannot reach keeps the URL as entered', async () => {
 test('when neither form serves the API, the URL is kept as entered', async t => {
   const none = await endpoint(t, []);
   assert.equal(await resolveProviderBaseUrl(openai(none.url), 'key'), none.url);
+});
+
+test('built-in discovery requests each provider endpoint and keeps only live IDs', async t => {
+  const urls = {
+    anthropic: 'https://api.anthropic.com/v1/models', openai: 'https://api.openai.com/v1/models',
+    deepseek: 'https://api.deepseek.com/models', google: 'https://generativelanguage.googleapis.com/v1beta/models?pageSize=1000',
+    openrouter: 'https://openrouter.ai/api/v1/models/user', xai: 'https://api.x.ai/v1/language-models',
+    groq: 'https://api.groq.com/openai/v1/models', mistral: 'https://api.mistral.ai/v1/models',
+    moonshotai: 'https://api.moonshot.ai/v1/models', zai: 'https://api.z.ai/api/coding/paas/v4/models',
+    fireworks: 'https://api.fireworks.ai/inference/v1/models', together: 'https://api.together.ai/v1/models',
+  };
+  assert.deepEqual(Object.keys(BUILTIN_PROVIDERS).sort(), Object.keys(urls).sort());
+  const known = { id: 'gpt-6.1-sol', contextWindow: 272000, compat: { supportsStrictMode: true } };
+  const catalog = async () => [known, { id: 'bundled-only' }];
+  for (const [provider, endpoint] of Object.entries(urls)) {
+    const mock = t.mock.method(globalThis, 'fetch', async (url, { headers, redirect }) => {
+      assert.equal(url, endpoint);
+      assert.equal(redirect, 'error');
+      if (provider === 'google') assert.equal(headers['x-goog-api-key'], 'example');
+      else if (provider === 'anthropic') assert.deepEqual(headers, { 'x-api-key': 'example', 'anthropic-version': '2023-06-01' });
+      else assert.equal(headers.authorization, 'Bearer example');
+      return Response.json({ data: [{ id: 'gpt-6.2-sol' }, { id: 'gpt-6.1-sol' }, { id: 'whisper-1', type: 'audio' }, null] });
+    });
+    const models = await listBuiltinModels(provider, 'example', catalog);
+    assert.deepEqual(models.map(m => m.id), ['gpt-6.1-sol', 'gpt-6.2-sol']);
+    assert.equal(models[0], known);
+    assert.match(models[1].baseUrl, /^https:\/\//);
+    if (provider === 'openai') {
+      assert.equal(models[1].api, 'openai-responses');
+      assert.equal(models[1].contextWindow, 1050000);
+      assert.equal(models[1].maxTokens, 128000);
+      assert.equal(models[1].thinkingLevelMap.off, null);
+    }
+    mock.mock.restore();
+  }
+});
+
+test('built-in lists follow Anthropic cursors and surface authentication errors without falling back to the bundled list', async t => {
+  const mock = t.mock.method(globalThis, 'fetch', async url => new URL(url).searchParams.has('after_id')
+    ? Response.json({ data: [{ id: 'claude-second', max_input_tokens: 123456, max_tokens: 7890 }] })
+    : Response.json({ data: [{ id: 'claude-first' }], has_more: true, last_id: 'claude-first' }));
+  const catalog = async () => [{ id: 'bundled-only' }];
+  const models = await listBuiltinModels('anthropic', 'example', catalog);
+  assert.deepEqual(models.map(m => m.id), ['claude-first', 'claude-second']);
+  assert.equal(models[1].contextWindow, 123456);
+  assert.equal(models[1].maxTokens, 7890);
+  assert.equal(mock.mock.calls.length, 2);
+  mock.mock.mockImplementation(async () => new Response(null, { status: 401, statusText: 'Unauthorized' }));
+  await assert.rejects(listBuiltinModels('anthropic', 'example', catalog), /Couldn't list Anthropic models: 401 Unauthorized/);
+  mock.mock.mockImplementation(async () => Response.json({ data: [] }));
+  assert.deepEqual(await listBuiltinModels('anthropic', 'example', catalog), []);
+});
+
+test('a custom OpenAI gateway can fall through an unrelated HTTP 200 to a valid list', async t => {
+  const base = await googleProbeEndpoint(t, { '/models': { body: '{}' }, '/v1/models': { body: '{"data":[{"id":"gpt-6.2-sol"}]}' } });
+  assert.deepEqual((await listCustomModels(openai(base), 'test-key')).map(m => m.id), ['gpt-6.2-sol']);
 });

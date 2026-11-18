@@ -80,35 +80,41 @@ export async function resolveProviderBaseUrl({ api, baseUrl, headers }, apiKey, 
   return entered === 404 && alternative && alternative !== 404 ? other : base;
 }
 
-const toModel = m => typeof m === 'string' ? { id: m } : {
-  id: m.id ?? m.name?.replace(/^models\//, ''),
-  name: m.display_name ?? m.displayName ?? undefined,
-  contextWindow: m.context_length ?? m.context_window ?? m.inputTokenLimit ?? undefined,
-  maxTokens: m.max_output_tokens ?? m.outputTokenLimit ?? m.top_provider?.max_completion_tokens ?? undefined,
-  ...(typeof m.thinking === 'boolean' ? { reasoning: m.thinking } : {}), // Gemini says which models think
+export const toModel = m => typeof m === 'string' ? { id: m } : {
+  id: m?.id ?? (typeof m?.name === 'string' ? m.name.replace(/^models\//, '') : undefined),
+  name: m?.display_name ?? m?.displayName ?? (m?.id ? m.name : undefined),
+  contextWindow: m?.context_length ?? m?.context_window ?? m?.max_context_length ?? m?.inputTokenLimit ?? m?.max_input_tokens ?? undefined,
+  maxTokens: m?.max_output_tokens ?? m?.outputTokenLimit ?? m?.max_completion_tokens ?? m?.top_provider?.max_completion_tokens ?? m?.max_tokens ?? undefined,
+  ...(typeof m?.thinking === 'boolean' ? { reasoning: m.thinking } : {}),
 };
-const toModels = list => list.map(toModel).filter(m => m.id).sort((a, b) => a.id.localeCompare(b.id));
+const toModels = list => list.map(toModel).filter(m => typeof m.id === 'string' && m.id).sort((a, b) => a.id.localeCompare(b.id));
+
+export function modelList(body, description = 'a model list') {
+  const models = Array.isArray(body) ? body : body?.data ?? body?.models;
+  if (!Array.isArray(models)) throw new Error(`Expected ${description}`);
+  return models;
+}
 
 // An empty array is a valid model list; an empty body, HTML login page, or unrelated JSON is not.
 async function googleModelPage(res) {
   let body;
   try { body = await res.json(); } catch { throw new Error('Expected a Google model list'); }
-  const models = Array.isArray(body) ? body : body?.models ?? body?.data;
-  if (!Array.isArray(models)) throw new Error('Expected a Google model list');
+  const models = modelList(body, 'a Google model list');
   return { models, nextPageToken: body?.nextPageToken };
 }
 
 // Gemini lists its models a page at a time, among them models that only embed text or make images:
 // only the ones that generate content are kept.
-async function googleModels(base, apiKey, headers) {
+export async function googleModels(base, apiKey, headers, options = {}) {
   const models = [];
   let token;
   for (let page = 0; page < 20; page++) {
     const url = `${base}/models?pageSize=1000${token ? `&pageToken=${encodeURIComponent(token)}` : ''}`;
-    const res = await fetch(url, { headers: requestHeaders(GOOGLE, apiKey, headers), signal: AbortSignal.timeout(15000) });
+    const res = await fetch(url, { headers: requestHeaders(GOOGLE, apiKey, headers), signal: AbortSignal.timeout(15000), ...options });
     if (!res.ok) {
       const detail = await res.json().then(body => body?.error?.message, () => undefined); // e.g. "API key not valid."
-      throw new Error(`${res.status} ${res.statusText} from ${base}/models${typeof detail === 'string' ? `: ${detail}` : ''}`);
+      const message = typeof detail === 'string' && apiKey ? detail.replaceAll(apiKey, '[redacted]') : detail;
+      throw new Error(`${res.status} ${res.statusText} from ${base}/models${typeof message === 'string' ? `: ${message}` : ''}`);
     }
     const pageData = await googleModelPage(res);
     models.push(...pageData.models);
@@ -116,6 +122,29 @@ async function googleModels(base, apiKey, headers) {
     if (!token) break;
   }
   return models.filter(m => !Array.isArray(m?.supportedGenerationMethods) || m.supportedGenerationMethods.some(method => /generateContent$/i.test(method)));
+}
+
+export async function fetchModelList(url, { headers, paginate = false, redirect } = {}) {
+  const models = [];
+  const seen = new Set();
+  const signal = AbortSignal.timeout(15000);
+  let pageUrl = url;
+  while (true) {
+    const res = await fetch(pageUrl, { headers, signal, redirect });
+    if (!res.ok) {
+      res.body?.cancel().catch(() => {});
+      throw new Error(`${res.status} ${res.statusText} from ${url}`);
+    }
+    const body = await res.json().catch(() => null);
+    models.push(...modelList(body));
+    if (!paginate || !body?.has_more) return models;
+    const cursor = body.last_id;
+    if (typeof cursor !== 'string' || !cursor || seen.has(cursor)) throw new Error(`Invalid model list cursor from ${url}`);
+    seen.add(cursor);
+    const next = new URL(url);
+    next.searchParams.set('after_id', cursor);
+    pageUrl = next.href;
+  }
 }
 
 // A refused key says more than a missing route: the first error that isn't a 404 is the one shown.
@@ -136,12 +165,8 @@ export async function listCustomModels({ api, baseUrl, headers }, apiKey) {
   }
   const urls = api === ANTHROPIC ? [`${base}/v1/models`, `${base}/models`] : [`${base}/models`, `${withOrWithoutV1(base)}/models`];
   for (const url of urls) {
-    try {
-      const res = await fetch(url, { headers: requestHeaders(api, apiKey, headers), signal: AbortSignal.timeout(15000) });
-      if (!res.ok) { res.body?.cancel().catch(() => {}); lastError = telling(lastError, new Error(`${res.status} ${res.statusText} from ${url}`)); continue; }
-      const body = await res.json();
-      return toModels(Array.isArray(body) ? body : body.data ?? body.models ?? []);
-    } catch (error) { lastError = telling(lastError, error); }
+    try { return toModels(await fetchModelList(url, { headers: requestHeaders(api, apiKey, headers), paginate: api === ANTHROPIC })); }
+    catch (error) { lastError = telling(lastError, error); }
   }
   throw new Error(`Couldn't list models: ${lastError?.message ?? 'no response'}`);
 }
