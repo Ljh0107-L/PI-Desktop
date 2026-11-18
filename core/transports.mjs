@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { chmodSync, mkdirSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 // Launch descriptions for a Pi RPC process, either on this machine or on an SSH host.
 //
 // Both transports run the same tiny POSIX sh bootstrap on the target machine. The bootstrap
@@ -26,7 +27,12 @@ export function shellQuote(value) {
 
 // The command executed on the target: sh -c BOOTSTRAP pidesk <cwd> env K=V... <node> <pi> --mode rpc ...
 // `extraEnv` must hold non-secret values only: it is visible in argv on the target.
-function targetArgv({ cwd, node, piCli, agentDir, sessionDir, extensions = [], piArgs = [], extraEnv = {} }) {
+function piArgv({ node, piCli, retryPath, extensions = [], piArgs = [] }) {
+  const preload = retryPath ? ['--import', pathToFileURL(retryPath).href] : [];
+  return [node, ...preload, piCli, '--mode', 'rpc', '-ne', ...extensions.flatMap(path => ['-e', path]), ...piArgs];
+}
+
+function targetArgv({ cwd, agentDir, sessionDir, extraEnv = {}, ...pi }) {
   const env = [
     `PI_CODING_AGENT_DIR=${agentDir}`,
     'PI_OFFLINE=1',
@@ -35,8 +41,7 @@ function targetArgv({ cwd, node, piCli, agentDir, sessionDir, extensions = [], p
     ...Object.entries(extraEnv).map(([name, value]) => `${name}=${value}`),
   ];
   if (sessionDir) env.push(`PI_CODING_AGENT_SESSION_DIR=${sessionDir}`);
-  const extensionArgs = extensions.flatMap(path => ['-e', path]);
-  return ['sh', '-c', BOOTSTRAP, 'pidesk', cwd, 'env', ...env, node, piCli, '--mode', 'rpc', '-ne', ...extensionArgs, ...piArgs];
+  return ['sh', '-c', BOOTSTRAP, 'pidesk', cwd, 'env', ...env, ...piArgv(pi)];
 }
 
 export function localTransport(target) {
@@ -73,10 +78,10 @@ export function localRelayTransport({ node, relayPath, runDir, extraEnv = {} }) 
   return { kind: 'local-relay', label: 'This computer', command: node, args: [relayPath, 'attach'], spawnOptions: { env: { ...minimalEnv(process.env), ...extraEnv, PIDESK_RUN_DIR: runDir } } };
 }
 // What the relay daemon spawns on the host when the session is not already running there.
-export function relaySpawnSpec({ cwd, node, piCli, agentDir, sessionDir, extensions = [], piArgs = [], extraEnv = {} }) {
+export function relaySpawnSpec({ cwd, agentDir, sessionDir, extraEnv = {}, ...pi }) {
   const env = { PI_CODING_AGENT_DIR: agentDir, PI_OFFLINE: '1', PI_SKIP_VERSION_CHECK: '1', PI_TELEMETRY: '0', ...extraEnv };
   if (sessionDir) env.PI_CODING_AGENT_SESSION_DIR = sessionDir;
-  return { cwd, env, argv: [node, piCli, '--mode', 'rpc', '-ne', ...extensions.flatMap(path => ['-e', path]), ...piArgs] };
+  return { cwd, env, argv: piArgv(pi) };
 }
 
 // ssh <host> <node> <relay> attach — one connection per attached session. With `egress`, the session's

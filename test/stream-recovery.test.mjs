@@ -12,14 +12,17 @@ import { localTransport } from '../core/transports.mjs';
 import { branchMessages } from '../app/main/session-manager.mjs';
 import { applyEvent, displayBlocks, emptyTranscript, fromHistory } from '../app/renderer/src/transcript.js';
 
-async function runCase(t, { breakStream = 'reset', always = false, abortRetry = false, tool = false, status = 200 } = {}) {
+async function runCase(t, { breakStream = 'reset', always = false, abortRetry = false, tool = false, status = 200,
+  retry = { enabled: true, maxRetries: 2, baseDelayMs: abortRetry ? 1000 : 30 }, provider = 'mock', model = 'test', speed } = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'pds-'));
   const agentDir = join(dir, 'agent'); mkdirSync(agentDir);
-  writeFileSync(join(agentDir, 'settings.json'), JSON.stringify({ retry: { enabled: true, maxRetries: 2, baseDelayMs: abortRetry ? 1000 : 30 } }));
+  if (retry) writeFileSync(join(agentDir, 'settings.json'), JSON.stringify({ retry }));
   let requests = 0;
+  const payloads = [];
   const server = http.createServer(async (req, res) => {
     let body = ''; for await (const chunk of req) body += chunk;
     const payload = JSON.parse(body);
+    payloads.push(payload);
     requests++;
     if (status !== 200) { res.writeHead(status, { 'Content-Type': 'application/json' }).end(JSON.stringify({ error: { message: 'invalid API key', type: 'authentication_error' } })); return; }
     res.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache' });
@@ -42,12 +45,14 @@ async function runCase(t, { breakStream = 'reset', always = false, abortRetry = 
       if (breakStream === 'eof') res.end(); else res.destroy();
       return;
     }
-    send({ type: 'response.completed', response: { id, status: 'completed', output: [item], usage: { input_tokens: 20, output_tokens: 4, total_tokens: 24 } } });
+    send({ type: 'response.completed', response: { id, status: 'completed', output: [item], service_tier: payload.service_tier ?? 'default',
+      usage: { input_tokens: 20, output_tokens: 4, total_tokens: 24 } } });
     res.end();
   });
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
-  const session = new PiSession({ id: 'stream-recovery', boot: { providers: [{ id: 'mock', api: 'openai-responses', baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: 'test-only', models: [{ id: 'test' }] }] },
-    transport: localTransport({ node: process.execPath, piCli: resolve('node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'), cwd: dir, agentDir, extensions: [resolve('agent/pidesk-bridge.js')] }) });
+  const session = new PiSession({ id: 'stream-recovery', boot: { config: { speed }, providers: [{ id: provider, api: 'openai-responses', baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: 'test-only', models: [{ id: model }] }] },
+    transport: localTransport({ node: process.execPath, piCli: resolve('node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js'),
+      cwd: dir, agentDir, retryPath: resolve('agent/pidesk-retry.mjs'), extensions: [resolve('agent/pidesk-bridge.js')] }) });
   t.after(async () => { await session.stop(); server.closeAllConnections(); await new Promise(r => server.close(r)); rmSync(dir, { recursive: true, force: true }); });
   const events = [];
   let transcript = emptyTranscript(), retryUi;
@@ -58,7 +63,7 @@ async function runCase(t, { breakStream = 'reset', always = false, abortRetry = 
       if (abortRetry) session.abort().catch(() => {});
     }
   });
-  await session.start(); await session.setModel('mock', 'test');
+  await session.start(); await session.setModel(provider, model);
   const settled = session.nextSettled(15000);
   await session.prompt('test recovery'); await settled;
   const { entries, leafId } = await session.request('get_entries');
@@ -66,7 +71,7 @@ async function runCase(t, { breakStream = 'reset', always = false, abortRetry = 
   const { sessionFile } = await session.state();
   const fileEntries = readFileSync(sessionFile, 'utf8').trim().split('\n').map(line => JSON.parse(line));
   const fromDisk = fromHistory(branchMessages(fileEntries, fileEntries.at(-1).id));
-  return { requests, transcript, fromRpc, fromDisk, events, retryUi, dir };
+  return { requests, payloads, transcript, fromRpc, fromDisk, events, retryUi, dir };
 }
 
 for (const breakStream of ['reset', 'eof']) test(`Responses ${breakStream}: retries, recovers, and stays recovered in RPC/disk history`, { timeout: 20000 }, async t => {
@@ -94,6 +99,29 @@ test('repeated disconnects exhaust the bounded budget and preserve the final fai
     assert.match(errors[0].text, /Model connection interrupted.*terminated/);
   }
 });
+
+test('default recovery schedules ten retries with increasing delays', { timeout: 20000 }, async t => {
+  const first = await runCase(t, { retry: null });
+  const scheduled = first.events.find(e => e.type === 'auto_retry_start');
+  assert.equal(scheduled.maxAttempts, 10);
+  assert.equal(scheduled.delayMs, 200);
+  const exhausted = await runCase(t, { always: true, retry: { baseDelayMs: 1 } });
+  const retries = exhausted.events.filter(e => e.type === 'auto_retry_start');
+  assert.equal(exhausted.requests, 11);
+  assert.deepEqual(retries.map(e => e.delayMs), [1, 2, 4, 8, 16, 32, 64, 128, 256, 512]);
+  assert.ok(retries.every(e => e.maxAttempts === 10));
+  assert.equal(exhausted.events.findLast(e => e.type === 'auto_retry_end').success, false);
+});
+
+for (const model of ['gpt-6.2-sol', 'gpt-6.2-astra']) {
+  test(`${model} sends Ultrafast to the Responses endpoint, including on retry`, { timeout: 20000 }, async t => {
+    const result = await runCase(t, { provider: 'openai', model, speed: 'ultrafast' });
+    assert.deepEqual(result.payloads.map(({ model, service_tier }) => ({ model, service_tier })),
+      Array(2).fill({ model, service_tier: 'ultrafast' }));
+    const reply = result.events.findLast(e => e.type === 'message_end' && e.message.role === 'assistant').message;
+    assert.deepEqual(reply.__speed, { requested: 'ultrafast', sent: 'ultrafast', used: 'ultrafast' });
+  });
+}
 
 test('stop during retry cancels backoff and never starts another request', { timeout: 20000 }, async t => {
   const r = await runCase(t, { always: true, abortRetry: true });

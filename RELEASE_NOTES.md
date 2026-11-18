@@ -2,6 +2,11 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.27 — GPT-6.2 Ultrafast and model retries
+
+- **GPT-6.2 Sol and Astra support Ultrafast.** Pi Desktop sends the Ultrafast tier on OpenAI Responses requests. Usage estimates apply 3× Standard rates through February 28, 2027, then 6× starting March 1, Pacific time.
+- **Retry transient model failures up to ten times by default.** Retries start after 200 ms and double the delay each time. Stop cancels a pending retry, and recovery continues from tools that already finished.
+
 ## 0.2.26 — Live model discovery
 
 - **Fetch models from your provider.** Model settings query the selected provider's live API using its configured credentials. OpenAI can discover GPT-6.2 Sol and Astra as soon as the API lists them for your project. Models already known to Pi keep their full parameters.

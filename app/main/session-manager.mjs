@@ -145,7 +145,7 @@ export class SessionManager extends EventEmitter {
   // Start a throwaway Pi through this machine's relay and read its state (used by the packaged-build smoke test).
   async piSelfTest() {
     const id = 'selftest-' + randomUUID().slice(0, 8);
-    const spawn = relaySpawnSpec({ cwd: this.local.agentDir, node: this.local.node, piCli: this.local.piCli, agentDir: this.local.agentDir, extensions: [this.bridgePath], piArgs: ['--no-session'], extraEnv: this.local.extraEnv });
+    const spawn = relaySpawnSpec({ cwd: this.local.agentDir, node: this.local.node, piCli: this.local.piCli, agentDir: this.local.agentDir, retryPath: this.local.retryPath, extensions: [this.bridgePath], piArgs: ['--no-session'], extraEnv: this.local.extraEnv });
     mkdirSync(this.local.agentDir, { recursive: true });
     const session = new PiSession({ id, boot: { providers: [] }, transport: localRelayTransport({ node: this.local.node, relayPath: this.relayPath, runDir: this.local.runDir, extraEnv: this.local.extraEnv }), relay: { spawn } });
     await session.start({ readyTimeout: 60000 });
@@ -465,7 +465,7 @@ export class SessionManager extends EventEmitter {
 
   #localTransport(target) {
     mkdirSync(this.local.agentDir, { recursive: true });
-    return localTransport({ node: this.local.node, piCli: this.local.piCli, agentDir: this.local.agentDir, extensions: [this.bridgePath], extraEnv: { ...this.local.extraEnv, ...this.piEnv() }, ...target });
+    return localTransport({ node: this.local.node, piCli: this.local.piCli, agentDir: this.local.agentDir, retryPath: this.local.retryPath, extensions: [this.bridgePath], extraEnv: { ...this.local.extraEnv, ...this.piEnv() }, ...target });
   }
 
   // ---------------------------------------------------------------- sessions
@@ -754,7 +754,7 @@ export class SessionManager extends EventEmitter {
         this.#assertCurrent(record, runtime);
         boot = { claudeCode: { ...claudeConfig, bin: layout.bin, configDir: layout.configDir, sessionsDir: join(this.local.agentDir, 'sessions'), sessionFile: record.piSessionFile ?? null, cwd: record.cwd, env: this.claudeEnv } };
         spawn = { cwd: record.cwd, env: { ...this.local.extraEnv }, argv: [this.local.node, this.claudeAdapterPath] };
-      } else spawn = relaySpawnSpec({ cwd: record.cwd, node: this.local.node, piCli: this.local.piCli, agentDir: this.local.agentDir, extensions: [this.bridgePath], piArgs, extraEnv: { ...this.local.extraEnv, ...this.piEnv(record) } });
+      } else spawn = relaySpawnSpec({ cwd: record.cwd, node: this.local.node, piCli: this.local.piCli, agentDir: this.local.agentDir, retryPath: this.local.retryPath, extensions: [this.bridgePath], piArgs, extraEnv: { ...this.local.extraEnv, ...this.piEnv(record) } });
       const transport = localRelayTransport({ node: this.local.node, relayPath: this.relayPath, runDir: this.local.runDir, extraEnv: this.local.extraEnv });
       session = new PiSession({ id: record.id, boot, transport, relay: { sinceSeq: runtime.lastSeq, spawn } });
     } else {
@@ -773,7 +773,7 @@ export class SessionManager extends EventEmitter {
       if (claude) {
         boot = { claudeCode: { ...claudeConfig, bin: layout.bin, configDir: layout.configDir, sessionsDir: `${facts.agentDir}/sessions`, sessionFile: record.piSessionFile ?? null, cwd: record.cwd, env: this.claudeEnv } };
         spawn = { cwd: record.cwd, env: { TMPDIR: facts.tmpDir, ...(egress ? egressEnv(egress.remotePort) : {}) }, argv: [facts.node, `${facts.root}/ext/pidesk-claude.mjs`] };
-      } else spawn = relaySpawnSpec({ cwd: record.cwd, node: facts.node, piCli: facts.piCli, agentDir: facts.agentDir, extensions: [facts.bridge], piArgs, extraEnv: { TMPDIR: facts.tmpDir, ...this.piEnv(record), ...(egress ? egressEnv(egress.remotePort) : {}) } });
+      } else spawn = relaySpawnSpec({ cwd: record.cwd, node: facts.node, piCli: facts.piCli, agentDir: facts.agentDir, retryPath: facts.retryPath, extensions: [facts.bridge], piArgs, extraEnv: { TMPDIR: facts.tmpDir, ...this.piEnv(record), ...(egress ? egressEnv(egress.remotePort) : {}) } });
       const sharedOnHost = [...this.runtimes.values()].filter(r => r !== runtime && r.shared && r.envId === env.id && r.session && !r.closing).length;
       runtime.envId = env.id; runtime.shared = sharedOnHost < 6;
       const transport = sshRelayTransport({ host: env.host, sshOptions: env.sshArgs ?? [], node: facts.node, relayPath: facts.relay, runDir: facts.runDir, egress, shared: runtime.shared });

@@ -51,6 +51,28 @@ test('the request body: OpenAI service_tier, Anthropic speed (with the beta for 
   assert.equal(withSpeed({ model: 'gpt-6.1-sol' }, sol, 'standard'), undefined);
 });
 
+test('GPT-6.2 Ultrafast prices each request at the rate in effect when it starts', () => {
+  const cutoff = Date.parse('2027-03-01T00:00:00-08:00');
+  for (const id of ['gpt-6.2-sol', 'gpt-6.2-astra']) {
+    const model = { ...sol, id };
+    let now = cutoff - 1;
+    const speed = createSpeed({ speed: 'ultrafast', now: () => now });
+    const before = speed.request(model, { model: id });
+    assert.equal(before.payload.service_tier, 'ultrafast');
+    before.event({ response: { service_tier: 'ultrafast' } });
+    now = cutoff;
+    assert.deepEqual(before.finish(reply(model)).usage.cost,
+      { input: 3, output: 6, cacheRead: 1.5, cacheWrite: 0.75, total: 11.25 });
+    const after = speed.request(model, { model: id });
+    after.event({ response: { service_tier: 'ultrafast' } });
+    assert.equal(after.finish(reply(model)).usage.cost.total, 22.5);
+    const fallback = speed.request(model, { model: id });
+    fallback.event({ response: { service_tier: 'default' } });
+    assert.deepEqual(fallback.finish(reply(model)).usage.cost, cost());
+    assert.deepEqual(speedOptions({ ...model, api: 'openai-completions' }), ['standard', 'fast']);
+  }
+});
+
 test('the speed providers report, from their stream events', () => {
   assert.equal(speedUsed({ type: 'response.completed', response: { service_tier: 'default' } }), 'standard');
   assert.equal(speedUsed({ type: 'response.completed', response: { service_tier: 'priority' } }), 'fast');

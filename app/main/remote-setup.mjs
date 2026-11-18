@@ -413,6 +413,7 @@ for (const { name, content } of JSON.parse(fs.readFileSync(0, 'utf8'))) {
     hostname: host.hostname, home: host.home, root, node, nodeVersion, piVersion,
     piCli: `${root}/pi/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js`,
     bridge: `${root}/ext/pidesk-bridge.js`,
+    retryPath: `${root}/ext/pidesk-retry.mjs`,
     relay: `${root}/ext/pidesk-relay.mjs`,
     agentDir: `${root}/agent`,
     runDir: `${root}/run`,

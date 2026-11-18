@@ -1,7 +1,6 @@
 // Faster processing that providers sell for some models: the composer's Speed control.
 //   OpenAI: service_tier "fast" (Fast mode, formerly Priority processing; the GPT-5.6 and GPT-6
-//   models its guide names, Responses and Chat Completions) and "ultrafast" (GPT-6 Astra and
-//   GPT-6.1 Sol, Responses API only). Both are billed per response: Fast at 2x, Ultrafast at 6x.
+//   models its guide names, Responses and Chat Completions) and "ultrafast" (Responses API only).
 //   Anthropic: speed "fast" on Claude Opus 5.5, and on Opus 5 and Opus 4.8 in research preview
 //   with a beta. Billed at 2x. A request at another speed misses the prompt cache.
 // Shared by the desktop (which speeds a model offers) and the bridge (what each request asks for),
@@ -9,7 +8,9 @@
 
 export const SPEEDS = ['standard', 'fast', 'ultrafast'];
 const OPENAI_FAST = /^gpt-(?:5\.6|6(?:\.\d+)?)-/;
-const OPENAI_ULTRAFAST = new Set(['gpt-6-astra', 'gpt-6.1-sol']);
+const OPENAI_62_ULTRAFAST = new Set(['gpt-6.2-sol', 'gpt-6.2-astra']);
+const OPENAI_ULTRAFAST = new Set(['gpt-6-astra', 'gpt-6.1-sol', ...OPENAI_62_ULTRAFAST]);
+const OPENAI_62_ULTRAFAST_LIST_PRICE_AT = Date.UTC(2027, 2, 1, 8); // March 1 at midnight PST.
 const ANTHROPIC_FAST = new Set(['claude-opus-5-5', 'claude-opus-5', 'claude-opus-4-8']);
 const ANTHROPIC_PREVIEW = new Set(['claude-opus-5', 'claude-opus-4-8']);
 export const ANTHROPIC_FAST_BETA = 'fast-mode-2026-02-01';
@@ -55,9 +56,11 @@ export function speedUsed(data) {
 
 // The factor on the standard-rate cost Pi computed. pi-ai already prices Responses Fast from
 // the service tier; Chat Completions Fast, Ultrafast and Anthropic fast need scaling here.
-export function extraCost(model, used) {
+export function extraCost(model, used, requestedAt = Date.now()) {
   if (['anthropic-messages', 'openai-completions'].includes(model?.api) && used === 'fast') return 2;
-  if (model?.api?.startsWith('openai-') && used === 'ultrafast') return 6;
+  if (model?.api?.startsWith('openai-') && used === 'ultrafast') {
+    return OPENAI_62_ULTRAFAST.has(model.id) && requestedAt < OPENAI_62_ULTRAFAST_LIST_PRICE_AT ? 3 : 6;
+  }
   return 1;
 }
 const scaleCost = (cost, factor) => {
@@ -88,6 +91,7 @@ export function createSpeed({ speed = 'standard', now = Date.now } = {}) {
       const offered = speedOptions(model);
       if (wanted === 'standard' || !offered.length || payload?.model !== model.id) return null;
       const requested = wanted, sent = effectiveSpeed(wanted, offered, cooling);
+      const requestedAt = now();
       // Slower than asked: the model doesn't offer that speed, or it is resting after a rate limit.
       const reason = sent === requested ? {} : { reason: offered.includes(requested) ? 'resting' : 'model' };
       let used = null;
@@ -97,7 +101,7 @@ export function createSpeed({ speed = 'standard', now = Date.now } = {}) {
         event(data) { used = speedUsed(data) ?? used; },
         finish(message) {
           if (sent !== 'standard' && message?.stopReason === 'error' && UNAVAILABLE.test(message.errorMessage ?? '')) resting.set(sent, now() + SPEED_COOLDOWN_MS);
-          const factor = extraCost(model, used ?? sent);
+          const factor = extraCost(model, used ?? sent, requestedAt);
           const usage = factor !== 1 && message?.usage?.cost ? { usage: { ...message.usage, cost: scaleCost(message.usage.cost, factor) } } : {};
           return { ...message, ...usage, __speed: { requested, sent, ...reason, ...(used ? { used } : {}) } };
         },

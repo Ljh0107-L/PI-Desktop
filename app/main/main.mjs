@@ -342,6 +342,7 @@ app.whenReady().then(async () => {
     local: {
       node: nodeBinary(), piCli: join(piPackage, 'dist/bundle/cli.js'),
       agentDir: join(app.getPath('userData'), 'agent'),
+      retryPath: join(dirname(bridgePath), 'pidesk-retry.mjs'),
       runDir: join(app.getPath('userData'), 'run'),
       uploadDir: join(app.getPath('userData'), 'uploads'),
       claudeRoot: app.getPath('userData'), // <userData>/claude-code/<version>/claude, never a `claude` on PATH
