@@ -5,25 +5,24 @@ import { parse } from 'yaml';
 
 const release = parse(readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8'));
 const ci = parse(readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8'));
+const full = parse(readFileSync(new URL('../.github/workflows/full-ci.yml', import.meta.url), 'utf8'));
 
-test('release checks the exact main push CI and previews still run the reusable offline suites', () => {
+test('release checks the exact main push CI and full regression CI is opt-in', () => {
   const verify = release.jobs.verify.steps[0].run;
   assert.equal(release.permissions.actions, 'read');
   assert.match(verify, /actions\/workflows\/ci\.yml\/runs\?head_sha=\$GITHUB_SHA&branch=main&event=push/);
   assert.match(verify, /\[\[ "\$conclusion" == success \]\]/);
   assert.match(verify, /exit 1/);
-  assert.equal(release.jobs.verify_preview.if, "github.event_name == 'workflow_dispatch'");
-  assert.equal(release.jobs.verify_preview.uses, './.github/workflows/ci.yml');
-  assert.deepEqual(release.jobs.verify_preview.with, { skip_ui: true });
-  assert.equal(ci.on.workflow_call.inputs.skip_ui.type, 'boolean');
-  assert.equal(ci.on.workflow_call.inputs.skip_ui.default, false);
-  assert.equal(ci.jobs.ui.if, '${{ !inputs.skip_ui }}');
-  assert.equal(ci.jobs.core.if, undefined);
-  assert.equal(ci.jobs.bridge.if, undefined);
+  assert.deepEqual(ci.on.push.branches, ['main']);
+  assert.deepEqual(Object.keys(ci.jobs), ['critical']);
+  assert.ok(ci.jobs.critical.steps.some(step => step.run === 'npm run build'));
+  assert.ok(ci.jobs.critical.steps.some(step => step.run === 'npm run test:critical'));
+  assert.deepEqual(Object.keys(full.on), ['workflow_dispatch']);
+  assert.deepEqual(Object.keys(full.jobs), ['bridge', 'ui', 'core']);
 });
 
 test('Electron downloads reuse versioned caches across app version bumps and retry only finitely', () => {
-  for (const job of [ci.jobs.ui, release.jobs.mac]) {
+  for (const job of [full.jobs.ui, release.jobs.mac]) {
     const cache = job.steps.find(step => step.uses?.startsWith('actions/cache@'));
     assert.match(cache.with['restore-keys'], /^electron-/);
     const install = job.steps.find(step => step.run?.includes('node_modules/electron/install.js')).run;

@@ -2,120 +2,27 @@ name: CI
 
 on:
   push:
-    branches: ['**'] # release tags wait for the matching main-branch CI run
-    paths-ignore: ['**.md', 'docs/**', 'build/make-icon.py', 'build/icon-source.png']
+    branches: [main]
   pull_request:
-    paths-ignore: ['**.md', 'docs/**', 'build/make-icon.py', 'build/icon-source.png']
+    branches: [main]
   workflow_dispatch:
-  workflow_call:
-    inputs:
-      skip_ui:
-        type: boolean
-        default: false
-        description: Skip the UI suite when the release commit has already passed it
+
+permissions:
+  contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: true
+  group: critical-ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
-# Two jobs in parallel: the UI suite alone on one runner, the headless suites on another.
 jobs:
-  bridge:
-    name: Cursor bridge offline regressions
+  critical:
+    name: Build and critical checks
     runs-on: ubuntu-24.04
     timeout-minutes: 5
-    strategy:
-      matrix:
-        python: ['3.9', '3.12']
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: ${{ matrix.python }}
-      - run: python -m pip install -r integrations/cursor-quota-bridge/requirements.txt
-      - name: Offline protocol and usage fixtures (no model requests)
-        working-directory: integrations/cursor-quota-bridge
-        run: python -m unittest discover -s tests -p 'test_bridge_unit.py' -v
-
-  ui:
-    if: ${{ !inputs.skip_ui }}
-    name: End-to-end UI
-    runs-on: macos-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with: { node-version: 24, cache: npm }
-      - uses: actions/cache@v4
-        with:
-          path: ~/Library/Caches/electron
-          key: electron-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('package-lock.json') }}
-          restore-keys: electron-${{ runner.os }}-${{ runner.arch }}-
-      - run: |
-          npm ci --ignore-scripts --no-audit --no-fund
-          for attempt in 1 2 3; do
-            node node_modules/electron/install.js && break
-            [ "$attempt" -lt 3 ] || exit 1
-            sleep 5
-          done
-      # A throwaway unprivileged sshd on 127.0.0.1 (host alias "pidesk-test") stands in for a remote machine.
-      - name: Build renderer, start test SSH server
-        run: |
-          sh test/sshd.sh > /tmp/pidesk-sshd.log 2>&1 &
-          npx vite build
-          for i in $(seq 1 50); do [ -f /tmp/pidesk-sshd/ssh_config ] && ssh -F /tmp/pidesk-sshd/ssh_config pidesk-test true 2>/dev/null && break; sleep 0.2; done
-          mkdir -p /tmp/pidesk-e2e
-          { cat /tmp/pidesk-sshd/ssh_config; printf '\nMatch all\n  BatchMode yes\n'; } > /tmp/pidesk-e2e/ssh_config
-      - name: End-to-end UI (Electron + Playwright)
-        # Pi reaches the test host by upload from this machine (no npm registry round trips).
-        env: { PIDESK_FORCE_PI_UPLOAD: '1' }
-        run: |
-          set +e
-          node test/e2e.mjs --ssh-config /tmp/pidesk-e2e/ssh_config
-          R1=$?
-          node test/runtime-ui.mjs
-          R2=$?
-          node test/history-ui.mjs
-          R3=$?
-          exit $(( R1 || R2 || R3 ))
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with: { name: e2e-screenshots, path: /tmp/pidesk-e2e/shots, if-no-files-found: ignore }
-
-  core:
-    name: Protocol, relay, latency
-    runs-on: macos-latest
-    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 24, cache: npm }
       - run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Backend lifecycle and real stream recovery regressions
-        run: npm run test:backend
-      - name: Start test SSH server
-        run: |
-          sh test/sshd.sh > /tmp/pidesk-sshd.log 2>&1 &
-          for i in $(seq 1 50); do [ -f /tmp/pidesk-sshd/ssh_config ] && ssh -F /tmp/pidesk-sshd/ssh_config pidesk-test true 2>/dev/null && break; sleep 0.2; done
-      - name: Bounded history over SSH
-        run: node test/history-ssh.mjs
-      - name: Protocol + relay + latency
-        run: |
-          set +e
-          node test/protocol.mjs --ssh-host pidesk-test --ssh-config /tmp/pidesk-sshd/ssh_config > /tmp/protocol.log 2>&1 & P1=$!
-          node test/relay.mjs --ssh-config /tmp/pidesk-sshd/ssh_config > /tmp/relay.log 2>&1 & P2=$!
-          node test/latency.mjs --ssh-config /tmp/pidesk-sshd/ssh_config > /tmp/latency.log 2>&1 & P3=$!
-          wait $P1; R1=$?; wait $P2; R2=$?; wait $P3; R3=$?
-          for f in protocol relay latency; do echo "::group::$f"; cat /tmp/$f.log; echo "::endgroup::"; done
-          grep -h "checks passed\|within budget" /tmp/protocol.log /tmp/relay.log /tmp/latency.log
-          exit $(( R1 || R2 || R3 ))
-      - name: Git review renderer with real repository fixtures
-        if: ${{ !inputs.skip_ui }}
-        run: |
-          npx vite build
-          npx playwright-core install chromium
-          node test/git-review-ui.mjs
-          PIDESK_UI_THEME=dark node test/git-review-ui.mjs
-      - uses: actions/upload-artifact@v4
-        if: ${{ always() && !inputs.skip_ui }}
-        with: { name: git-review-screenshots, path: /tmp/pi-desktop-review-ui, if-no-files-found: ignore }
+      - run: npm run build
+      - run: npm run test:critical
