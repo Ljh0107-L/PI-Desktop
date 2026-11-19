@@ -34,9 +34,18 @@ Gemini 4 Argon and Carbon stream tool arguments incrementally, including behind 
 
 ChatGPT subscription sign-in is no longer included. Existing subscription conversations remain readable; select another model explicitly to continue them. Removing the integration does not delete saved API keys, conversation history or encrypted legacy authorization data.
 
+## Antigravity CLI
+
+Install Google's [official Antigravity CLI](https://antigravity.google/docs/getting-started?tab=cli) on the machine that runs the conversation and check that `agy acp --help` works. In a new conversation, select **Local** or an added **SSH host**, then **Antigravity CLI → Open Antigravity**.
+
+- **Local:** Select **Sign in with Google** if prompted, or use your existing CLI login.
+- **SSH:** In the host terminal, run `agy acp --login` as the SSH user, complete Google's verification, then select **Reconnect**. The host needs direct access to Antigravity. Pi Desktop does not forward your Mac's login, API keys, or model proxy to the CLI.
+
+The [official ACP server](https://antigravity.google/docs/ide/extensions/acp/) owns the session, model/effort options, permissions, and quota. Pi Desktop can reopen the same Antigravity conversation; a running SSH session keeps working during a disconnect. The [Google account's plan](https://antigravity.google/docs/plans/) and the ACP client determine which models are offered; Google's third-party models aren't available to all ACP clients. Text, streamed replies and tool updates, permission prompts, and Stop work on both environments. Attachments, Pi Ultra, Pi Compact, and Rewind/history editing/forking are not supported for this engine.
+
 ## How it works
 
-- **Sessions are Pi processes.** Each session runs `pi --mode rpc` locally, or on an SSH host through system OpenSSH ([`core/transports.mjs`](core/transports.mjs), [`core/pi-session.mjs`](core/pi-session.mjs)). Many sessions on many machines run at once. The bridge extension is staged outside the app's ES-module package, so Pi binds it to its own bundled modules and starts in a fraction of a second ([`app/main/extensions.mjs`](app/main/extensions.mjs)).
+- **Pi sessions run as separate processes.** Each Pi session runs `pi --mode rpc` locally, or on an SSH host through system OpenSSH ([`core/transports.mjs`](core/transports.mjs), [`core/pi-session.mjs`](core/pi-session.mjs)). Many sessions on many machines run at once. The bridge extension is staged outside the app's ES-module package, so Pi binds it to its own bundled modules and starts in a fraction of a second ([`app/main/extensions.mjs`](app/main/extensions.mjs)).
 - **SSH hosts come from `~/.ssh/config`.** On first use the app installs Pi (same version as the desktop) and the bridge extension under `~/.pidesk` on the host ([`app/main/remote-setup.mjs`](app/main/remote-setup.mjs)).
 - **Keys stay on this Mac.** API keys are encrypted with Electron `safeStorage` (Keychain). When a session starts, the key travels as the first stdin line of the SSH channel — never in argv on either machine — and the bridge extension ([`agent/pidesk-bridge.js`](agent/pidesk-bridge.js)) removes it from the environment before any tool runs.
 - **Model egress through the Mac.** If a host cannot reach a provider (e.g. a corporate endpoint), its model traffic is tunnelled back through this Mac with an allowlisted proxy and `ssh -R`; HTTPS uses CONNECT to keep TLS end to end ([`core/egress-proxy.mjs`](core/egress-proxy.mjs)).

@@ -212,6 +212,7 @@ export async function bootstrap() {
   api('updateStatus').then(update => set({ update })).catch(() => {});
   const boot = await api('bootstrap');
   const d = boot.settings.defaults;
+  const engine = ['claude-code', 'antigravity'].includes(d.engine) ? d.engine : 'pi';
   set({
     ready: true, settings: boot.settings, environments: boot.environments, sessions: boot.sessions, home: boot.home, piVersion: boot.piVersion,
     sessionUpdate: state.sessionUpdate ?? boot.sessionUpdate,
@@ -219,8 +220,8 @@ export async function bootstrap() {
     draft: {
       environmentId: d.environmentId ?? 'local',
       cwd: defaultFolder(boot.settings, d.environmentId ?? 'local'),
-      model: d.model,
-      engine: d.engine === 'claude-code' ? 'claude-code' : 'pi',
+      model: engine === 'antigravity' ? null : d.model,
+      engine,
       thinkingLevel: d.thinkingLevel ?? 'medium',
       effort: d.effort ?? 'medium',
       speed: d.speed ?? 'standard',
@@ -350,7 +351,8 @@ export async function loadCatalog() {
 export const setDraft = patch => set(s => {
   let draft = { ...s.draft, ...patch };
   if (Object.hasOwn(patch, 'environmentId') || Object.hasOwn(patch, 'engine')) {
-    draft.model = modelForEnvironment(s.catalog, draft.environmentId, draft.model, draft.engine);
+    const preferred = draft.model ?? (s.draft.engine === 'antigravity' ? s.settings?.defaults?.model : null);
+    draft.model = modelForEnvironment(s.catalog, draft.environmentId, preferred, draft.engine);
   }
   if (Object.hasOwn(patch, 'model') || Object.hasOwn(patch, 'environmentId') || Object.hasOwn(patch, 'engine')) {
     draft = clampDraftEfforts(s.catalog, draft);
@@ -463,12 +465,7 @@ export function goForward() {
   next.view === 'session' && next.activeId ? openSession(next.activeId, { record: false }) : set({ view: 'new', activeId: null });
 }
 export function pickRecent(environmentId, cwd) {
-  set(s => {
-    let draft = { ...s.draft, environmentId, cwd };
-    draft.model = modelForEnvironment(s.catalog, environmentId, draft.model, draft.engine);
-    draft = clampDraftEfforts(s.catalog, draft);
-    return { draft };
-  });
+  setDraft({ environmentId, cwd });
   if (environmentId !== 'local') api('prepareEnvironment', environmentId);
 }
 export const setSettings = settings => set({ settings });
@@ -488,13 +485,19 @@ export async function openSession(id, { record = true } = {}) {
   // Once it is open, keep a spare Pi in its folder so Fork (or a new session there) needn't start one.
   setTimeout(() => { if (state.activeId === id) api('warmFolder', id).catch(() => {}); }, 1500);
   const t = transcriptOf(id);
-  const isClaude = state.sessions.find(s => s.id === id)?.engine === 'claude-code';
-  refreshJobs(id);
-  if (t.loaded) { api('focusSession', id).catch(() => {}); prefetchHistory(id); return; } // the sweep never stops the open conversation
+  const engine = state.sessions.find(s => s.id === id)?.engine;
+  const isAntigravity = engine === 'antigravity';
+  if (!isAntigravity) refreshJobs(id);
+  if (t.loaded) {
+    api('focusSession', id).catch(() => {}); // the sweep never stops the open conversation
+    if (isAntigravity) api('openSession', id).catch(() => {}); // historyPage normally starts it
+    prefetchHistory(id);
+    return;
+  }
   try {
     await reloadTranscript(id);
     refreshStats(id);
-    if (!isClaude) {
+    if (engine !== 'claude-code' && !isAntigravity) {
       api('goal', id).then(goal => set(s => ({ goals: { ...s.goals, [id]: goal ?? s.goals[id] ?? null } }))).catch(() => {});
       api('ultra', id).then(ultra => set(s => ({ ultra: { ...s.ultra, [id]: ultra ?? s.ultra[id] ?? null } }))).catch(() => {});
       api('agents', id).then(list => { if (list?.length) set(s => ({ agents: { ...s.agents, [id]: { ...Object.fromEntries(list.map(agent => [agent.id, agent])), ...s.agents[id] } } })); }).catch(() => {});
@@ -525,24 +528,42 @@ function scheduleStats(id) {
 
 export async function startSession(text, attachments = []) {
   const { draft } = state;
-  const claude = draft.engine === 'claude-code';
-  if (!draft.model) throw new Error(claude ? 'Choose an Anthropic Messages model in Settings → Models first.' : 'Choose a model in Settings → Models first.');
-  if (isRetiredProvider(draft.model.provider)) throw new Error(RETIRED_PROVIDER_MESSAGE);
+  const claude = draft.engine === 'claude-code', antigravity = draft.engine === 'antigravity';
+  if (!antigravity && !draft.model) throw new Error(claude ? 'Choose an Anthropic Messages model in Settings → Models first.' : 'Choose a model in Settings → Models first.');
+  if (!antigravity && isRetiredProvider(draft.model?.provider)) throw new Error(RETIRED_PROVIDER_MESSAGE);
+  if (antigravity && attachments.length) throw new Error('Antigravity CLI conversations currently accept text only.');
   const pendingId = `pending:${++nextPendingId}`;
-  set({ view: 'session', activeId: pendingId, transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: [{ role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] } } });
+  set({ view: 'session', activeId: pendingId, transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: text || attachments.length ? [{ role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] : [] } } });
   try {
-    const session = await api('createSession', claude
-      ? { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, engine: 'claude-code', effort: draft.effort, ultracode: draft.ultracode, speed: draft.speed, prompt: text }
-      : { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel, speed: draft.speed, ultra: draft.ultra, prompt: text });
+    const target = { environmentId: draft.environmentId, cwd: draft.cwd, prompt: text };
+    const session = await api('createSession', antigravity
+      ? { ...target, engine: 'antigravity' }
+      : claude
+        ? { ...target, model: draft.model, engine: 'claude-code', effort: draft.effort, ultracode: draft.ultracode, speed: draft.speed }
+        : { ...target, model: draft.model, thinkingLevel: draft.thinkingLevel, speed: draft.speed, ultra: draft.ultra });
     set(s => ({ ...(s.activeId === pendingId ? { activeId: session.id } : {}),
-      ...(draft.ultra && !claude && s.draft === draft ? { draft: { ...draft, ultra: false } } : {}),
+      ...(draft.ultra && !claude && !antigravity && s.draft === draft ? { draft: { ...draft, ultra: false } } : {}),
       transcripts: { ...s.transcripts, [session.id]: s.transcripts[session.id] ?? { ...emptyTranscript(), loaded: true }, [pendingId]: undefined },
       history: s.history.map(v => v.activeId === pendingId ? { ...v, activeId: session.id } : v),
       future: s.future.map(v => v.activeId === pendingId ? { ...v, activeId: session.id } : v),
       sessions: s.sessions.some(x => x.id === session.id) ? s.sessions : [session, ...s.sessions] }));
-    warnIfNoImages(draft.model, attachments);
-    await api('prompt', session.id, text, attachments);
-    api('updateDefaults', { environmentId: draft.environmentId, model: draft.model, engine: draft.engine, thinkingLevel: draft.thinkingLevel, effort: draft.effort, speed: draft.speed }).then(setSettings).catch(() => {});
+    if (antigravity) {
+      if (text.trim()) {
+        // Keep the first message in the new composer until it can be sent. Sign-in
+        // never sends it automatically, and recovery must not replace newer typing.
+        setComposerDraft(session.id, 'text', text);
+        if (!session.antigravity?.authRequired) {
+          const receipt = takeComposerDraft(session.id);
+          try { await api('prompt', session.id, text, []); }
+          catch (error) { restoreComposerDraft(session.id, receipt); notify(error.message, 'error'); }
+        }
+      }
+      api('updateDefaults', { environmentId: draft.environmentId, engine: draft.engine }).then(setSettings).catch(() => {});
+    } else {
+      warnIfNoImages(draft.model, attachments);
+      await api('prompt', session.id, text, attachments);
+      api('updateDefaults', { environmentId: draft.environmentId, model: draft.model, engine: draft.engine, thinkingLevel: draft.thinkingLevel, effort: draft.effort, speed: draft.speed }).then(setSettings).catch(() => {});
+    }
   } catch (error) {
     set(s => ({ ...(s.activeId === pendingId ? { view: 'new', activeId: null } : {}), transcripts: { ...s.transcripts, [pendingId]: undefined },
       history: s.history.filter(v => v.activeId !== pendingId), future: s.future.filter(v => v.activeId !== pendingId) }));
@@ -552,6 +573,12 @@ export async function startSession(text, attachments = []) {
 
 // Text sent while Pi is waiting on a question answers that question instead of starting a new turn.
 export async function sendPrompt(id, text, attachments = []) {
+  const session = state.sessions.find(s => s.id === id);
+  if (session?.engine === 'antigravity') {
+    if (state.questions[id]?.length) throw new Error('Choose a permission option in the conversation.');
+    await api('prompt', id, text, attachments);
+    return;
+  }
   const pending = state.questions[id]?.find(q => q.method === 'select' || q.method === 'input' || q.method === 'editor');
   if (pending && text && !attachments.length) { await api('answer', id, pending.requestId, { value: pending.multiSelect ? [text] : text }); return; }
   // Desktop commands; anything else starting with "/" (goal, skills, prompt templates) goes to Pi.
@@ -559,7 +586,6 @@ export async function sendPrompt(id, text, attachments = []) {
   if (command === 'compact') { await api('compact', id); return; }
   if (command === 'fork') { await forkSession(id); return; }
   if (command === 'new') { newSession(); return; }
-  const session = state.sessions.find(s => s.id === id);
   warnIfNoImages(session?.model, attachments);
   // A message sent while Pi works interrupts the active run and starts a fresh turn. Show it as an
   // optimistic user message at once; Pi's message_end replaces it, and a failed send removes it again.

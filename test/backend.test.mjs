@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { spawn, execFile } from 'node:child_process';
 import { once } from 'node:events';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import net from 'node:net';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -10,9 +10,10 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { promisify } from 'node:util';
 import test from 'node:test';
 import { PiSession } from '../core/pi-session.mjs';
-import { localRelayTransport, relaySpawnSpec } from '../core/transports.mjs';
+import { localRelayTransport, relaySpawnSpec, shellQuote } from '../core/transports.mjs';
 import { startEgressProxy } from '../core/egress-proxy.mjs';
 import { SessionManager } from '../app/main/session-manager.mjs';
+import { findAntigravityCli } from '../app/main/antigravity.mjs';
 import { planSessionUpdate, restartUpdatedSessions } from '../app/main/session-update.mjs';
 import { Store } from '../app/main/store.mjs';
 
@@ -56,13 +57,82 @@ async function fixture(t, { startDaemon = true, mode, delay = 0 } = {}) {
   };
   return { dir, runDir, relayPath, relay, connect, cleanups };
 }
-function managerFor(t, f, extraEnv = {}) {
+function managerFor(t, f, extraEnv = {}, options = {}) {
   const store = { sessions: [], settings: { providers: [], environments: {} }, saveSessions() {}, touchRecent() {} };
   const manager = new SessionManager({ store, environments: () => [{ id: 'local', kind: 'local', label: 'Local' }, { id: 'remote', kind: 'ssh', enabled: true }],
-    local: { node: process.execPath, piCli: peer, agentDir: f.dir, runDir: f.runDir, uploadDir: join(f.dir, 'uploads'), extraEnv }, relayPath: f.relayPath, bridgePath: peer });
+    local: { node: process.execPath, piCli: peer, agentDir: f.dir, runDir: f.runDir, uploadDir: join(f.dir, 'uploads'), extraEnv }, relayPath: f.relayPath, bridgePath: peer, ...options });
   f.cleanups.push(() => manager.shutdown());
   return manager;
 }
+
+test('Antigravity discovery prefers the official installer location without running the binary', t => {
+  const home = mkdtempSync(join(tmpdir(), 'pda-'));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const install = join(home, '.local/bin'), path = join(home, 'custom');
+  mkdirSync(install, { recursive: true }); mkdirSync(path);
+  writeFileSync(join(install, 'agy'), 'not executable', { mode: 0o600 });
+  writeFileSync(join(path, 'agy'), 'fixture', { mode: 0o700 });
+  assert.equal(findAntigravityCli({ home, path }), join(path, 'agy'));
+  rmSync(join(install, 'agy'));
+  writeFileSync(join(install, 'agy'), 'fixture', { mode: 0o700 });
+  assert.equal(findAntigravityCli({ home, path }), join(install, 'agy'));
+});
+
+test('Antigravity runs through the local relay, gates permissions and reopens the same CLI session', { timeout: 15000 }, async t => {
+  const f = await fixture(t);
+  const cwd = realpathSync(f.dir), bin = join(cwd, 'agy');
+  const fake = resolve('test/fixtures/fake-agy-acp-antigravity.mjs');
+  writeFileSync(bin, `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec ${shellQuote(process.execPath)} ${shellQuote(fake)} "$@"\n`, { mode: 0o700 });
+  writeFileSync(join(cwd, '.pidesk-agy-scenario.json'), JSON.stringify({ resume: true }));
+  const trace = () => readFileSync(join(cwd, '.pidesk-fake-agy.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  const manager = managerFor(t, f, { GEMINI_API_KEY: 'test-never-sent' }, { antigravityCli: () => bin, antigravityRemoteCli: async () => null });
+  manager.store.settings.providers = [{ id: 'paid', kind: 'builtin' }];
+  manager.store.getKey = () => assert.fail('Antigravity must never access a Pi provider key');
+  const engine = 'antigravity', args = { engine, cwd, model: { provider: 'paid', id: 'model' }, ultra: true, speed: 'ultrafast' };
+  await assert.rejects(manager.create({ ...args, environmentId: 'remote' }), /agy\) was not found/);
+  assert.deepEqual(manager.store.sessions, []);
+  assert.equal(await manager.prewarm({ ...args, environmentId: 'local' }), false);
+  const session = await manager.create({ ...args, environmentId: 'local' });
+  assert.equal(session.engine, engine);
+  assert.equal(session.model, undefined);
+  assert.equal(session.speed, undefined);
+  assert.equal(session.ultra, undefined);
+  assert.equal(session.antigravity.authRequired, true);
+  await assert.rejects(manager.prompt(session.id, 'not logged in'), /Sign in with Google/);
+  assert.equal(trace().some(row => ['authenticate', 'session/prompt'].includes(row.method)), false);
+  assert.equal((await manager.antigravityLogin(session.id)).authRequired, false);
+  const config = await manager.antigravitySetConfig(session.id, 'model', 'mock-gemini-pro');
+  assert.equal(config.options.find(o => o.id === 'model').currentValue, 'mock-gemini-pro');
+  await assert.rejects(manager.prompt(session.id, 'with file', [{ kind: 'file' }]), /text only/);
+  const questionReceived = once(manager, 'question');
+  assert.deepEqual(await manager.prompt(session.id, 'permission test'), { disposition: 'started' });
+  const [{ question }] = await questionReceived;
+  assert.equal(question.permission, true);
+  assert.throws(() => manager.answer(session.id, question.requestId, { confirmed: true }), /Choose one/);
+  assert.equal((await f.relay('list')).sessions.find(s => s.id === session.id).pendingUi, 1);
+  const resolved = once(manager, 'question-resolved');
+  await manager.abort(session.id);
+  assert.deepEqual((await resolved)[0], { id: session.id, requestId: question.requestId });
+  assert.deepEqual(manager.list()[0].pendingQuestions, []);
+  assert.equal((await f.relay('list')).sessions.find(s => s.id === session.id).pendingUi, 0);
+  assert.equal(trace()[0].boot.env.includes('GEMINI_API_KEY'), false);
+  assert.deepEqual(trace().filter(row => row.method === 'session/prompt').map(row => row.params.prompt[0].text), ['permission test']);
+  await assert.rejects(manager.compact(session.id), /not available/);
+  await assert.rejects(manager.fork(session.id), /not available/);
+
+  const original = await manager.historyPage(session.id);
+  assert.equal(original.messages.filter(m => m.role === 'user').length, 1);
+  await manager.close(session.id);
+  await f.relay('stop', session.id);
+  // Simulate a crash before the initial transcript path was registered by Desktop.
+  delete manager.store.sessions[0].piSessionFile;
+  delete manager.store.sessions[0].piSessionId;
+  await manager.ensureStarted(session.id);
+  assert.equal(manager.list()[0].piSessionFile, session.piSessionFile);
+  assert.deepEqual((await manager.historyPage(session.id)).messages, original.messages);
+  assert.equal(trace().filter(row => row.method === 'session/new').length, 2, 'auth rejection + successful new, never another new on resume');
+  assert.equal(trace().find(row => row.method === 'session/resume').params.sessionId, 'fake-acp/session?exact=1');
+});
 
 test('cancelling a starting spare is silent and cannot drop its replacement', { timeout: 15000 }, async t => {
   const f = await fixture(t);

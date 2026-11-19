@@ -229,6 +229,7 @@ function runDaemon() {
       try {
         const record = JSON.parse(line);
         if (record.type === 'extension_ui_request' && DIALOGS.has(record.method)) session.pendingUi.set(record.id, { seq: session.seq, frame });
+        if (record.type === 'extension_ui_dismiss') session.pendingUi.delete(record.id);
       } catch { /* non-JSON output is still forwarded */ }
       let blocked = false;
       for (const client of session.clients) {

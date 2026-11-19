@@ -1,5 +1,6 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
+import { AntigravityOptions, AntigravitySetup } from './Antigravity.jsx';
 import { EffortTrigger, MenuItem, MenuSection, Modal, SpeedTrigger, Spinner, Trigger, baseName, envIcon, fileBadgeKind, shortPath } from './ui.jsx';
 import { effectiveSpeed } from '../../../agent/pidesk-speed.mjs';
 import { api, captureComposerDraft, clearQueued, defaultFolder, getState, notify, openSettings, recoverComposerDraft, restoreComposerDraft, setComposerDraft, setDraft, setEnvironments, set as setStore, takeComposerDraft, useStore } from './store.js';
@@ -357,8 +358,9 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   }, []);
   useLayoutEffect(() => { size.current?.update(); }, [text]);
   // Slash commands: shown while the message is a single "/word" being typed.
-  const activeEngine = (session ? session.engine : draftTarget?.engine) === 'claude-code' ? 'claude-code' : 'pi';
-  const slashQuery = /^\/[\w:.-]*$/.test(text) ? text.slice(1).toLowerCase() : null;
+  const activeEngine = (session ? session.engine : draftTarget?.engine) ?? 'pi';
+  const antigravity = activeEngine === 'antigravity';
+  const slashQuery = !antigravity && /^\/[\w:.-]*$/.test(text) ? text.slice(1).toLowerCase() : null;
   useEffect(() => { setPi([]); }, [session?.id, activeEngine]);
   useEffect(() => { if (slashQuery !== null && session?.id) api('commands', session.id).then(setPi).catch(() => {}); }, [slashQuery !== null, session?.id]);
   const mergedCommands = useMemo(() => {
@@ -420,6 +422,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   };
 
   const add = async files => {
+    if (antigravity) { if (files.length) notify('Antigravity CLI conversations currently accept text only.', 'error'); return; }
     // Capture once for the whole batch, before any read. Navigation preserves this
     // token; sending, recovering, or deleting the originating draft invalidates it.
     const token = onCancel ? draftReadToken(changeEditor(draft => updateComposerDraft(draft, 'attachments', list => list))) : captureComposerDraft(draftKey);
@@ -430,7 +433,9 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   };
   // Clear at once and let the backend work in the background: a slow command (e.g. /goal starting a
   // run) must not block the next message. The draft comes back if sending fails.
+  const blocked = antigravity && (!!attachments.length || (session && (working || session.status !== 'connected' || session.antigravity?.authRequired)));
   const submit = async () => {
+    if (blocked) return;
     let receipt;
     if (onCancel) {
       const taken = takeDraft(editorRef.current);
@@ -444,8 +449,8 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
       else restoreComposerDraft(draftKey, receipt);
     }
   };
-  const canSend = !!(text.trim() || attachments.length);
-  const attachmentControl = <button type="button" className="composer-plus" aria-label="Add attachment" title="Add files or images" onClick={() => fileInput.current?.click()}><Icon name="plus" size={17} /></button>;
+  const canSend = !blocked && !!(text.trim() || attachments.length);
+  const attachmentControl = !antigravity && <button type="button" className="composer-plus" aria-label="Add attachment" title="Add files or images" onClick={() => fileInput.current?.click()}><Icon name="plus" size={17} /></button>;
   const stopButton = working && !onCancel
     ? <button type="button" className="send-button stop" onClick={() => {
       clearQueued(session.id);
@@ -543,7 +548,8 @@ export function NewSessionTrayHead() {
   const environmentId = draft.environmentId;
   const env = environments.find(e => e.id === environmentId) ?? { id: environmentId, label: 'This computer', kind: environmentId?.startsWith('ssh:') ? 'ssh' : 'local' };
   const cwd = draft.cwd;
-  const isClaude = draft.engine === 'claude-code';
+  const isClaude = draft.engine === 'claude-code', antigravity = draft.engine === 'antigravity';
+  const engineLabel = antigravity ? 'Antigravity CLI' : isClaude ? 'Claude Code' : 'Pi';
   const changeEnv = id => {
     setDraft({ environmentId: id, cwd: defaultFolder(getState().settings, id) });
     if (id !== 'local') api('prepareEnvironment', id);
@@ -558,14 +564,15 @@ export function NewSessionTrayHead() {
         <Trigger className="env-trigger" title={env.label} width={330} placement="top-start" label="Environment" menu={close => <EnvironmentMenu value={environmentId} onChange={changeEnv} close={close} />}>
           <Icon name={envIcon(env)} size={13.5} /><span>{env.kind === 'local' ? 'Local' : env.label}</span><Icon name="chevronDown" size={11} className="tray-caret" />
         </Trigger>
-        <Trigger width={210} placement="top-start" label="Engine" title={`Engine: ${isClaude ? 'Claude Code' : 'Pi'}`} className={`engine-trigger ${isClaude ? 'cc' : ''}`}
+        <Trigger width={210} placement="top-start" label="Engine" title={`Engine: ${engineLabel}`} className={`engine-trigger ${isClaude ? 'cc' : ''}`}
           menu={close => (
             <MenuSection title="Agent engine">
-              <MenuItem icon="sparkle" label="Pi" checked={!isClaude} onClick={() => { setDraft({ engine: 'pi' }); close(); }} />
+              <MenuItem icon="sparkle" label="Pi" checked={!isClaude && !antigravity} onClick={() => { setDraft({ engine: 'pi' }); close(); }} />
               <MenuItem icon="console" label="Claude Code" checked={isClaude} onClick={() => { setDraft({ engine: 'claude-code' }); close(); }} />
+              <MenuItem icon="console" label="Antigravity CLI" checked={antigravity} title="Uses the Antigravity CLI login on the selected machine" onClick={() => { setDraft({ engine: 'antigravity' }); close(); }} />
             </MenuSection>
           )}>
-          <Icon name={isClaude ? 'console' : 'sparkle'} size={13} /><span>{isClaude ? 'Claude Code' : 'Pi'}</span><Icon name="chevronDown" size={11} className="tray-caret" />
+          <Icon name={isClaude || antigravity ? 'console' : 'sparkle'} size={13} /><span>{engineLabel}</span><Icon name="chevronDown" size={11} className="tray-caret" />
         </Trigger>
       </div>
       {isClaude && ccPrep?.status === 'preparing' ? (
@@ -599,7 +606,7 @@ export function ComposerBar({ session }) {
   const draft = useStore(s => s.draft);
   const catalog = useStore(s => s.catalog);
   const isNew = !session;
-  const engine = (isNew ? draft.engine : session.engine) === 'claude-code' ? 'claude-code' : 'pi';
+  const engine = (isNew ? draft.engine : session.engine) ?? 'pi';
   const isClaude = engine === 'claude-code';
   const environmentId = isNew ? draft.environmentId : session.environmentId;
   const availableModels = useMemo(() => modelsForEnvironment(catalog, environmentId, engine), [catalog, environmentId, engine]);
@@ -626,6 +633,11 @@ export function ComposerBar({ session }) {
     ? (hasValidModel ? claudeEffortsFor(modelInfo) : [])
     : (modelInfo?.reasoning !== false ? effortsFor(modelInfo) : []);
   const activeEffort = clampEffort(effortLevels, isClaude ? ccEffort : effort);
+  const branchChip = !isNew && branch && <button type="button" className="trigger workspace-chip" onClick={() => setStore({ gitReviewOpen: true, filePaneOpen: false })} title="Review repository changes"><Icon name="branch" size={12.5} /><span>{branch}</span></button>;
+
+  if (engine === 'antigravity') return <div className="composer-bar"><div className="composer-bar-left">
+    {session ? <AntigravityOptions session={session} /> : <AntigravitySetup key={environmentId} environmentId={environmentId} />}{branchChip}
+  </div></div>;
 
   return (
     <div className="composer-bar">
@@ -643,7 +655,7 @@ export function ComposerBar({ session }) {
             title={`Reasoning effort: ${effortLabel(activeEffort)}`}
           />
         )}
-        {!isNew && branch && <button type="button" className="trigger workspace-chip" onClick={() => setStore({ gitReviewOpen: true, filePaneOpen: false })} title="Review repository changes"><Icon name="branch" size={12.5} /><span>{branch}</span></button>}
+        {branchChip}
       </div>
       <div className="composer-bar-right">
         {isClaude ? (

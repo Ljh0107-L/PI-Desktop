@@ -246,6 +246,9 @@ const api = {
   setEffort: (id, level) => manager.setEffort(id, level),
   setUltracode: (id, on) => manager.setUltracode(id, on),
   claudeCodeInfo: () => manager.claudeCodeInfo(),
+  antigravityInfo: environmentId => manager.antigravityInfo(environmentId),
+  antigravityLogin: id => manager.antigravityLogin(id),
+  antigravitySetConfig: (id, configId, value) => manager.antigravitySetConfig(id, configId, value),
   prepareClaudeCode: environmentId => manager.prepareClaude(environmentId).then(layout => ({ ok: true, version: manager.claudeCodeInfo().version, bin: layout.bin }), error => ({ ok: false, error: error.message })),
   agents: id => manager.agents(id),
   jobs: id => manager.jobs(id),
@@ -314,7 +317,7 @@ const api = {
   stats: id => manager.stats(id),
   rename: (id, title) => manager.rename(id, title),
   archive: id => manager.archive(id),
-  reconnect: id => manager.close(id).then(() => manager.ensureStarted(id)).then(() => true),
+  reconnect: id => manager.reconnect(id),
   async gitBranch(id) {
     const record = manager.record(id);
     const env = manager.env(record.environmentId);

@@ -483,7 +483,7 @@ function QuestionCard({ sessionId, question }) {
   const options = question.method === 'select' ? question.options ?? [] : [];
   const detailsByLabel = useMemo(() => new Map((question.optionDetails ?? []).map(o => [o.label, o.description])), [question.optionDetails]);
   const multi = question.method === 'select' && !!question.multiSelect;
-  const freeText = question.method !== 'confirm';
+  const freeText = question.method !== 'confirm' && !question.permission;
   const toggleOption = option => setSelected(prev => prev.includes(option) ? prev.filter(x => x !== option) : [...prev, option]);
   const submitMulti = () => {
     const extra = text.trim();
@@ -491,7 +491,7 @@ function QuestionCard({ sessionId, question }) {
     if (values.length) send({ value: values });
   };
   return (
-    <div className="question-card" role="group" aria-label="Question from agent">
+    <div className="question-card" role="group" aria-label={question.permission ? 'Antigravity permission request' : 'Question from agent'}>
       {question.header && <div className="question-header-chip">{question.header}</div>}
       <div className="question-title">{question.title}</div>
       {question.message && (question.method === 'confirm'
@@ -527,7 +527,7 @@ function QuestionCard({ sessionId, question }) {
       <div className="question-actions">
         {question.method === 'confirm'
           ? <><button className="button ghost" disabled={busy} onClick={() => send({ confirmed: false })}>No</button><button className="button primary" disabled={busy} onClick={() => send({ confirmed: true })}>Approve</button></>
-          : <button className="button ghost small" disabled={busy} onClick={() => send({ cancelled: true })}>Skip</button>}
+          : <button className="button ghost small" disabled={busy} onClick={() => send({ cancelled: true })}>{question.permission ? 'Cancel request' : 'Skip'}</button>}
       </div>
     </div>
   );
@@ -670,13 +670,14 @@ function WorkingRow({ session, transcript }) {
   useEffect(() => { const t = setInterval(() => tick(n => n + 1), 1000); return () => clearInterval(t); }, []);
   if (session?.status === 'connecting') {
     const isClaude = session.engine === 'claude-code';
+    const agentName = session.engine === 'antigravity' ? 'Antigravity CLI' : isClaude ? 'Claude Code' : 'Pi';
     const preparingText = session.statusMessage
       || (isClaude && ccPrep?.status === 'preparing' ? ccPrep.message : null)
       || (envPrep?.status === 'preparing' ? envPrep.message : null)
       || (isClaude ? 'Preparing Claude Code…' : 'Preparing remote environment…');
     const phase = {
       preparing: preparingText,
-      starting: isClaude ? 'Starting Claude Code…' : 'Starting Pi…',
+      starting: `Starting ${agentName}…`,
       configuring: 'Restoring session…',
     }[session.phase] ?? 'Connecting…';
     return <div className="working"><span className="working-dot" /><span className="shimmer">{phase}</span></div>;
@@ -893,7 +894,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             case 'orphanResult': return <ToolCall key={block.key} call={{ id: block.message.toolCallId, name: block.message.toolName ?? 'tool', arguments: { description: 'Command result' } }} tool={transcript.tools[block.message.toolCallId]} />;
             case 'pendingHistory': return null;
             case 'image': return <ImagePreview key={block.key} src={`data:${block.image.mimeType};base64,${block.image.data}`} alt="Assistant image" />;
-            case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!block.truncated && (!transcript.history || !!block.entryId) && !readOnly && session?.engine !== 'cursor' && !!session && !isPendingSession(session.id) && session.status === 'connected' && !session.streaming && !block.text.startsWith('/')} />;
+            case 'user': return <UserMessage key={block.key} block={block} sessionId={session?.id} editable={!block.truncated && (!transcript.history || !!block.entryId) && !readOnly && !['cursor', 'antigravity'].includes(session?.engine) && !!session && !isPendingSession(session.id) && session.status === 'connected' && !session.streaming && !block.text.startsWith('/')} />;
             case 'goal': return <GoalMarker key={block.key} block={block} />;
             case 'text': return <Markdown key={block.key} text={block.text} streaming={block.streaming} sessionId={session?.id} documentPath="" />;
             case 'usage': return <TurnFooter key={block.key} text={block.text} changes={readOnly ? [] : block.changes} sessionId={session?.id} last={block === lastUsage} />;

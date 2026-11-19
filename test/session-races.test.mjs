@@ -81,6 +81,38 @@ test('two pending creations completing out of order retain the selected conversa
   assert.deepEqual(store.getState().sessions.map(s => s.id).sort(), ['first', 'second']);
 });
 
+test('Antigravity keeps a first draft awaiting sign-in without sending to any Pi provider', async () => {
+  reset();
+  const piModel = { provider: 'mock', id: 'mock' };
+  store.set({ composerDrafts: {}, catalog: [piModel], settings: { defaults: { model: piModel } },
+    draft: { environmentId: 'local', cwd: '/tmp', engine: 'pi', model: piModel, ultra: true, speed: 'ultrafast' } });
+  store.setDraft({ engine: 'antigravity' });
+  assert.equal(store.getState().draft.model, null);
+  const calls = [];
+  const session = { id: 'agy', engine: 'antigravity', antigravity: { authRequired: true } };
+  invoke = (method, ...args) => { calls.push([method, ...args]); return Promise.resolve(method === 'createSession' ? session : { defaults: { model: piModel } }); };
+  await store.startSession('draft for later');
+  assert.equal(store.getState().activeId, session.id);
+  assert.equal(store.getState().composerDrafts.agy.text, 'draft for later');
+  assert.deepEqual(calls, [['createSession', { engine: 'antigravity', environmentId: 'local', cwd: '/tmp', prompt: 'draft for later' }],
+    ['updateDefaults', { environmentId: 'local', engine: 'antigravity' }]]);
+  store.setDraft({ environmentId: 'ssh:host' });
+  assert.equal(store.getState().draft.engine, 'antigravity');
+  assert.equal(store.getState().draft.model, null);
+  store.setDraft({ cwd: '/remote/work' });
+  const remote = { id: 'agy-ssh', engine: 'antigravity', antigravity: { authRequired: true, canSignIn: false } };
+  invoke = (method, ...args) => { calls.push([method, ...args]); return Promise.resolve(method === 'createSession' ? remote : { defaults: { model: piModel } }); };
+  await store.startSession('draft for the SSH host');
+  assert.equal(store.getState().composerDrafts[remote.id].text, 'draft for the SSH host');
+  assert.deepEqual(calls.find(([method, args]) => method === 'createSession' && args.environmentId === 'ssh:host')[1],
+    { engine: 'antigravity', environmentId: 'ssh:host', cwd: '/remote/work', prompt: 'draft for the SSH host' });
+  store.setDraft({ engine: 'pi' });
+  assert.deepEqual(store.getState().draft.model, piModel);
+  store.set({ questions: { [session.id]: [{ method: 'select', requestId: 'permission', options: ['Allow once'] }] } });
+  await assert.rejects(store.sendPrompt(session.id, 'Allow once'), /Choose a permission option/);
+  assert.ok(calls.every(([method]) => method !== 'answer' && method !== 'prompt'));
+});
+
 test('failed first prompt does not redirect a different active conversation', async () => {
   reset(); const prompt = deferred();
   invoke = method => method === 'createSession' ? Promise.resolve({ id: 'created' }) : method === 'prompt' ? prompt.promise : Promise.resolve({});

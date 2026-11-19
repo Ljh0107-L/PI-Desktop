@@ -2,6 +2,12 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.31 — Antigravity CLI on Mac and SSH
+
+- **Use your Google account without a Gemini API key.** Install the official Antigravity CLI on the machine that will run the conversation, then choose **Antigravity CLI** as the engine. On Mac, reuse an existing CLI login or select **Sign in with Google**. On SSH, run `agy acp --login` as the remote user, then select **Reconnect**. Pi Desktop never transfers login credentials between machines.
+- **Stream and resume the same conversation.** The official `agy acp` server supplies the available model and reasoning options, streamed responses, and tool updates. Approve tool permissions in the conversation, use **Stop** to cancel, or reopen the same session after disconnecting. A failed resume preserves the original history rather than silently starting over.
+- **Scope.** This engine supports text only. Attachments, Rewind, history editing/forking, Pi Compact, and Pi Ultra are not included. Model availability depends on what the CLI exposes for your account.
+
 ## 0.2.30 — Dismiss the Updated badge
 
 - Clicking **OK** on a successful session restart report now clears the sidebar's **Updated** badge. The report is still available from **Session Update Report…**, and **Update issues** stays visible when a restart needs attention.

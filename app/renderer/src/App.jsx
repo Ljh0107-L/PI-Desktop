@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ClaudeMascot, Icon, Mascot } from './Icons.jsx';
 import { Sidebar, SessionMenuItems } from './Sidebar.jsx';
 import { Composer, ComposerBar, NewSessionTrayHead } from './Composer.jsx';
+import { AntigravityLogin } from './Antigravity.jsx';
 import { Transcript } from './Conversation.jsx';
 import { AgentReports, SubagentSummary } from './Subagents.jsx';
 import { RightPanel, UsageMetrics } from './RightPanel.jsx';
@@ -93,7 +94,7 @@ function NewSessionView() {
         <div className="dock new-session-dock">
           <div className="composer-shell">
             <NewSessionTrayHead />
-            <Composer autoFocus placeholder="Ask anything, @ to mention, / for actions" onSubmit={startSession} footer={<ComposerBar />} />
+            <Composer autoFocus placeholder={draft.engine === 'antigravity' ? 'Message Antigravity…' : 'Ask anything, @ to mention, / for actions'} onSubmit={startSession} footer={<ComposerBar />} />
           </div>
         </div>
       </div>
@@ -103,8 +104,8 @@ function NewSessionView() {
 
 function ConnectionBanner({ session }) {
   if (session.status === 'reconnecting') {
-    const agent = session.engine === 'claude-code' ? 'Claude Code' : 'Pi';
-    return <div className="conn-banner"><Spinner size={13} /> <span className="conn-text">Reconnecting to <b>{session.environmentLabel}</b>… {agent} keeps working on the server.</span></div>;
+    const agent = session.engine === 'antigravity' ? 'Antigravity CLI' : session.engine === 'claude-code' ? 'Claude Code' : 'Pi';
+    return <div className="conn-banner"><Spinner size={13} /> <span className="conn-text">Reconnecting to <b>{session.environmentLabel}</b>… {agent} keeps working {session.environmentId === 'local' ? 'on this Mac' : 'on the server'}.</span></div>;
   }
   if (session.status === 'disconnected' || session.status === 'error') {
     return <div className="conn-banner error"><Icon name="unplug" size={15} /> <span className="conn-text">{session.statusMessage || 'Disconnected from this session.'}</span>
@@ -180,9 +181,10 @@ function SessionView({ session }) {
     window.addEventListener('pidesk:open-file', onOpen);
     return () => window.removeEventListener('pidesk:open-file', onOpen);
   }, [session.id]);
-  const isClaude = session.engine === 'claude-code';
-  const placeholder = questions.length
-    ? 'Answer the agent’s question…'
+  const isClaude = session.engine === 'claude-code', antigravity = session.engine === 'antigravity';
+  const placeholder = antigravity
+    ? questions.length ? 'Choose a permission option above…' : session.antigravity?.authRequired ? 'Sign in to send a message…' : 'Message Antigravity…'
+    : questions.length ? 'Answer the agent’s question…'
     : !isClaude && ultraWorking
       ? 'Add to the task, @ to mention, / for actions'
       : 'Ask anything, @ to mention, / for actions';
@@ -199,8 +201,9 @@ function SessionView({ session }) {
             ? <div className="conn-banner"><Icon name="alert" size={15} /> <span className="conn-text">Cursor CLI was removed from Pi Desktop. This conversation is read-only.</span></div>
             : <div className="composer-shell">
                 <ConnectionBanner session={session} />
-                {!isClaude && <GoalBanner session={session} />}
-                {!isClaude && <UltraBanner session={session} />}
+                {antigravity && <AntigravityLogin session={session} />}
+                {!isClaude && !antigravity && <GoalBanner session={session} />}
+                {!isClaude && !antigravity && <UltraBanner session={session} />}
                 <Composer session={session} autoFocus placeholder={placeholder} onSubmit={(text, attachments) => sendPrompt(session.id, text, attachments)} footer={<ComposerBar session={session} />} />
               </div>}
         </div>
@@ -289,6 +292,7 @@ function Header({ session, view }) {
               {session.engine === 'claude-code' && (
                 <span className="header-engine-badge" title="Running on Claude Code">Claude Code</span>
               )}
+              {session.engine === 'antigravity' && <span className="header-engine-badge" title="Running on Antigravity CLI">Antigravity CLI</span>}
               {!session.project && !local && session.environmentLabel && (
                 <span className="header-env-badge" title={session.cwd}><Icon name="terminal" size={11} />{session.environmentLabel}</span>
               )}

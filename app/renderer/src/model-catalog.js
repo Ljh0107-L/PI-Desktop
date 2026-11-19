@@ -30,7 +30,7 @@ export function clampEffort(allowed, wanted, fallback = 'medium') {
 }
 
 export const isModelForEngine = (model, engine = 'pi') =>
-  engine === 'claude-code'
+  engine === 'antigravity' ? false : engine === 'claude-code'
     ? (Array.isArray(model?.engines) ? model.engines.includes('claude-code') : model?.api === 'anthropic-messages')
     : true;
 
@@ -38,6 +38,7 @@ export const modelsForEnvironment = (catalog, environmentId, engine = 'pi') =>
   catalog.filter(m => !isRetiredProvider(m.provider) && (!m.environments || m.environments.includes(environmentId)) && isModelForEngine(m, engine));
 
 export function modelForEnvironment(catalog, environmentId, preferred, engine = 'pi') {
+  if (engine === 'antigravity') return null; // options are negotiated by agy, not the API-key catalog
   const available = modelsForEnvironment(catalog, environmentId, engine);
   const matched = available.find(m => m.provider === preferred?.provider && m.id === preferred?.id);
   // Removing subscriptions must not silently switch an old selection to a paid API key.

@@ -8,9 +8,10 @@ import { api, askConfirm, deleteSession, forkSession, goBack, goForward, newSess
 export function SessionMenuItems({ session, close, onRename }) {
   const active = useStore(s => s.activeId === session.id);
   const failed = e => notify(e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, ''), 'error');
+  const forkUnavailable = session.engine === 'cursor' ? 'Cursor conversations are read-only' : session.engine === 'antigravity' ? 'Forking is not available in Antigravity CLI' : null;
   return <>
     <MenuItem icon="edit" label="Rename" onClick={() => { close(); onRename(); }} />
-    <MenuItem icon="fork" label="Fork" disabled={session.engine === 'cursor'} title={session.engine === 'cursor' ? 'Cursor conversations are read-only' : undefined} onClick={() => { close(); forkSession(session.id).catch(failed); }} />
+    <MenuItem icon="fork" label="Fork" disabled={!!forkUnavailable} title={forkUnavailable ?? undefined} onClick={() => { close(); forkSession(session.id).catch(failed); }} />
     <MenuItem icon="archive" label="Archive" onClick={() => { close(); api('archive', session.id); if (active) newSession(); }} />
     <MenuItem icon="trash" label="Delete" className="danger" onClick={() => { close(); askConfirm({ title: 'Delete conversation?', message: session.title, action: 'Delete', run: () => deleteSession(session.id).catch(failed) }); }} />
   </>;
@@ -41,6 +42,7 @@ function SessionRow({ session, active }) {
         : <button className="session-row-main" onClick={() => openSession(session.id)} onMouseEnter={() => warmSession(session.id)} onDoubleClick={() => { setTitle(session.title); setEditing(true); }} title={session.title}>
             <span className="session-title">{session.title}</span>
             {session.engine === 'claude-code' && <span className="session-engine-badge" title="Claude Code">CC</span>}
+            {session.engine === 'antigravity' && <span className="session-engine-badge" title="Antigravity CLI">AGY</span>}
             {indicator && <span className="session-indicator">{indicator}</span>}
           </button>}
       <button ref={anchor} className="row-more" onClick={() => setMenu(m => !m)} aria-label="Session actions"><Icon name="more" size={16} /></button>

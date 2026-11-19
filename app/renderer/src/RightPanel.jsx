@@ -141,8 +141,8 @@ export function RightPanel({ session }) {
   const stats = useStore(s => s.stats[session.id]);
   const selection = useStore(s => s.subagentSelection[session.id]);
   const live = useStore(s => s.agents[session.id]);
-  const isClaude = session.engine === 'claude-code';
-  const batches = useMemo(() => isClaude ? [] : visibleSubagentBatches(subagentBatches(transcript, live), session.clearedSubagentIds), [isClaude, transcript, live, session.clearedSubagentIds]);
+  const usesPiAgents = !['claude-code', 'cursor', 'antigravity'].includes(session.engine);
+  const batches = useMemo(() => usesPiAgents ? visibleSubagentBatches(subagentBatches(transcript, live), session.clearedSubagentIds) : [], [usesPiAgents, transcript, live, session.clearedSubagentIds]);
   const batch = batches.find(b => b.callId === selection?.callId);
   const task = Number.isInteger(selection?.taskIndex) ? batch?.tasks.find(task => task.index === selection.taskIndex) : null;
   const [detailWidth, detailHandle] = useResizable('subagent-inspector', 480, 300, 680, 'left');
@@ -162,7 +162,7 @@ export function RightPanel({ session }) {
       </>} />
       <UsageCard transcript={transcript} />
       <BackgroundJobs key={session.id} sessionId={session.id} />
-      {!isClaude && session.engine !== 'cursor' && <SubagentList sessionId={session.id} batches={batches} selectedCallId={selection?.callId} />}
+      {usesPiAgents && <SubagentList sessionId={session.id} batches={batches} selectedCallId={selection?.callId} />}
     </aside>
   );
 }
