@@ -2,6 +2,11 @@ Pi Desktop runs [Pi](https://github.com/earendil-works/pi) sessions on this Mac 
 
 **Install:** download the `.dmg` for your Mac (`arm64` = Apple Silicon, `x64` = Intel), drag Pi Desktop to Applications, then right-click → Open the first time (the app is ad-hoc signed, not notarized). Existing installations can use **Check for Updates…**, then the **Update** button next to Settings.
 
+## 0.2.33 — Cleaner Antigravity settings and install progress
+
+- **One Antigravity settings panel.** Pick the machine, then install, sign in, or view quota from the same row. The chat uses the same layout as Pi and Claude Code, without duplicate account panels or permission badges. The tool permission default is unchanged.
+- **Download on the Mac, install anywhere.** Pi Desktop chooses the official package for the target OS and CPU, verifies its SHA-512 checksum, and streams it to SSH hosts. Download and upload show real progress. The host doesn’t need internet for installation; sign-in and conversations still use the host’s own connection and account.
+
 ## 0.2.32 — A simpler, faster start for Antigravity
 
 - **Set up Antigravity from Settings.** Install the official CLI on this Mac or a selected SSH host, sign in separately, and view the CLI’s remaining allowance in Terminal with `/usage`. When a machine needs setup, the composer shows the next step. Signing in never sends your saved draft.

@@ -14,9 +14,11 @@
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, relative } from 'node:path';
 import { join } from 'node:path';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { shellQuote, sshMuxArgs } from '../../core/transports.mjs';
 import { EXTENSION_FILES, EXTENSION_PACKAGE, OBSOLETE_FILES } from './extensions.mjs';
 
@@ -34,7 +36,7 @@ export function sshBaseArgs(env) {
   return ['-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=20', '-o', 'ServerAliveInterval=10', '-o', 'ServerAliveCountMax=3', ...sshMuxArgs(), ...(env.sshArgs ?? [])];
 }
 
-export function runSsh(env, script, { input, timeout = 120000, onUpload } = {}) {
+export function runSsh(env, script, { input, upload, timeout = 120000, onUpload } = {}) {
   return new Promise((resolve, reject) => {
     // Always POSIX sh: the login shell may be zsh/fish, where e.g. unmatched globs are errors.
     const child = spawn('ssh', [...sshBaseArgs(env), env.host, `sh -c ${shellQuote(script)}`], { stdio: ['pipe', 'pipe', 'pipe'] });
@@ -52,6 +54,21 @@ export function runSsh(env, script, { input, timeout = 120000, onUpload } = {}) 
       }
     });
     child.stdin.on('error', () => {});
+    if (upload) {
+      let sent = 0;
+      const track = new Transform({ transform(chunk, _, done) {
+        sent += chunk.length;
+        onUpload?.(Math.min(1, sent / upload.size));
+        done(null, chunk);
+      } });
+      pipeline(createReadStream(upload.path), track, child.stdin).catch(error => {
+        // The remote script can exit before reading stdin (e.g. another installer won the race).
+        if (['EPIPE', 'ERR_STREAM_PREMATURE_CLOSE'].includes(error.code)) return;
+        child.kill('SIGTERM');
+        reject(error);
+      });
+      return;
+    }
     if (!Buffer.isBuffer(input) || input.length < 4 << 20) { child.stdin.end(input ?? ''); return; }
     // Large uploads go in chunks so the caller can show progress.
     (async () => {
@@ -186,7 +203,7 @@ async function downloadLocalNode(release, cacheDir, onProgress) {
   return promise;
 }
 
-async function installNode(env, host, root, cacheDir, onProgress, run) {
+async function installNode(env, host, root, cacheDir, onProgress, run, { uploadOnly = false } = {}) {
   if (host.musl) {
     throw new Error(`No usable Node.js (>= ${MIN_NODE}) on ${host.label ?? env.host} (musl Linux). Install Node.js 22.19+ on the server (e.g. apk add nodejs) and retry.`);
   }
@@ -207,7 +224,7 @@ async function installNode(env, host, root, cacheDir, onProgress, run) {
     `rm -rf ${destQ}.extract ${destQ}`,
     `mv ${destQ}.tmp ${destQ}`,
   ].join('\n');
-  if (host.curl && host.sha && !release.cachedOnly) {
+  if (!uploadOnly && host.curl && host.sha && !release.cachedOnly) {
     const sum = host.sha === 'shasum' ? 'shasum -a 256' : 'sha256sum';
     const tarball = `${root}/tmp/${release.file}`;
     const tarballQ = shellQuote(tarball);
@@ -362,7 +379,7 @@ export async function prepareRemote(env, { piVersion, piPackageDir, bridgePath, 
     root = antigravity && preferredRoot && suitable.length ? preferredRoot : chooseRoot(host, preferredRoot, { preserve: antigravity });
     node = suitable.find(n => n.path.startsWith(root + '/'))?.path ?? suitable[0]?.path;
     // A simultaneous Pi setup may also need to install Node. Never share its staging paths.
-    if (!node) node = await installNode(env, host, antigravity ? `${root}/antigravity` : root, cacheDir, onProgress, run);
+    if (!node) node = await installNode(env, host, antigravity ? `${root}/antigravity` : root, cacheDir, onProgress, run, { uploadOnly: antigravity });
     state = kv(await run(env, inspect(root, node)));
     nodeVersion = state.nodeVersion?.[0];
   }

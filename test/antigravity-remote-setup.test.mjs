@@ -131,6 +131,24 @@ test('cached portable Node fallback uses a private deployment, never Pi staging 
   assert.equal(f.calls.length, 4, 'rediscovery needs only the existing version/hash inspection');
 });
 
+test('Antigravity uploads portable Node even when the host has curl and a checksum tool', async t => {
+  const f = fixture(t);
+  const node = join(f.dir, 'node-fixture/bin/node');
+  mkdirSync(dirname(node), { recursive: true });
+  writeFileSync(node, `#!/bin/sh\nexec ${shellQuote(process.execPath)} "$@"\n`, { mode: 0o700 });
+  const release = 'node-v22.19.0-linux-x64.tar.gz';
+  const archive = execFileSync('tar', ['-czf', '-', '-C', f.dir, 'node-fixture']);
+  const sum = createHash('sha256').update(archive).digest('hex');
+  t.mock.method(globalThis, 'fetch', async url => new Response(url.endsWith('SHASUMS256.txt') ? `${sum}  ${release}\n` : archive));
+  const run = (env, script, options) => {
+    assert.doesNotMatch(script, /curl -|nodejs\.org|npmmirror/);
+    return f.run(env, script, options);
+  };
+  const facts = await prepareRemote(f.env, f.options, { run, probe: async () => ({ ...f.host, os: 'Linux', arch: 'x86_64', nodes: [], curl: true, sha: 'sha256sum' }) });
+  assert.equal(facts.node, join(f.root, 'antigravity/node/bin/node'));
+  assert.deepEqual(f.calls[0].input, archive);
+});
+
 test('not enough room for portable Node does not move an existing relay to another root', async t => {
   const f = fixture(t);
   const deps = { run: f.run, probe: async () => ({ ...f.host, nodes: [], disks: [{ dir: f.dir, kb: 100 * 1024, exec: true }, { dir: '/tmp', kb: 9999999, exec: true }] }) };

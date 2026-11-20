@@ -18,7 +18,8 @@ import { SPEEDS, speedOptions } from '../../agent/pidesk-speed.mjs';
 import { readHistory } from '../../agent/pidesk-history.mjs';
 import { historyEvent } from '../../core/history-view.mjs';
 import { CLAUDE_CODE_VERSION, CLAUDE_EFFORTS, clampClaudeEffort, claudeBuiltinBaseUrl, claudeEffort, ensureLocalClaude, isClaudeCodeModel, prepareRemoteClaude, resolveClaudeEffort } from './claude-code.mjs';
-import { ANTIGRAVITY_ENGINE, ANTIGRAVITY_REMOTE_LOGIN, antigravityAccount, antigravityBoot, antigravityInstallMessage, findAntigravityCli, findRemoteAntigravityCli, installAntigravityCli } from './antigravity.mjs';
+import { ANTIGRAVITY_ENGINE, ANTIGRAVITY_REMOTE_LOGIN, antigravityAccount, antigravityBoot, antigravityInstallMessage, findAntigravityCli, findRemoteAntigravityCli } from './antigravity.mjs';
+import { installAntigravityCli } from './antigravity-install.mjs';
 
 const PI_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 function clampPiThinkingLevel(model, level) {
@@ -532,13 +533,19 @@ export class SessionManager extends EventEmitter {
   antigravityInstall(environmentId) {
     const env = this.env(environmentId);
     if (this.antigravityInstalls.has(env.id)) return this.antigravityInstalls.get(env.id);
+    const progress = state => this.emit('antigravity-install', { id: env.id, ...state });
     const install = (async () => {
+      progress({ stage: 'preparing' });
       this.antigravityBins.delete(env.id);
-      if (!await this.#findAntigravity(env)) await installAntigravityCli(env);
+      if (!await this.#findAntigravity(env)) await installAntigravityCli(env, { cacheDir: this.cacheDir, onProgress: progress });
       this.antigravityBins.delete(env.id);
       if (!await this.#findAntigravity(env)) throw new Error(antigravityInstallMessage(env));
+      progress({ stage: 'done' });
       return { installed: true };
-    })().finally(() => this.antigravityInstalls.delete(env.id));
+    })().catch(error => {
+      progress({ stage: 'error', message: error.message });
+      throw error;
+    }).finally(() => this.antigravityInstalls.delete(env.id));
     this.antigravityInstalls.set(env.id, install);
     return install;
   }

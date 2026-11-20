@@ -89,7 +89,7 @@ function NewSessionView() {
       <div className="welcome-stage">
         <div className="code-empty" aria-label="Ready to code">
           {antigravity ? <Icon name="atom" size={36} /> : isClaude ? <ClaudeMascot size={7} /> : <Mascot size={7} />}
-          <h1 className="welcome-heading">{antigravity ? 'New Antigravity conversation' : 'What can we build today?'}</h1>
+          <h1 className="welcome-heading">What can we build today?</h1>
         </div>
         <div className="dock new-session-dock">
           <div className="composer-shell">
@@ -193,10 +193,8 @@ function SessionView({ session }) {
       <div className="session-main">
         {findOpen && <SessionFindBar onClose={() => setFindOpen(false)} />}
         {!transcript.messages.length && !transcript.live && !session.streaming && session.status === 'connected' && !questions.length ?
-          <div className={`code-empty ${antigravity ? 'agy-empty' : ''}`} aria-label="Ready to code">
-            {antigravity ? <><Icon name="atom" size={36} /><div className="agy-empty-copy"><b>Antigravity CLI</b>
-              <span className="muted">{session.antigravity?.authRequired ? 'Finish sign-in in Settings. Your draft stays here.' : 'Ask about this workspace, attach files, or use the CLI’s available commands.'}</span>
-            </div></> : isClaude ? <ClaudeMascot size={7} /> : <Mascot size={7} />}
+          <div className="code-empty" aria-label="Ready to code">
+            {antigravity ? <Icon name="atom" size={36} /> : isClaude ? <ClaudeMascot size={7} /> : <Mascot size={7} />}
           </div> : <Transcript session={session} transcript={transcript} questions={questions}
           renderSubagents={block => <SubagentSummary key={block.key} sessionId={session.id} call={block.call} tool={transcript.tools[block.call.id]} />}
           renderAgentReport={block => <AgentReports key={block.key} sessionId={session.id} agents={block.agents} />} />}
@@ -298,7 +296,7 @@ function Header({ session, view }) {
               {session.engine === 'claude-code' && (
                 <span className="header-engine-badge" title="Running on Claude Code">Claude Code</span>
               )}
-              {session.engine === 'antigravity' && <button type="button" className="header-engine-badge no-drag" title="Antigravity account and permissions" onClick={() => openAntigravitySettings(session.environmentId)}>Antigravity CLI</button>}
+              {session.engine === 'antigravity' && <button type="button" className="header-engine-badge no-drag" title="Antigravity settings" onClick={() => openAntigravitySettings(session.environmentId)}>Antigravity</button>}
               {!session.project && !local && session.environmentLabel && (
                 <span className="header-env-badge" title={session.cwd}><Icon name="terminal" size={11} />{session.environmentLabel}</span>
               )}

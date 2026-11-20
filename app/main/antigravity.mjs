@@ -1,5 +1,4 @@
-// Antigravity remains the owner of its credentials, tools and quota. The
-// official macOS/Linux installer puts agy in ~/.local/bin on the chosen machine.
+// Antigravity remains the owner of its credentials, tools and quota.
 import { execFile } from 'node:child_process';
 import { accessSync, constants, statSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -12,7 +11,6 @@ import { runSsh } from './remote-setup.mjs';
 
 const exec = promisify(execFile);
 const adapterPath = fileURLToPath(new URL('../../agent/pidesk-antigravity.mjs', import.meta.url));
-const INSTALL_URL = 'https://antigravity.google/cli/install.sh';
 
 export const ANTIGRAVITY_ENGINE = 'antigravity';
 export const ANTIGRAVITY_REMOTE_LOGIN = 'Run agy acp --login in the SSH host’s terminal, then reconnect.';
@@ -25,24 +23,6 @@ export function antigravityInstallMessage(env) {
 export function antigravityBoot(bin, record, sessionsDir, remote = false, bypassPermissions = true) {
   return { antigravity: { bin, sessionsDir, sessionFile: record.piSessionFile ?? null, cwd: record.cwd, recordId: record.id, remote, bypassPermissions,
     ...(record.spare ? { standby: true } : {}), clientVersion: app.version } };
-}
-
-// Explicit Settings action only. Download to a private temporary file so a
-// failed/incomplete HTTPS fetch can never start executing a partial installer.
-export async function installAntigravityCli(env, { run = runSsh, invoke = exec } = {}) {
-  const script = `set -eu
-umask 077
-installer=$(mktemp "\${TMPDIR:-/tmp}/pidesk-agy.XXXXXX")
-trap 'rm -f "$installer"' EXIT
-curl --proto '=https' --proto-redir '=https' -fsSL --max-time 60 -o "$installer" ${shellQuote(INSTALL_URL)}
-/bin/bash "$installer"`;
-  try {
-    if (env.kind === 'local') await invoke('/bin/sh', ['-c', script], { timeout: 240000 });
-    else await run(env, script, { timeout: 240000 });
-  } catch (error) {
-    const detail = String(error.stderr ?? '').trim().split('\n').at(-1)?.slice(0, 280);
-    throw new Error(`Could not install Antigravity on ${env.label ?? env.host}. Check that the machine has curl and can reach Google.${detail ? ` ${detail}` : ''}`);
-  }
 }
 
 export async function antigravityAccount(env, { bin, local, facts, login = false, run = runSsh, invoke = exec }) {

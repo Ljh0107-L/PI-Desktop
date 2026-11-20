@@ -27,7 +27,7 @@ export function AntigravitySetup({ environmentId }) {
     {retrying ? <Spinner size={13} /> : <Icon name="unplug" size={14} />}
     <span>{retrying ? 'Connecting…' : 'Can’t connect · Retry'}</span>
   </button>;
-  const label = status === 'missing' ? 'Install Antigravity' : status === 'signedOut' ? 'Sign in to Antigravity' : 'Antigravity account';
+  const label = status === 'missing' ? 'Install CLI' : status === 'signedOut' ? 'Sign in' : 'Account';
   return <button type="button" className={`trigger ${status === 'missing' || status === 'signedOut' ? 'attention' : ''}`}
     onClick={() => openAntigravitySettings(environmentId)} title={`${label} on ${machine}`}>
     <Icon name="key" size={14} /><span>{label}</span>
@@ -35,18 +35,12 @@ export function AntigravitySetup({ environmentId }) {
 }
 
 export function AntigravityLogin({ session }) {
-  const bypass = useStore(s => s.settings?.defaults?.antigravityBypassPermissions !== false);
-  const state = session.antigravity;
-  if (session.status !== 'connected' || !state) return null;
-  if (state.authRequired) return <div className="conn-banner">
+  if (session.status !== 'connected' || !session.antigravity?.authRequired) return null;
+  return <div className="conn-banner">
     <Icon name="key" size={14} />
-    <span className="conn-text">Sign in to Antigravity on <b>{session.environmentLabel}</b> to send a message.</span>
+    <span className="conn-text">Sign in to send a message.</span>
     <button type="button" className="button small" onClick={() => openAntigravitySettings(session.environmentId)}>Sign in</button>
   </div>;
-  if ((state.permissionMode ?? 'confirm') !== (bypass ? 'bypassPermissions' : 'confirm') && !session.streaming) {
-    return <div className="conn-banner"><Icon name="shield" size={14} /><span className="conn-text">The new permission setting applies on your next message.</span></div>;
-  }
-  return null;
 }
 
 export function AntigravityOptions({ session }) {
@@ -59,7 +53,6 @@ export function AntigravityOptions({ session }) {
     catch (error) { showError(error); }
     finally { setChanging(false); }
   };
-  const bypass = state?.permissionMode === 'bypassPermissions';
   return <>
     {options.map(option => <Trigger key={option.id} label={option.name} title={option.name} width={280} placement="top-start"
       disabled={changing || session.streaming || session.status !== 'connected'}
@@ -69,10 +62,6 @@ export function AntigravityOptions({ session }) {
       </MenuSection>}>
       <span className={option.category === 'model' ? 'strong' : undefined}>{option.options.find(choice => choice.value === option.currentValue)?.name ?? option.name}</span><Icon name="chevronDown" size={11} />
     </Trigger>)}
-    {state && !state.authRequired && <button type="button" className={`trigger agy-mode ${bypass ? 'bypass' : ''}`}
-      onClick={() => openAntigravitySettings(session.environmentId)} title={bypass ? 'Antigravity can run tools without asking. Open permission settings.' : 'Antigravity can ask before running tools. Open permission settings.'}>
-      <Icon name={bypass ? 'shieldAlert' : 'shield'} size={14} /><span>{bypass ? 'Bypass' : 'Ask'}</span>
-    </button>}
   </>;
 }
 
@@ -84,82 +73,86 @@ function CopyUsageCommand() {
   }}><Icon name={copied ? 'check' : 'copy'} size={13} />{copied ? 'Copied' : 'Copy /usage'}</button>;
 }
 
-function AccountCard({ environmentId }) {
+const installLabels = { preparing: 'Preparing…', downloading: 'Downloading…', uploading: 'Uploading…', installing: 'Installing…' };
+
+function InstallProgress({ progress }) {
+  const label = installLabels[progress?.stage] ?? installLabels.preparing;
+  const percent = progress?.percent ?? undefined;
+  return <div className="agy-install">
+    <div role="status"><span>{label}</span>{percent !== undefined && <span>{percent}%</span>}</div>
+    <progress aria-label={label} max={100} value={percent} />
+  </div>;
+}
+
+function AccountRow({ environmentId }) {
+  const progress = useStore(s => s.antigravityInstalls[environmentId]);
   const [account, setAccount] = useState(null);
-  const [busy, setBusy] = useState('check');
+  const [checking, setChecking] = useState(true);
+  const [requesting, setRequesting] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
+  const [browserFailed, setBrowserFailed] = useState(false);
   const [error, setError] = useState(null);
   const [terminal, setTerminal] = useState(null);
+  const installing = requesting || !!installLabels[progress?.stage];
   const check = useCallback(async () => {
-    setBusy('check'); setError(null);
+    setChecking(true); setError(null);
     try {
-      const result = await api('antigravityAccount', environmentId, false);
+      const info = await api('antigravityInfo', environmentId);
+      setAccount(previous => info.installed && previous?.installed ? previous : info);
+      const result = info.installed ? await api('antigravityAccount', environmentId, false) : info;
       setAccount(result);
       reportAntigravityAccount(environmentId, result);
-    } catch (err) {
-      setError(cleanError(err));
-      // A failed auth-status check shouldn't hide the CLI's own login/usage controls.
-      try { setAccount(await api('antigravityInfo', environmentId)); } catch { /* already showing the connection error */ }
-    }
-    finally { setBusy(null); }
-  }, [environmentId]);
-  useEffect(() => { void check(); }, [check]);
-  const action = async task => {
-    setBusy(task); setError(null);
-    try {
-      if (task === 'install') {
-        await api('antigravityInstall', environmentId);
-        await check();
-      } else {
-        const result = await api('antigravityAccount', environmentId, true);
-        setAccount(result);
-        reportAntigravityAccount(environmentId, result);
-        if (!result.signedIn) setError('Google sign-in did not complete. Try again or use Terminal sign-in.');
-      }
+      if (result.signedIn) setTerminal(open => open === 'login' ? null : open);
     } catch (err) { setError(cleanError(err)); }
-    finally { setBusy(null); }
+    finally { setChecking(false); }
+  }, [environmentId]);
+  useEffect(() => { if (!installing) void check(); }, [check, installing]);
+  const install = async () => {
+    setRequesting(true);
+    try { await api('antigravityInstall', environmentId); }
+    catch { /* the progress event carries the error, including across navigation */ }
+    finally { setRequesting(false); }
   };
-  const terminalExited = useCallback((code) => { if (!code && terminal === 'login') void check(); }, [check, terminal]);
-  const status = busy === 'install' ? 'Installing CLI…' : busy === 'login' ? 'Finish sign-in in your browser…'
-    : busy === 'check' ? 'Checking CLI and sign-in…' : account?.installed === false ? 'CLI not installed'
-      : !account ? 'Status unavailable' : account.signedIn === true ? 'Signed in' : account.signedIn === false ? 'Sign-in required' : 'Sign-in status not reported';
-  return <div className="agy-account">
+  const signIn = async () => {
+    if (!account?.canSignIn || browserFailed) { setTerminal('login'); return; }
+    setSigningIn(true); setError(null);
+    try {
+      const result = await api('antigravityAccount', environmentId, true);
+      setAccount(result);
+      reportAntigravityAccount(environmentId, result);
+      if (!result.signedIn) throw new Error('Sign-in did not complete. Try again in Terminal.');
+    } catch (err) { setBrowserFailed(true); setError(cleanError(err)); }
+    finally { setSigningIn(false); }
+  };
+  const terminalExited = useCallback(code => { if (!code && terminal === 'login') void check(); }, [check, terminal]);
+  const signedIn = account?.signedIn === true;
+  const message = progress?.stage === 'error' ? progress.message : error;
+  return <>
     <div className="agy-setting-row">
-      <div className="agy-setting-copy">
-        <span className="agy-setting-label">Antigravity CLI</span>
-        <span className="agy-setting-status" role="status">{busy ? <Spinner size={12} /> : account?.signedIn && <Icon name="check" size={13} />}{status}</span>
-      </div>
-      <div className="agy-setting-actions">
-        {account?.installed === false && <button type="button" className="button primary" disabled={!!busy} onClick={() => void action('install')}>Install CLI</button>}
-        {account?.installed && account.signedIn !== true && environmentId === 'local' && account.canSignIn &&
-          <button type="button" className="button primary" disabled={!!busy} onClick={() => void action('login')}>Sign in with Google</button>}
-        {account?.installed && account.signedIn !== true && <button type="button" className={`button ${environmentId !== 'local' || !account.canSignIn ? 'primary' : ''}`}
-          disabled={!!busy || terminal === 'login'} onClick={() => setTerminal('login')}>Sign in using Terminal</button>}
-        <button type="button" className="button" disabled={!!busy} onClick={check}>Refresh</button>
-      </div>
+      <span>Antigravity CLI</span>
+      {!installing && <div className="agy-setting-actions">
+        {signingIn ? <span role="status">Finish in your browser…</span> : account?.installed ? <>
+          {signedIn ? <span className="agy-account-state"><Icon name="check" size={14} /> Signed in</span>
+            : <button type="button" className="button primary" disabled={terminal === 'login' || (environmentId === 'local' && checking)} onClick={signIn}>{browserFailed ? 'Sign in using Terminal' : 'Sign in'}</button>}
+          {(signedIn || (!checking && account.signedIn == null)) && <button type="button" className="button" title="View quota in Terminal" disabled={terminal === 'usage'} onClick={() => setTerminal('usage')}>View quota</button>}
+        </> : checking ? <span className="agy-account-state" role="status"><Spinner size={14} /> Checking…</span>
+          : account?.installed === false ? <button type="button" className="button primary" onClick={install}>Install CLI</button>
+            : <button type="button" className="button" onClick={check}>Retry</button>}
+      </div>}
+      {installing && <InstallProgress progress={progress} />}
     </div>
-    {error && <p className="agy-settings-error" role="alert">{error}</p>}
-    <div className="agy-setting-row">
-      <div className="agy-setting-copy">
-        <span className="agy-setting-label">Quota and credits</span>
-        <span className="muted">Check your remaining allowance in the Antigravity CLI.</span>
-      </div>
-      <button type="button" className="button" disabled={!account?.installed || account.signedIn === false || terminal === 'usage' || !!busy}
-        onClick={() => setTerminal('usage')}>View quota in Terminal</button>
-    </div>
-    {terminal && <section className="agy-terminal-card" aria-label="Antigravity terminal">
-      <div className="agy-setting-row">
-        <div className="agy-setting-copy">
-          <span className="agy-setting-label">{terminal === 'login' ? 'Google sign-in' : 'Antigravity quota'}</span>
-          <span className="muted">{terminal === 'login' ? 'Open the Google link shown below and paste the code into this terminal.' : <>Type or paste <code>/usage</code> below and press Enter.</>}</span>
-        </div>
+    {message && !installing && <p className="agy-settings-error" role="alert">{message}</p>}
+    {terminal && <div className="agy-terminal-card">
+      <div className="agy-terminal-head">
+        <span>{terminal === 'login' ? 'Google sign-in' : <>Run <code>/usage</code></>}</span>
         <div className="agy-setting-actions">
           {terminal === 'usage' && <CopyUsageCommand />}
-          <button type="button" className="button small" onClick={() => setTerminal(null)}>Close terminal</button>
+          <button type="button" className="button small ghost" aria-label="Close terminal" title="Close terminal" onClick={() => setTerminal(null)}><Icon name="x" size={14} /></button>
         </div>
       </div>
       <AntigravityTerminal key={terminal} environmentId={environmentId} action={terminal} onExit={terminalExited} />
-    </section>}
-  </div>;
+    </div>}
+  </>;
 }
 
 export function AntigravitySettings() {
@@ -175,24 +168,15 @@ export function AntigravitySettings() {
     catch (err) { showError(err); }
     finally { setSaving(false); }
   };
-  return <div className="agy-settings">
-    <section className="section">
-      <div className="section-head"><h2 className="section-title">Account</h2></div>
-      <p className="muted">Install and sign in on the machine that runs your conversations. Credentials are never copied between this Mac and SSH hosts.</p>
-      <label className="field agy-environment"><span className="field-label">Machine</span>
-        <select value={environmentId} onChange={e => select(e.target.value)}>{environments.map(e => <option key={e.id} value={e.id}>{e.label}</option>)}</select>
-      </label>
-      <AccountCard key={environmentId} environmentId={environmentId} />
-    </section>
-    <section className="section">
-      <div className="section-head"><h2 className="section-title">Tool permissions</h2></div>
-      <div className="agy-setting-row">
-        <div className="agy-setting-copy">
-          <span className="agy-setting-label">Bypass tool permissions</span>
-          <span className="muted">Antigravity may run commands and edit files with your account’s access without asking. Applies on your next message; active turns are unchanged.</span>
-        </div>
-        <button type="button" role="switch" aria-checked={bypass} aria-label="Bypass tool permissions" className={`switch ${bypass ? 'on' : ''}`} disabled={saving} onClick={toggle}><span /></button>
-      </div>
-    </section>
-  </div>;
+  return <section className="agy-settings" aria-label="Antigravity settings">
+    <label className="agy-setting-row">
+      <span>Machine</span>
+      <select className="inline-select" value={environmentId} onChange={e => select(e.target.value)}>{environments.map(e => <option key={e.id} value={e.id}>{e.label}</option>)}</select>
+    </label>
+    <AccountRow key={environmentId} environmentId={environmentId} />
+    <div className="agy-setting-row" title="When off, Antigravity can run commands and edit files without asking. Applies on your next message, on all machines.">
+      <span>Ask before running tools</span>
+      <button type="button" role="switch" aria-checked={!bypass} aria-label="Ask before running tools" className={`switch ${!bypass ? 'on' : ''}`} disabled={saving} onClick={toggle}><span /></button>
+    </div>
+  </section>;
 }

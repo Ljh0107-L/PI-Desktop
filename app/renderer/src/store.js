@@ -36,6 +36,7 @@ let state = {
   activeId: null, view: 'new',             // 'new' | 'session'
   pendingSessions: {},                     // foreground creations before the saved ID is returned
   antigravityReadiness: {},                // machine id -> last background account check
+  antigravityInstalls: {},                 // machine id -> CLI install progress or result
   transcripts: {},                          // session id -> transcript
   questions: {},
   goals: {},
@@ -207,6 +208,9 @@ window.pidesk.subscribe(({ channel, payload }) => {
     case 'environment':
       set(s => ({ envStatus: { ...s.envStatus, [payload.id]: payload } }));
       if (payload.status === 'ready') import('./dirs.js').then(d => d.prefetchDir(payload.id)); // the folder browser opens instantly
+      break;
+    case 'antigravity-install':
+      set(s => ({ antigravityInstalls: { ...s.antigravityInstalls, [payload.id]: payload } }));
       break;
     case 'claude-code':
       set(s => ({ claudeStatus: { ...s.claudeStatus, [payload.id]: payload } }));

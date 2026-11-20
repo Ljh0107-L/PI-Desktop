@@ -175,6 +175,21 @@ test('background readiness blocks only a known failure on the selected machine',
   assert.equal(calls.filter(([method]) => method === 'createSession').length, 1);
 });
 
+test('Antigravity install progress stays with its machine while changing views', () => {
+  reset();
+  store.set({ antigravityInstalls: {} });
+  const progress = (id, stage, percent) => receive({ channel: 'antigravity-install', payload: { id, stage, percent } });
+  progress('ssh:one', 'downloading', 47);
+  store.openSettings(false);
+  store.openSettings(true, 'antigravity', { environmentId: 'ssh:two' });
+  progress('ssh:two', 'uploading', 15);
+  assert.equal(store.getState().antigravityInstalls['ssh:one'].percent, 47);
+  progress('ssh:one', 'done');
+  assert.equal(store.getState().antigravityInstalls['ssh:one'].stage, 'done');
+  assert.equal(store.getState().antigravityInstalls['ssh:two'].stage, 'uploading');
+  store.openSettings(false);
+});
+
 test('completing sign-in in Settings supersedes a stale background check', async () => {
   reset();
   const oldCheck = deferred(), newCheck = deferred();

@@ -1,32 +1,29 @@
-.agy-settings .section > p { margin: 0 0 14px; line-height: 1.55; }
-.agy-environment { max-width: 320px; margin-bottom: 12px; }
-.agy-account { display: grid; gap: 8px; }
+.agy-settings { border-block-start: 1px solid var(--hairline); }
 .agy-setting-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 10px 16px;
-  padding: 12px 14px;
-  border: 1px solid var(--hairline);
-  border-radius: 11px;
-  background: var(--bg-raised);
+  min-height: 58px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--hairline);
+  font-size: 14px;
 }
-.agy-setting-copy { display: grid; gap: 4px; flex: 1 1 220px; }
-.agy-setting-label { color: var(--text); font-size: 14px; font-weight: 600; }
-.agy-setting-copy .muted { line-height: 1.45; }
-.agy-setting-status, .agy-setting-actions { display: flex; align-items: center; gap: 7px; }
-.agy-setting-status { color: var(--muted); font-size: 12px; }
-.agy-setting-actions { flex-wrap: wrap; }
-.agy-settings-error { margin: 0; padding: 6px 2px; color: var(--red); overflow-wrap: anywhere; }
-.agy-terminal-card { border: 1px solid var(--hairline); border-radius: 11px; overflow: hidden; }
-.agy-terminal-card .agy-setting-row { border: 0; border-radius: 0; }
+.agy-setting-row .inline-select { max-width: min(60%, 280px); }
+.agy-setting-actions, .agy-account-state { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.agy-account-state { color: var(--muted); }
+.agy-install { flex: 1 0 100%; display: grid; gap: 7px; }
+.agy-install > div { display: flex; justify-content: space-between; font-variant-numeric: tabular-nums; }
+.agy-install progress { width: 100%; height: 8px; accent-color: var(--accent); border-radius: 999px; overflow: hidden; }
+.agy-install progress::-webkit-progress-bar { background: var(--surface-2); }
+.agy-install progress::-webkit-progress-value { border-radius: 999px; background: var(--accent); transition: width .12s ease; }
+.agy-install progress:indeterminate { background: linear-gradient(90deg, transparent, var(--accent), transparent) left / 35% 100% no-repeat var(--surface-2); animation: agy-install-progress 1.25s ease-in-out infinite alternate; }
+.agy-install progress:indeterminate::-webkit-progress-bar { background: transparent; }
+@keyframes agy-install-progress { to { background-position: right; } }
+@media (prefers-reduced-motion: reduce) { .agy-install progress { animation: none; } }
+.agy-settings-error { margin: 0; padding: 8px 0; color: var(--red); overflow-wrap: anywhere; }
+.agy-terminal-card { margin: 12px 0; border: 1px solid var(--hairline); border-radius: 10px; overflow: hidden; }
+.agy-terminal-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; }
 .agy-settings-terminal { height: 290px; padding: 8px 6px; background: #161616; }
 .agy-composer-error { margin: 4px 12px; color: var(--red); font-size: 12px; }
-.agy-mode.bypass svg { color: var(--amber); }
-.agy-empty { gap: 12px; }
-.agy-empty-copy { text-align: center; max-width: 360px; line-height: 1.45; }
-.agy-empty-copy b { display: block; margin-bottom: 4px; color: var(--text); font-size: 16px; font-weight: 600; }
-.agy-account-panel { display: flex; align-items: flex-start; flex-direction: column; gap: 9px; }
-.agy-account-panel p { margin: 0; line-height: 1.45; }
-.agy-speed-description { color: var(--muted); font-size: 12px; margin: 0; line-height: 1.4; }
