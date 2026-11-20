@@ -13,7 +13,6 @@ import { PiSession } from '../core/pi-session.mjs';
 import { localRelayTransport } from '../core/transports.mjs';
 import { SessionManager } from '../app/main/session-manager.mjs';
 import { prepareRemote } from '../app/main/remote-setup.mjs';
-import { installAntigravityCli } from '../app/main/antigravity.mjs';
 import { readHistory } from '../agent/pidesk-history.mjs';
 import { antigravityTurnSpeed, usageOf } from '../app/renderer/src/transcript.js';
 
@@ -110,22 +109,6 @@ test('Settings checks and signs in without creating a conversation or exposing C
   assert.equal(f.calls('authenticate').length, 1);
   assert.equal(f.calls('session/new').length, 0);
   assert.equal(existsSync(f.config.sessionsDir), false);
-});
-
-test('installer runs only the official HTTPS installer on the chosen host', async () => {
-  const env = { kind: 'ssh', host: 'fixture-host', label: 'Host' };
-  let calls = 0;
-  await installAntigravityCli(env, { run: async (target, script, options) => {
-    calls++;
-    assert.equal(target, env);
-    assert.match(script, /--proto '=https' --proto-redir '=https'/);
-    assert.match(script, /https:\/\/antigravity\.google\/cli\/install\.sh/);
-    assert.match(script, /-o "\$installer"/);
-    assert.match(script, /\n\/bin\/bash "\$installer"$/);
-    assert.doesNotMatch(script, /sudo|agy acp --login|openExternal/);
-    assert.equal(options.timeout, 240000);
-  } });
-  assert.equal(calls, 1);
 });
 
 test('standby negotiates once and only creates a transcript and ACP session on activation', { timeout: 12000 }, async t => {

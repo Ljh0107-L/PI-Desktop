@@ -45,7 +45,7 @@ function fixture(t, { withSsh = false } = {}) {
   }
   const run = (env, script, options) => {
     assert.equal(env, target);
-    assert.doesNotMatch(script, /curl|wget|https?:\/\//, 'no host-side external download or connectivity check');
+    assert.doesNotMatch(script, /curl|wget|https?:\/\/|\bsudo\b|--login|openExternal/, 'no remote download, escalation or sign-in');
     commands.push(script);
     if (script.includes('uname -s')) return Promise.resolve('login banner\nPIDESK_AGY_PLATFORM=Linux aarch64 1\n');
     assert.equal(options.upload.size, data.length);
