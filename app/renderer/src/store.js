@@ -34,6 +34,8 @@ let state = {
   ready: false,
   settings: null, environments: [], sessions: [], catalog: [], catalogError: null,
   activeId: null, view: 'new',             // 'new' | 'session'
+  pendingSessions: {},                     // foreground creations before the saved ID is returned
+  antigravityReadiness: {},                // machine id -> last background account check
   transcripts: {},                          // session id -> transcript
   questions: {},
   goals: {},
@@ -125,7 +127,7 @@ window.pidesk.subscribe(({ channel, payload }) => {
           saveTiming(payload.id, next.messages.at(-1));
           // Context grows with every model call, not only when the whole agent run settles.
           // Update it on the same boundary as the usage/TPS card.
-          scheduleStats(payload.id);
+          if (payload.event.message.provider !== 'antigravity') scheduleStats(payload.id);
         }
         if (payload.event.type === 'compaction_end') {
           if (payload.event.errorMessage && !payload.event.aborted) notify(payload.event.errorMessage, 'error');
@@ -133,7 +135,7 @@ window.pidesk.subscribe(({ channel, payload }) => {
         } }
       if (payload.event.type === 'agent_settled') {
         if (state.activeId === payload.id && !transcriptOf(payload.id).history?.viewingOlder) reloadTranscript(payload.id);
-        scheduleStats(payload.id);
+        if (state.sessions.find(s => s.id === payload.id)?.engine !== 'antigravity') scheduleStats(payload.id);
         if (transcriptOf(payload.id).queued?.length) setTranscript(payload.id, { ...transcriptOf(payload.id), queued: [] });
       }
       break;
@@ -165,15 +167,19 @@ window.pidesk.subscribe(({ channel, payload }) => {
     case 'jobs':
       receiveJobs(payload.id, payload);
       break;
-    case 'status':
-      set(s => ({ sessions: s.sessions.map(x => x.id === payload.id ? { ...x, status: payload.status, phase: Object.hasOwn(payload, 'phase') ? payload.phase : x.phase, streaming: payload.streaming ?? (payload.status === 'connected' ? x.streaming : false), statusMessage: payload.message, compacting: payload.compacting ?? x.compacting } : x) }));
-      if (payload.status === 'connected' && state.activeId === payload.id) refreshStats(payload.id);
-      if (payload.status === 'error' || (payload.status === 'disconnected' && payload.message)) notify(payload.message ?? 'Session disconnected', 'error');
+    case 'status': {
+      const pending = state.pendingSessions[payload.creationId];
+      set(s => ({ ...(pending && payload.status === 'connecting' ? {
+        pendingSessions: { ...s.pendingSessions, [pending.id]: { ...pending, phase: payload.phase } },
+      } : {}), sessions: s.sessions.map(x => x.id === payload.id ? { ...x, status: payload.status, phase: Object.hasOwn(payload, 'phase') ? payload.phase : x.phase, streaming: payload.streaming ?? (payload.status === 'connected' ? x.streaming : false), statusMessage: payload.message, compacting: payload.compacting ?? x.compacting } : x) }));
+      if (payload.status === 'connected' && state.activeId === payload.id && state.sessions.find(s => s.id === payload.id)?.engine !== 'antigravity') refreshStats(payload.id);
+      if (!pending && (payload.status === 'error' || (payload.status === 'disconnected' && payload.message))) notify(payload.message ?? 'Session disconnected', 'error');
       if (payload.status === 'error' || payload.status === 'disconnected') {
         if (transcriptOf(payload.id).queued?.length) setTranscript(payload.id, { ...transcriptOf(payload.id), queued: [] });
       }
       if (payload.status === 'disconnected') set(s => ({ questions: { ...s.questions, [payload.id]: [] } }));
       break;
+    }
     case 'sessions':
       set({ sessions: payload.filter(s => !deleting.has(s.id)) });
       break;
@@ -233,7 +239,7 @@ export async function bootstrap() {
   api('resumeRemote').catch(() => {}); // re-attach SSH sessions still running on their hosts
   // A remembered environment that no longer exists (removed host, other SSH config) falls back to this computer.
   if (!state.environments.some(e => e.id === state.draft.environmentId)) set(s => ({ draft: { ...s.draft, environmentId: 'local', cwd: defaultFolder(s.settings, 'local') } }));
-  else if (state.draft.environmentId !== 'local') api('prepareEnvironment', state.draft.environmentId);
+  else if (state.draft.environmentId !== 'local' && engine !== 'antigravity') api('prepareEnvironment', state.draft.environmentId);
 }
 
 // Page generations prevent a slow response from restoring a deleted/edited branch.
@@ -443,7 +449,7 @@ export const toggleRightPanel = () => set(s => {
   try { localStorage.setItem('pidesk.rightPanel', String(rightPanel)); } catch {}
   return { rightPanel };
 });
-export const openSettings = (open, tab, { addConnection = false } = {}) => set(s => ({ settingsOpen: open, settingsTab: tab ?? s.settingsTab, addConnectionOpen: addConnection, paletteOpen: false }));
+export const openSettings = (open, tab, { addConnection = false, environmentId } = {}) => set(s => ({ settingsOpen: open, settingsTab: tab ?? s.settingsTab, settingsEnvironmentId: environmentId, addConnectionOpen: addConnection, paletteOpen: false }));
 export const setAddConnectionOpen = open => set({ addConnectionOpen: open });
 export const openPalette = (open, tab = 'All') => set({ paletteOpen: open, paletteTab: tab });
 export const toggleSidebar = () => set(s => ({ sidebar: !s.sidebar }));
@@ -466,10 +472,33 @@ export function goForward() {
 }
 export function pickRecent(environmentId, cwd) {
   setDraft({ environmentId, cwd });
-  if (environmentId !== 'local') api('prepareEnvironment', environmentId);
+  if (environmentId !== 'local' && state.draft.engine !== 'antigravity') api('prepareEnvironment', environmentId);
 }
 export const setSettings = settings => set({ settings });
 export const setEnvironments = environments => set({ environments });
+
+const antigravityChecks = new Map();
+export const antigravitySendBlock = status => ({
+  missing: 'Install Antigravity to send a message.',
+  signedOut: 'Sign in to Antigravity to send a message.',
+  unreachable: 'Can’t reach the selected machine.',
+}[status] ?? null);
+const setAntigravityReadiness = (environmentId, status) => set(s => ({ antigravityReadiness: { ...s.antigravityReadiness, [environmentId]: status } }));
+export function reportAntigravityAccount(environmentId, { installed, signedIn }) {
+  // A completed Settings action wins over an older background check for this machine.
+  antigravityChecks.delete(environmentId);
+  setAntigravityReadiness(environmentId, installed === false ? 'missing' : signedIn === true ? 'ready' : signedIn === false ? 'signedOut' : 'unknown');
+}
+export function refreshAntigravityReadiness(environmentId) {
+  if (antigravityChecks.has(environmentId)) return antigravityChecks.get(environmentId);
+  const checking = api('antigravityReadiness', environmentId).catch(() => 'unknown').then(status => {
+    if (antigravityChecks.get(environmentId) !== checking) return;
+    antigravityChecks.delete(environmentId);
+    setAntigravityReadiness(environmentId, status);
+  });
+  antigravityChecks.set(environmentId, checking);
+  return checking;
+}
 
 // Hovering a conversation in the sidebar starts its Pi, so it is usually running by the time it opens.
 const warmed = new Map();
@@ -482,11 +511,11 @@ export function warmSession(id) {
 export async function openSession(id, { record = true } = {}) {
   if (record) navigate({ view: 'session', activeId: id });
   set({ activeId: id, view: 'session', paletteOpen: false });
-  // Once it is open, keep a spare Pi in its folder so Fork (or a new session there) needn't start one.
-  setTimeout(() => { if (state.activeId === id) api('warmFolder', id).catch(() => {}); }, 1500);
   const t = transcriptOf(id);
   const engine = state.sessions.find(s => s.id === id)?.engine;
   const isAntigravity = engine === 'antigravity';
+  // Fork only needs a spare for Pi; AGY warms its own CLI on the new conversation screen.
+  if (!isAntigravity) setTimeout(() => { if (state.activeId === id) api('warmFolder', id).catch(() => {}); }, 1500);
   if (!isAntigravity) refreshJobs(id);
   if (t.loaded) {
     api('focusSession', id).catch(() => {}); // the sweep never stops the open conversation
@@ -496,7 +525,7 @@ export async function openSession(id, { record = true } = {}) {
   }
   try {
     await reloadTranscript(id);
-    refreshStats(id);
+    if (!isAntigravity) refreshStats(id);
     if (engine !== 'claude-code' && !isAntigravity) {
       api('goal', id).then(goal => set(s => ({ goals: { ...s.goals, [id]: goal ?? s.goals[id] ?? null } }))).catch(() => {});
       api('ultra', id).then(ultra => set(s => ({ ultra: { ...s.ultra, [id]: ultra ?? s.ultra[id] ?? null } }))).catch(() => {});
@@ -531,32 +560,44 @@ export async function startSession(text, attachments = []) {
   const claude = draft.engine === 'claude-code', antigravity = draft.engine === 'antigravity';
   if (!antigravity && !draft.model) throw new Error(claude ? 'Choose an Anthropic Messages model in Settings → Models first.' : 'Choose a model in Settings → Models first.');
   if (!antigravity && isRetiredProvider(draft.model?.provider)) throw new Error(RETIRED_PROVIDER_MESSAGE);
-  if (antigravity && attachments.length) throw new Error('Antigravity CLI conversations currently accept text only.');
+  const blocked = antigravity && antigravitySendBlock(state.antigravityReadiness[draft.environmentId]);
+  if (blocked) throw new Error(blocked);
   const pendingId = `pending:${++nextPendingId}`;
-  set({ view: 'session', activeId: pendingId, transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: text || attachments.length ? [{ role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] : [] } } });
+  const environmentLabel = state.environments.find(env => env.id === draft.environmentId)?.label ?? 'the selected machine';
+  const pendingSession = { id: pendingId, title: 'New session', status: 'connecting', phase: claude || (antigravity && draft.environmentId !== 'local') ? 'preparing' : 'starting',
+    environmentId: draft.environmentId, environmentLabel, engine: draft.engine, cwd: draft.cwd ?? '', streaming: true };
+  const clearPending = s => { const { [pendingId]: _, ...remaining } = s.pendingSessions; return remaining; };
+  set({ view: 'session', activeId: pendingId, pendingSessions: { ...state.pendingSessions, [pendingId]: pendingSession },
+    transcripts: { ...state.transcripts, [pendingId]: { ...emptyTranscript(), loaded: true, messages: text || attachments.length ? [{ role: 'user', content: [{ type: 'text', text }, ...attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }))] }] : [] } } });
   try {
     const target = { environmentId: draft.environmentId, cwd: draft.cwd, prompt: text };
     const session = await api('createSession', antigravity
-      ? { ...target, engine: 'antigravity' }
+      ? { ...target, engine: 'antigravity', creationId: pendingId }
       : claude
         ? { ...target, model: draft.model, engine: 'claude-code', effort: draft.effort, ultracode: draft.ultracode, speed: draft.speed }
         : { ...target, model: draft.model, thinkingLevel: draft.thinkingLevel, speed: draft.speed, ultra: draft.ultra });
-    set(s => ({ ...(s.activeId === pendingId ? { activeId: session.id } : {}),
+    set(s => ({ ...(s.activeId === pendingId ? { activeId: session.id } : {}), pendingSessions: clearPending(s),
       ...(draft.ultra && !claude && !antigravity && s.draft === draft ? { draft: { ...draft, ultra: false } } : {}),
       transcripts: { ...s.transcripts, [session.id]: s.transcripts[session.id] ?? { ...emptyTranscript(), loaded: true }, [pendingId]: undefined },
       history: s.history.map(v => v.activeId === pendingId ? { ...v, activeId: session.id } : v),
       future: s.future.map(v => v.activeId === pendingId ? { ...v, activeId: session.id } : v),
       sessions: s.sessions.some(x => x.id === session.id) ? s.sessions : [session, ...s.sessions] }));
     if (antigravity) {
-      if (text.trim()) {
-        // Keep the first message in the new composer until it can be sent. Sign-in
-        // never sends it automatically, and recovery must not replace newer typing.
-        setComposerDraft(session.id, 'text', text);
-        if (!session.antigravity?.authRequired) {
-          const receipt = takeComposerDraft(session.id);
-          try { await api('prompt', session.id, text, []); }
-          catch (error) { restoreComposerDraft(session.id, receipt); notify(error.message, 'error'); }
-        }
+      if (state.activeId === session.id) api('focusSession', session.id).catch(() => {});
+      if (text.trim() || attachments.length) {
+        const saveFirstDraft = () => {
+          if (!state.sessions.some(s => s.id === session.id)) return;
+          const first = { text, attachments: attachments.map((a, i) => ({ ...a, key: `first:${i}`,
+            ...(a.kind === 'image' ? { preview: `data:${a.mimeType};base64,${a.data}` } : {}) })) };
+          // The user may have opened the saved row and started another draft while we waited.
+          changeComposerDraft(session.id, draft => draft
+            ? { ...draft, recoveries: [...draft.recoveries, first] }
+            : { ...createComposerDraft(), ...first });
+        };
+        if (session.status === 'connected' && !session.antigravity?.authRequired) {
+          try { await api('prompt', session.id, text, attachments); }
+          catch (error) { saveFirstDraft(); notify(error.message, 'error'); }
+        } else saveFirstDraft(); // Reconnect or sign-in never sends a saved draft.
       }
       api('updateDefaults', { environmentId: draft.environmentId, engine: draft.engine }).then(setSettings).catch(() => {});
     } else {
@@ -565,7 +606,7 @@ export async function startSession(text, attachments = []) {
       api('updateDefaults', { environmentId: draft.environmentId, model: draft.model, engine: draft.engine, thinkingLevel: draft.thinkingLevel, effort: draft.effort, speed: draft.speed }).then(setSettings).catch(() => {});
     }
   } catch (error) {
-    set(s => ({ ...(s.activeId === pendingId ? { view: 'new', activeId: null } : {}), transcripts: { ...s.transcripts, [pendingId]: undefined },
+    set(s => ({ ...(s.activeId === pendingId ? { view: 'new', activeId: null } : {}), pendingSessions: clearPending(s), transcripts: { ...s.transcripts, [pendingId]: undefined },
       history: s.history.filter(v => v.activeId !== pendingId), future: s.future.filter(v => v.activeId !== pendingId) }));
     throw error;
   }

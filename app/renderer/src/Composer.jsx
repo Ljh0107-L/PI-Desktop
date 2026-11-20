@@ -3,7 +3,8 @@ import { Icon } from './Icons.jsx';
 import { AntigravityOptions, AntigravitySetup } from './Antigravity.jsx';
 import { EffortTrigger, MenuItem, MenuSection, Modal, SpeedTrigger, Spinner, Trigger, baseName, envIcon, fileBadgeKind, shortPath } from './ui.jsx';
 import { effectiveSpeed } from '../../../agent/pidesk-speed.mjs';
-import { api, captureComposerDraft, clearQueued, defaultFolder, getState, notify, openSettings, recoverComposerDraft, restoreComposerDraft, setComposerDraft, setDraft, setEnvironments, set as setStore, takeComposerDraft, useStore } from './store.js';
+import { antigravitySendBlock, api, captureComposerDraft, clearQueued, defaultFolder, getState, notify, openSettings, recoverComposerDraft, restoreComposerDraft, setComposerDraft, setDraft, setEnvironments, set as setStore, takeComposerDraft, useStore } from './store.js';
+import { ANTIGRAVITY_IMAGE_LIMIT, antigravityPromptFits } from './antigravity-prompt.js';
 import { createComposerDraft, draftReadToken, updateComposerDraft, takeComposerDraft as takeDraft, restoreComposerDraft as restoreDraft, recoverComposerDraft as recoverDraft } from './composer-draft.js';
 import { createComposerSizer } from './composer-size.js';
 import { cachedDir, listDir, prefetchDir } from './dirs.js';
@@ -30,7 +31,7 @@ export function EnvironmentMenu({ value, onChange, close }) {
   const others = q ? environments.filter(e => e.kind === 'ssh' && !e.added && `${e.label} ${e.detail}`.toLowerCase().includes(q)).slice(0, 8) : [];
   const matchAdded = q ? added.filter(e => `${e.label} ${e.detail}`.toLowerCase().includes(q)) : added;
   const pick = id => { onChange(id); close(); };
-  const pickNew = async id => { setEnvironments(await api('addConnections', [id])); pick(id); };
+  const pickNew = async id => { setEnvironments(await api('addConnections', [id], getState().draft.engine)); pick(id); };
   return (
     <div className="env-menu">
       <input className="menu-search" autoFocus placeholder="Search environments…" value={query} onChange={e => setQuery(e.target.value)} />
@@ -321,6 +322,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   const draftKey = session?.id ?? 'new';
   const savedDraft = useStore(s => s.composerDrafts[draftKey]);
   const draftTarget = useStore(s => s.draft);
+  const readiness = useStore(s => !session && !onCancel && s.draft.engine === 'antigravity' ? s.antigravityReadiness[s.draft.environmentId] : null);
   const [editor, setEditor] = useState(() => createComposerDraft(initialText));
   const editorRef = useRef(editor);
   const changeEditor = transform => {
@@ -358,19 +360,21 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   }, []);
   useLayoutEffect(() => { size.current?.update(); }, [text]);
   // Slash commands: shown while the message is a single "/word" being typed.
-  const activeEngine = (session ? session.engine : draftTarget?.engine) ?? 'pi';
+  const activeEngine = (session ? session.engine : !onCancel ? draftTarget?.engine : null) ?? 'pi';
   const antigravity = activeEngine === 'antigravity';
-  const slashQuery = !antigravity && /^\/[\w:.-]*$/.test(text) ? text.slice(1).toLowerCase() : null;
+  const slashQuery = /^\/[\w:.-]*$/.test(text) ? text.slice(1).toLowerCase() : null;
+  const agyCommands = session?.antigravity?.commands;
   useEffect(() => { setPi([]); }, [session?.id, activeEngine]);
-  useEffect(() => { if (slashQuery !== null && session?.id) api('commands', session.id).then(setPi).catch(() => {}); }, [slashQuery !== null, session?.id]);
+  useEffect(() => { if (!antigravity && slashQuery !== null && session?.id) api('commands', session.id).then(setPi).catch(() => {}); }, [slashQuery !== null, session?.id, antigravity]);
   const mergedCommands = useMemo(() => {
+    if (antigravity) return [...new Map((agyCommands ?? []).map(c => [c.name, c])).values()];
     const builtins = activeEngine === 'claude-code'
       ? BUILTIN_COMMANDS.filter(c => session && c.name !== 'goal')
       : BUILTIN_COMMANDS.filter(c => session || c.name === 'goal');
     const byName = new Map(builtins.map(c => [c.name, c]));
     for (const c of pi) byName.set(c.name, { ...byName.get(c.name), ...c });
     return [...byName.values()];
-  }, [Boolean(session), activeEngine, pi]);
+  }, [Boolean(session), activeEngine, pi, antigravity, agyCommands]);
   const commands = slashQuery === null ? [] : mergedCommands.filter(c => c.name.toLowerCase().includes(slashQuery)).slice(0, 12);
   useEffect(() => setSlashIndex(0), [slashQuery]);
   const pickCommand = c => { setText(`/${c.name} `); ref.current?.focus(); };
@@ -389,7 +393,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
     let alive = true;
     setMentionLoading(true);
     const timer = setTimeout(() => {
-      const target = session?.id ?? { environmentId: targetEnv, cwd: targetCwd };
+      const target = session?.id ?? { environmentId: targetEnv, cwd: targetCwd, engine: activeEngine };
       api('searchFiles', target, mention.query).then(res => {
         if (!alive) return;
         const list = Array.isArray(res?.files) ? res.files : [];
@@ -399,7 +403,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
       }).catch(() => { if (alive) setMentionFiles([]); }).finally(() => { if (alive) setMentionLoading(false); });
     }, mention.query ? 45 : 0);
     return () => { alive = false; clearTimeout(timer); };
-  }, [mention?.query, Boolean(mention), session?.id, targetEnv, targetCwd]);
+  }, [mention?.query, Boolean(mention), session?.id, targetEnv, targetCwd, activeEngine]);
   useEffect(() => setMentionIndex(0), [mention?.query]);
 
   // Where the caret goes after a list edit or @mention insertion: set right after React writes the new text.
@@ -422,18 +426,35 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
   };
 
   const add = async files => {
-    if (antigravity) { if (files.length) notify('Antigravity CLI conversations currently accept text only.', 'error'); return; }
     // Capture once for the whole batch, before any read. Navigation preserves this
     // token; sending, recovering, or deleting the originating draft invalidates it.
     const token = onCancel ? draftReadToken(changeEditor(draft => updateComposerDraft(draft, 'attachments', list => list))) : captureComposerDraft(draftKey);
     for (const file of files) {
-      try { const att = await attachmentFromFile(file); setAttachments(list => [...list, { ...att, key: Math.random().toString(36).slice(2) }], token); }
-      catch (e) { notify(e.message, 'error'); }
+      try {
+        if (antigravity && IMAGE_TYPES.includes(file.type)) {
+          if (session?.antigravity?.image === false) throw new Error('This Antigravity CLI does not accept images.');
+          if (file.size > ANTIGRAVITY_IMAGE_LIMIT) throw new Error(`${file.name} is too large (Antigravity accepts images up to 4 MB each).`);
+        }
+        const att = await attachmentFromFile(file);
+        const latestText = onCancel ? editorRef.current.text : getState().composerDrafts[draftKey]?.text ?? '';
+        setAttachments(list => {
+          const next = [...list, { ...att, key: Math.random().toString(36).slice(2) }];
+          if (antigravity && att.kind === 'image' && !antigravityPromptFits(latestText.trim(), next)) {
+            throw new Error(`Can’t add ${file.name}: this message would be too large. Remove an image or choose a smaller one.`);
+          }
+          return next;
+        }, token);
+      } catch (e) { notify(e.message, 'error'); }
     }
   };
   // Clear at once and let the backend work in the background: a slow command (e.g. /goal starting a
   // run) must not block the next message. The draft comes back if sending fails.
-  const blocked = antigravity && (!!attachments.length || (session && (working || session.status !== 'connected' || session.antigravity?.authRequired)));
+  const attachmentError = antigravity && (!antigravityPromptFits(text.trim(), attachments)
+    ? 'This message is too large. Remove an image or shorten the message.'
+    : session?.antigravity?.image === false && attachments.some(att => att.kind === 'image')
+      ? 'This Antigravity CLI does not accept images. Remove them to send.' : null);
+  const sendBlock = antigravity && (attachmentError || antigravitySendBlock(readiness));
+  const blocked = sendBlock || (antigravity && session && (working || session.status !== 'connected' || session.antigravity?.authRequired));
   const submit = async () => {
     if (blocked) return;
     let receipt;
@@ -450,7 +471,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
     }
   };
   const canSend = !blocked && !!(text.trim() || attachments.length);
-  const attachmentControl = !antigravity && <button type="button" className="composer-plus" aria-label="Add attachment" title="Add files or images" onClick={() => fileInput.current?.click()}><Icon name="plus" size={17} /></button>;
+  const attachmentControl = <button type="button" className="composer-plus" aria-label="Add attachment" title="Add files or images" onClick={() => fileInput.current?.click()}><Icon name="plus" size={17} /></button>;
   const stopButton = working && !onCancel
     ? <button type="button" className="send-button stop" onClick={() => {
       clearQueued(session.id);
@@ -458,7 +479,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
     }} aria-label="Stop" title={session?.compacting ? 'Stop compaction' : 'Stop generation'}><Icon name="stop" size={16} /></button>
     : null;
   const sendButton = (!working || canSend || onCancel)
-    ? <button type="button" className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={submit} aria-label="Send" title={working ? 'Send to interrupt (Enter)' : 'Send (Enter)'}><Icon name="arrowUp" size={15} stroke={2.4} /></button>
+    ? <button type="button" className={`send-button ${canSend ? 'ready' : ''}`} disabled={!canSend} onClick={submit} aria-label="Send" title={sendBlock || (working ? 'Send to interrupt (Enter)' : 'Send (Enter)')}><Icon name="arrowUp" size={15} stroke={2.4} /></button>
     : null;
   const sendControl = <div className="composer-actions">{sendButton}{stopButton}</div>;
   const showMentionMenu = !!mention && (mentionLoading || mentionFiles.length > 0);
@@ -485,6 +506,7 @@ export function Composer({ session, onSubmit, autoFocus, placeholder, initialTex
           ))}
         </div>
       )}
+      {attachmentError && <div className="agy-composer-error" role="status">{attachmentError}</div>}
       <div className="composer-row">
         <input ref={fileInput} type="file" multiple hidden aria-label="Attach files" onChange={e => { add([...e.target.files]); e.target.value = ''; }} />
         {!footer && attachmentControl}
@@ -541,8 +563,12 @@ const shortError = (message = '', label) => /disk .* is full/i.test(message) ? `
 export function NewSessionTrayHead() {
   const draft = useStore(s => s.draft);
   const environments = useStore(s => s.environments);
-  const prep = useStore(s => s.envStatus[draft.environmentId]);
+  const prep = useStore(s => {
+    const status = s.envStatus[draft.environmentId];
+    return (status?.engine === 'antigravity') === (draft.engine === 'antigravity') ? status : null;
+  });
   const ccPrep = useStore(s => s.claudeStatus[draft.environmentId]);
+  const readiness = useStore(s => s.antigravityReadiness[draft.environmentId]);
   const home = useStore(s => s.home);
   const [browsing, setBrowsing] = useState(false);
   const environmentId = draft.environmentId;
@@ -552,7 +578,7 @@ export function NewSessionTrayHead() {
   const engineLabel = antigravity ? 'Antigravity CLI' : isClaude ? 'Claude Code' : 'Pi';
   const changeEnv = id => {
     setDraft({ environmentId: id, cwd: defaultFolder(getState().settings, id) });
-    if (id !== 'local') api('prepareEnvironment', id);
+    if (id !== 'local' && !antigravity) api('prepareEnvironment', id);
   };
   return (
     <div className="composer-tray-head">
@@ -581,10 +607,10 @@ export function NewSessionTrayHead() {
         <button type="button" className="bar-status error" title={ccPrep.message} onClick={() => api('prepareClaudeCode', environmentId)}>
           <Icon name="alert" size={13} /><span>Claude Code unavailable</span><span className="bar-retry">Retry</span>
         </button>
-      ) : prep?.status === 'preparing' ? (
+      ) : !antigravity && prep?.status === 'preparing' ? (
         <span className="bar-status"><Spinner size={11.5} /><span>{prep.message}</span></span>
-      ) : prep?.status === 'error' ? (
-        <button type="button" className="bar-status error" title={prep.message} onClick={() => api('prepareEnvironment', environmentId, true)}>
+      ) : prep?.status === 'error' && !(antigravity && antigravitySendBlock(readiness)) ? (
+        <button type="button" className="bar-status error" title={prep.message} onClick={() => api('prepareEnvironment', environmentId, true, draft.engine)}>
           <Icon name="alert" size={13} /><span>{shortError(prep.message, env.label)}</span><span className="bar-retry">Retry</span>
         </button>
       ) : null}

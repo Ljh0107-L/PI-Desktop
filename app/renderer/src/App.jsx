@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ClaudeMascot, Icon, Mascot } from './Icons.jsx';
 import { Sidebar, SessionMenuItems } from './Sidebar.jsx';
 import { Composer, ComposerBar, NewSessionTrayHead } from './Composer.jsx';
-import { AntigravityLogin } from './Antigravity.jsx';
+import { AntigravityLogin, openAntigravitySettings } from './Antigravity.jsx';
 import { Transcript } from './Conversation.jsx';
 import { AgentReports, SubagentSummary } from './Subagents.jsx';
 import { RightPanel, UsageMetrics } from './RightPanel.jsx';
@@ -12,7 +12,7 @@ import { GitReview } from './GitReview.jsx';
 import { TerminalPanel } from './TerminalPanel.jsx';
 import { Palette } from './Palette.jsx';
 import { Modal, Popover, Spinner, Trigger } from './ui.jsx';
-import { emptyTranscript, formatTokens } from './transcript.js';
+import { antigravityTurnSpeed, emptyTranscript, formatTokens } from './transcript.js';
 import { sortedBackgroundJobs } from './background-jobs.js';
 import { api, bootstrap, closeConfirm, dismissNotice, set as setStore, getState, isPendingSession, newSession, notify, openFile, openPalette, openSettings, sendPrompt, setFilePaneOpen, startSession, toggleRightPanel, toggleSidebar, useStore } from './store.js';
 
@@ -77,19 +77,19 @@ function ConfirmHost() {
 
 function NewSessionView() {
   const draft = useStore(s => s.draft);
-  const isClaude = draft.engine === 'claude-code';
-  // Start a Pi (or install Claude Code) in the chosen place ahead of time, so the first message doesn't wait for it.
+  const isClaude = draft.engine === 'claude-code', antigravity = draft.engine === 'antigravity';
+  // Warm the selected engine's runtime without waiting for the first message.
   useEffect(() => {
-    if (!draft.model && !isClaude) return;
+    if (!draft.model && !isClaude && !antigravity) return;
     const t = setTimeout(() => api('prewarm', { environmentId: draft.environmentId, cwd: draft.cwd, model: draft.model, thinkingLevel: draft.thinkingLevel, speed: draft.speed, engine: draft.engine }).catch(() => {}), 400);
     return () => clearTimeout(t);
-  }, [draft.environmentId, draft.cwd, draft.model?.provider, draft.model?.id, draft.engine, isClaude]);
+  }, [draft.environmentId, draft.cwd, draft.model?.provider, draft.model?.id, draft.engine, isClaude, antigravity]);
   return (
     <div className="new-session">
       <div className="welcome-stage">
         <div className="code-empty" aria-label="Ready to code">
-          {isClaude ? <ClaudeMascot size={7} /> : <Mascot size={7} />}
-          <h1 className="welcome-heading">What can we build today?</h1>
+          {antigravity ? <Icon name="atom" size={36} /> : isClaude ? <ClaudeMascot size={7} /> : <Mascot size={7} />}
+          <h1 className="welcome-heading">{antigravity ? 'New Antigravity conversation' : 'What can we build today?'}</h1>
         </div>
         <div className="dock new-session-dock">
           <div className="composer-shell">
@@ -192,7 +192,12 @@ function SessionView({ session }) {
     <div className={`session-view ${filePaneMax ? 'files-max' : ''}`}>
       <div className="session-main">
         {findOpen && <SessionFindBar onClose={() => setFindOpen(false)} />}
-        {!transcript.messages.length && !transcript.live && !session.streaming && session.status === 'connected' && !questions.length ? <div className="code-empty" aria-label="Ready to code">{isClaude ? <ClaudeMascot size={7} /> : <Mascot size={7} />}</div> : <Transcript session={session} transcript={transcript} questions={questions}
+        {!transcript.messages.length && !transcript.live && !session.streaming && session.status === 'connected' && !questions.length ?
+          <div className={`code-empty ${antigravity ? 'agy-empty' : ''}`} aria-label="Ready to code">
+            {antigravity ? <><Icon name="atom" size={36} /><div className="agy-empty-copy"><b>Antigravity CLI</b>
+              <span className="muted">{session.antigravity?.authRequired ? 'Finish sign-in in Settings. Your draft stays here.' : 'Ask about this workspace, attach files, or use the CLI’s available commands.'}</span>
+            </div></> : isClaude ? <ClaudeMascot size={7} /> : <Mascot size={7} />}
+          </div> : <Transcript session={session} transcript={transcript} questions={questions}
           renderSubagents={block => <SubagentSummary key={block.key} sessionId={session.id} call={block.call} tool={transcript.tools[block.call.id]} />}
           renderAgentReport={block => <AgentReports key={block.key} sessionId={session.id} agents={block.agents} />} />}
         <div className="dock">
@@ -222,12 +227,13 @@ function HeaderTelemetry({ session }) {
   const filePaneOpen = useStore(s => s.filePaneOpen);
   const gitReviewOpen = useStore(s => s.gitReviewOpen);
   const runningJobs = useMemo(() => sortedBackgroundJobs(jobsSnapshot?.jobs).filter(j => j.status === 'running').length, [jobsSnapshot]);
-  const context = stats?.contextUsage;
+  const antigravity = session.engine === 'antigravity';
+  const context = antigravity ? session.antigravity?.contextUsage : stats?.contextUsage;
   const percent = Number.isFinite(context?.percent) ? Math.round(context.percent) : null;
   const contextLabel = Number.isFinite(context?.tokens)
     ? `${formatTokens(context.tokens)} / ${Number.isFinite(context?.contextWindow) ? formatTokens(context.contextWindow) : '—'}`
     : percent != null ? `${percent}%` : null;
-  const hasUsage = (transcript?.messages ?? []).some(m => m.role === 'assistant' && m.usage);
+  const hasUsage = (transcript?.messages ?? []).some(m => m.role === 'assistant' && (antigravity ? antigravityTurnSpeed(m) : m.usage));
   const inspectorVisible = rightPanel && !filePaneOpen && !gitReviewOpen;
   return <>
     {runningJobs > 0 && !inspectorVisible && (
@@ -249,7 +255,7 @@ function HeaderTelemetry({ session }) {
                 </span>
               </div>
             )}
-            <UsageMetrics transcript={transcript} />
+            <UsageMetrics transcript={transcript} antigravity={antigravity} />
           </div>
         )}>
         {percent != null ? <>
@@ -292,7 +298,7 @@ function Header({ session, view }) {
               {session.engine === 'claude-code' && (
                 <span className="header-engine-badge" title="Running on Claude Code">Claude Code</span>
               )}
-              {session.engine === 'antigravity' && <span className="header-engine-badge" title="Running on Antigravity CLI">Antigravity CLI</span>}
+              {session.engine === 'antigravity' && <button type="button" className="header-engine-badge no-drag" title="Antigravity account and permissions" onClick={() => openAntigravitySettings(session.environmentId)}>Antigravity CLI</button>}
               {!session.project && !local && session.environmentLabel && (
                 <span className="header-env-badge" title={session.cwd}><Icon name="terminal" size={11} />{session.environmentLabel}</span>
               )}
@@ -321,7 +327,7 @@ export function App() {
   const paletteOpen = useStore(s => s.paletteOpen);
   const notices = useStore(s => s.notices);
   const sidebar = useStore(s => s.sidebar);
-  const draft = useStore(s => s.draft);
+  const pendingSession = useStore(s => s.pendingSessions[s.activeId]);
   const pendingTranscript = useStore(s => s.transcripts[s.activeId]);
   useEffect(() => { bootstrap().catch(e => notify(e.message, 'error')); }, []);
   useEffect(() => {
@@ -337,7 +343,7 @@ export function App() {
   }, []);
   if (!ready) return <div className="app loading" />;
   const pending = isPendingSession(activeId);
-  const session = sessions.find(s => s.id === activeId) ?? (pending ? { id: activeId, title: 'New session', status: 'connecting', phase: draft.engine === 'claude-code' ? 'preparing' : 'starting', environmentId: draft.environmentId, engine: draft.engine, cwd: draft.cwd ?? '', streaming: true } : null);
+  const session = pendingSession ?? sessions.find(s => s.id === activeId);
   const toasts = <div className="toasts">{notices.map(n => <div key={n.id} className={`toast ${n.level}`}><Icon name={n.level === 'error' ? 'alert' : 'check'} size={15} /> <span className="toast-text">{n.message}</span>
     {n.action && <button className="toast-action" onClick={() => { dismissNotice(n.id); n.action.run(); }}>{n.action.label}</button>}</div>)}</div>;
   if (settingsOpen) return <div className="app"><SettingsPage />{toasts}</div>;

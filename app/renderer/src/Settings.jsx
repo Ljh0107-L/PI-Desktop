@@ -1,6 +1,7 @@
 // Full-window Settings, modelled on DSH's settings sections and Codex's Connections page.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
+import { AntigravitySettings } from './Antigravity.jsx';
 import { MenuItem, Modal, Popover, Spinner } from './ui.jsx';
 import { api, loadCatalog, openSettings, setAddConnectionOpen, setEnvironments, setSettings, useStore } from './store.js';
 import { formatTokens as fmtTokens } from './transcript.js';
@@ -256,7 +257,9 @@ function Toggle({ on, onChange, label }) {
 }
 
 function ConnectionCard({ env }) {
+  const engine = useStore(s => s.draft.engine);
   const st = useStore(s => s.envStatus[env.id]);
+  const check = force => api('prepareEnvironment', env.id, force, engine);
   const anchor = useRef(null);
   const [menu, setMenu] = useState(false);
   const state = !env.enabled ? 'off' : st?.status ?? (env.root ? 'known' : 'idle');
@@ -271,16 +274,16 @@ function ConnectionCard({ env }) {
   return (
     <li className={`row-card connection ${state}`}>
       <div className="row-head">
-        <Toggle on={env.enabled} label={`Use ${env.label}`} onChange={async on => { setEnvironments(await api('setConnectionEnabled', env.id, on)); if (on) api('prepareEnvironment', env.id); }} />
+        <Toggle on={env.enabled} label={`Use ${env.label}`} onChange={async on => { setEnvironments(await api('setConnectionEnabled', env.id, on)); if (on) check(false); }} />
         <div className="connection-main">
           <div className="row-identity"><Icon name={env.source === 'manual' ? 'globe' : 'terminal'} size={15} className="connection-icon" /><span className="row-name" title={env.detail}>{env.label}</span></div>
         </div>
         <div className="row-actions">
           <span className={`connection-state ${state}`} title={status.text}>{state === 'preparing' ? <Spinner size={12} /> : <span className={`status-dot ${status.dot}`} />}</span>
-          {state === 'error' && <button className="button small" title={status.text} onClick={() => api('prepareEnvironment', env.id, true)}>Retry</button>}
+          {state === 'error' && <button className="button small" title={status.text} onClick={() => check(true)}>Retry</button>}
           <button ref={anchor} className="icon-button" aria-label="More" onClick={() => setMenu(m => !m)}><Icon name="more" size={16} /></button>
           <Popover anchor={anchor} open={menu} onClose={() => setMenu(false)} width={210} placement="bottom-end">
-            <MenuItem icon="refresh" label="Check again" disabled={!env.enabled} onClick={() => { setMenu(false); api('prepareEnvironment', env.id, true); }} />
+            <MenuItem icon="refresh" label="Check again" disabled={!env.enabled} onClick={() => { setMenu(false); check(true); }} />
             <MenuItem icon="trash" label="Remove" className="danger" onClick={async () => { setMenu(false); setEnvironments(await api('removeConnection', env.id)); }} />
           </Popover>
         </div>
@@ -291,6 +294,7 @@ function ConnectionCard({ env }) {
 
 function AddConnectionDialog({ onClose }) {
   const environments = useStore(s => s.environments);
+  const engine = useStore(s => s.draft.engine);
   const candidates = environments.filter(e => e.kind === 'ssh' && !e.added && e.source === 'config');
   const [query, setQuery] = useState('');
   const [picked, setPicked] = useState(() => new Set());
@@ -305,7 +309,7 @@ function AddConnectionDialog({ onClose }) {
   const submit = async () => {
     setBusy(true); setError(null);
     try {
-      setEnvironments(manual ? await api('addManualConnection', form) : await api('addConnections', [...picked]));
+      setEnvironments(manual ? await api('addManualConnection', form, engine) : await api('addConnections', [...picked], engine));
       onClose();
     } catch (e) { setError(e.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')); setBusy(false); }
   };
@@ -469,6 +473,7 @@ export function SettingsPage() {
   const pages = [
     { id: 'providers', label: 'Models', icon: 'sparkle', title: 'Models' },
     { id: 'connections', label: 'Connections', icon: 'server', title: 'Connections' },
+    { id: 'antigravity', label: 'Antigravity', icon: 'atom', title: 'Antigravity' },
     { id: 'usage', label: 'Usage', icon: 'gauge', title: 'Usage' },
   ];
   const page = pages.find(p => p.id === tab) ?? pages[0];
@@ -485,7 +490,7 @@ export function SettingsPage() {
         <div className="settings-drag drag" />
         <div className="settings-content">
           <h1 className="settings-title">{page.title}</h1>
-          {page.id === 'providers' ? <ModelsPage /> : page.id === 'usage' ? <UsagePage /> : <ConnectionsPage />}
+          {page.id === 'providers' ? <ModelsPage /> : page.id === 'usage' ? <UsagePage /> : page.id === 'antigravity' ? <AntigravitySettings /> : <ConnectionsPage />}
         </div>
       </main>
     </div>

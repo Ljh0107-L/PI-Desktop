@@ -135,6 +135,16 @@ export function usageOf(messages) {
   return { ...u, prompt, cacheHit: u.cacheUnknown ? null : prompt ? u.cacheRead / prompt : null, tps: u.genMs ? u.genOut / (u.genMs / 1000) : null, durationMs: u.start != null && u.end != null ? u.end - u.start : null };
 }
 
+// ACP exposes neither per-request timing nor output token counts. Turn speed
+// is a separate estimate and must not contribute to Pi's token totals or TPS.
+export function antigravityTurnSpeed(message) {
+  if (message?.provider !== 'antigravity' || !['stop', 'length'].includes(message.stopReason)) return null;
+  const { durationMs, tokenEstimate } = message.__agyTurn ?? {};
+  if (!positive(durationMs) || !positive(tokenEstimate)) return null;
+  const tps = tokenEstimate * 1000 / durationMs;
+  return Number.isFinite(tps) ? { tps, durationMs } : null;
+}
+
 // Earlier replies stand in only when the last reply has no usable output or request duration.
 export function speedDisplay(usage, { earlier = false } = {}) {
   if (!Number.isFinite(usage.tps)) return { value: '—', label: 'Speed unavailable', title: 'This reply has no output or usable request timing.' };

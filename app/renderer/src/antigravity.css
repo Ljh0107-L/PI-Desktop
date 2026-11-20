@@ -1,0 +1,32 @@
+.agy-settings .section > p { margin: 0 0 14px; line-height: 1.55; }
+.agy-environment { max-width: 320px; margin-bottom: 12px; }
+.agy-account { display: grid; gap: 8px; }
+.agy-setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--hairline);
+  border-radius: 11px;
+  background: var(--bg-raised);
+}
+.agy-setting-copy { display: grid; gap: 4px; flex: 1 1 220px; }
+.agy-setting-label { color: var(--text); font-size: 14px; font-weight: 600; }
+.agy-setting-copy .muted { line-height: 1.45; }
+.agy-setting-status, .agy-setting-actions { display: flex; align-items: center; gap: 7px; }
+.agy-setting-status { color: var(--muted); font-size: 12px; }
+.agy-setting-actions { flex-wrap: wrap; }
+.agy-settings-error { margin: 0; padding: 6px 2px; color: var(--red); overflow-wrap: anywhere; }
+.agy-terminal-card { border: 1px solid var(--hairline); border-radius: 11px; overflow: hidden; }
+.agy-terminal-card .agy-setting-row { border: 0; border-radius: 0; }
+.agy-settings-terminal { height: 290px; padding: 8px 6px; background: #161616; }
+.agy-composer-error { margin: 4px 12px; color: var(--red); font-size: 12px; }
+.agy-mode.bypass svg { color: var(--amber); }
+.agy-empty { gap: 12px; }
+.agy-empty-copy { text-align: center; max-width: 360px; line-height: 1.45; }
+.agy-empty-copy b { display: block; margin-bottom: 4px; color: var(--text); font-size: 16px; font-weight: 600; }
+.agy-account-panel { display: flex; align-items: flex-start; flex-direction: column; gap: 9px; }
+.agy-account-panel p { margin: 0; line-height: 1.45; }
+.agy-speed-description { color: var(--muted); font-size: 12px; margin: 0; line-height: 1.4; }

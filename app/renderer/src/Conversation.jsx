@@ -1,4 +1,4 @@
-import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { FileContextMenu, Markdown, Spinner, fileBadgeKind, looksLikePath, pointAnchor } from './ui.jsx';
 import { changesOf, displayBlocks, formatTokens, isAbortText, retainWorkKeys, toolSummary, ultraProgress } from './transcript.js';
@@ -9,6 +9,7 @@ import { ImagePreview } from './ImagePreview.jsx';
 import { DownloadButton, iconFor, sizeLabel } from './FilePane.jsx';
 import { changeStats, hunkLines } from './diffs.js';
 import { Composer } from './Composer.jsx';
+import './antigravity-permissions.css';
 
 // Disclosure state belongs to the transcript, not a transient grouped row. A streamed thought can
 // become a work group, and groups can split when text arrives. Preserve the user's choices by step ID.
@@ -471,19 +472,81 @@ function ClaudeTodoCard({ call, tool, live }) {
   );
 }
 
-// A question from Pi or Claude Code (ask_user, AskUserQuestion, ExitPlanMode), answered right in the conversation.
-function QuestionCard({ sessionId, question }) {
+function useQuestionAnswer(sessionId, requestId) {
   const [busy, setBusy] = useState(false);
-  const [text, setText] = useState(question.prefill ?? '');
-  const [selected, setSelected] = useState([]);
   const send = async payload => {
     setBusy(true);
-    try { await api('answer', sessionId, question.requestId, payload); } catch (e) { notify(e.message, 'error'); setBusy(false); }
+    try { await api('answer', sessionId, requestId, payload); } catch (e) { notify(e.message, 'error'); setBusy(false); }
   };
+  return [busy, send];
+}
+
+function PermissionDetails({ text }) {
+  const { pauseFollowing } = useContext(DisclosureContext);
+  const id = useId();
+  const preview = useRef(null);
+  const [expanded, setExpanded] = useState(false);
+  const [clipped, setClipped] = useState(false);
+  useLayoutEffect(() => {
+    const el = preview.current;
+    if (!el || expanded) return;
+    el.scrollTop = 0;
+    el.scrollLeft = 0;
+    const measure = () => setClipped(el.scrollHeight > el.clientHeight || el.scrollWidth > el.clientWidth);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [text, expanded]);
+  return (
+    <div className="agy-permission-details">
+      {(clipped || expanded) && <button type="button" className="agy-permission-disclosure" aria-expanded={expanded} aria-controls={id}
+        onClick={() => { pauseFollowing(); setExpanded(open => !open); }}>
+        <Icon name={expanded ? 'chevronUp' : 'chevronDown'} size={14} />{expanded ? 'Collapse details' : 'Show full details'}
+      </button>}
+      <pre ref={preview} id={id} className="agy-permission-text" data-expanded={expanded}
+        tabIndex={expanded ? 0 : undefined} role={expanded ? 'region' : undefined} aria-label={expanded ? 'Full tool request details' : undefined}>{text}</pre>
+    </div>
+  );
+}
+
+function AntigravityPermissionCard({ sessionId, question }) {
+  const [busy, send] = useQuestionAnswer(sessionId, question.requestId);
+  const detailsByLabel = new Map((question.optionDetails ?? []).map(o => [o.label, o.description]));
+  // ACP can put the entire command in the title. Keep both fields verbatim in the preview.
+  const details = [question.title, question.message].filter(Boolean).join('\n');
+  return (
+    <div className="agy-permission" role="group" aria-label="Antigravity permission request" aria-busy={busy}>
+      <div className="agy-permission-heading"><Icon name="shieldAlert" size={16} />{question.header || 'Antigravity tool permission'}</div>
+      {details && <PermissionDetails text={details} />}
+      <div className="agy-permission-actions">
+        <button type="button" className="button ghost agy-permission-action agy-permission-cancel" disabled={busy} onClick={() => send({ cancelled: true })}>Cancel request</button>
+        {(question.options ?? []).map(option => {
+          // The adapter supplies the exact scope as the description; the CLI's label is the answer value.
+          const scope = detailsByLabel.get(option);
+          const remember = scope === 'Allow and remember' || scope === 'Reject and remember';
+          const variant = scope === 'Allow once' ? ' primary' : remember ? ' remember' : '';
+          return (
+            <button key={option} type="button" className={`button agy-permission-action agy-permission-option${variant}`} disabled={busy} onClick={() => send({ value: option })}>
+              <span>{option}</span>
+              {scope && scope !== option && <span className="agy-permission-scope">{scope}</span>}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// A question from Pi or Claude Code (ask_user, AskUserQuestion, ExitPlanMode), answered right in the conversation.
+function QuestionCard({ sessionId, question }) {
+  const [busy, send] = useQuestionAnswer(sessionId, question.requestId);
+  const [text, setText] = useState(question.prefill ?? '');
+  const [selected, setSelected] = useState([]);
   const options = question.method === 'select' ? question.options ?? [] : [];
   const detailsByLabel = useMemo(() => new Map((question.optionDetails ?? []).map(o => [o.label, o.description])), [question.optionDetails]);
   const multi = question.method === 'select' && !!question.multiSelect;
-  const freeText = question.method !== 'confirm' && !question.permission;
+  const freeText = question.method !== 'confirm';
   const toggleOption = option => setSelected(prev => prev.includes(option) ? prev.filter(x => x !== option) : [...prev, option]);
   const submitMulti = () => {
     const extra = text.trim();
@@ -491,7 +554,7 @@ function QuestionCard({ sessionId, question }) {
     if (values.length) send({ value: values });
   };
   return (
-    <div className="question-card" role="group" aria-label={question.permission ? 'Antigravity permission request' : 'Question from agent'}>
+    <div className="question-card" role="group" aria-label="Question from agent">
       {question.header && <div className="question-header-chip">{question.header}</div>}
       <div className="question-title">{question.title}</div>
       {question.message && (question.method === 'confirm'
@@ -527,7 +590,7 @@ function QuestionCard({ sessionId, question }) {
       <div className="question-actions">
         {question.method === 'confirm'
           ? <><button className="button ghost" disabled={busy} onClick={() => send({ confirmed: false })}>No</button><button className="button primary" disabled={busy} onClick={() => send({ confirmed: true })}>Approve</button></>
-          : <button className="button ghost small" disabled={busy} onClick={() => send({ cancelled: true })}>{question.permission ? 'Cancel request' : 'Skip'}</button>}
+          : <button className="button ghost small" disabled={busy} onClick={() => send({ cancelled: true })}>Skip</button>}
       </div>
     </div>
   );
@@ -669,17 +732,21 @@ function WorkingRow({ session, transcript }) {
   const ccPrep = useStore(s => session?.environmentId ? s.claudeStatus[session.environmentId] : null);
   useEffect(() => { const t = setInterval(() => tick(n => n + 1), 1000); return () => clearInterval(t); }, []);
   if (session?.status === 'connecting') {
-    const isClaude = session.engine === 'claude-code';
-    const agentName = session.engine === 'antigravity' ? 'Antigravity CLI' : isClaude ? 'Claude Code' : 'Pi';
+    const isClaude = session.engine === 'claude-code', antigravity = session.engine === 'antigravity';
+    const agentName = antigravity ? 'Antigravity' : isClaude ? 'Claude Code' : 'Pi';
+    const connecting = antigravity
+      ? session.environmentId === 'local' ? 'Starting Antigravity…' : `Connecting to ${session.environmentLabel}…`
+      : 'Connecting…';
     const preparingText = session.statusMessage
       || (isClaude && ccPrep?.status === 'preparing' ? ccPrep.message : null)
       || (envPrep?.status === 'preparing' ? envPrep.message : null)
       || (isClaude ? 'Preparing Claude Code…' : 'Preparing remote environment…');
     const phase = {
-      preparing: preparingText,
+      preparing: antigravity ? connecting : preparingText,
       starting: `Starting ${agentName}…`,
+      opening: 'Opening conversation…',
       configuring: 'Restoring session…',
-    }[session.phase] ?? 'Connecting…';
+    }[session.phase] ?? connecting;
     return <div className="working"><span className="working-dot" /><span className="shimmer">{phase}</span></div>;
   }
   const messages = transcript.messages;
@@ -870,7 +937,7 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
     <div className="transcript-shell">
     <div className="transcript" ref={scroller} onScroll={onScroll}
       onWheelCapture={e => {
-        if (e.target.closest('.tool-output, .tool-command, .diff')) { pauseFollowing(); return; }
+        if (e.target.closest('.tool-output, .tool-command, .diff, .agy-permission-text[data-expanded="true"]')) { pauseFollowing(); return; }
         if (e.deltaY < 0) {
           pauseFollowing();
           if (scroller.current && scroller.current.scrollTop < scroller.current.clientHeight * 3) earlier();
@@ -927,7 +994,10 @@ export function Transcript({ session, transcript, questions = NO_QUESTIONS, read
             </div>
           </div>
         ))}
-        {questions.map(q => <QuestionCard key={q.requestId} sessionId={session.id} question={q} />)}
+        {questions.map(q => {
+          const Card = q.permission ? AntigravityPermissionCard : QuestionCard;
+          return <Card key={q.requestId} sessionId={session.id} question={q} />;
+        })}
         {working && !loading && !questions.length && <WorkingRow session={session} transcript={transcript} />}
         <div className="transcript-end" />
       </div>

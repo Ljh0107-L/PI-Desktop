@@ -11,7 +11,7 @@ const deferred = () => { let resolve, reject; const promise = new Promise((yes, 
 const reply = (text, timestamp = 1) => ({ role: 'assistant', content: [{ type: 'text', text }], timestamp, stopReason: 'stop' });
 const page = (messages = []) => ({ messages, next: null, snapshot: { identity: "test" } });
 const event = (id, e) => receive({ channel: 'event', payload: { id, event: e } });
-const reset = () => store.set({ activeId: null, view: 'new', transcripts: {}, sessions: [], catalog: [], history: [], future: [],
+const reset = () => store.set({ activeId: null, view: 'new', pendingSessions: {}, antigravityReadiness: {}, transcripts: {}, sessions: [], catalog: [], history: [], future: [],
   draft: { environmentId: 'local', cwd: '/tmp', model: { provider: 'mock', id: 'mock' }, ultra: false } });
 
 for (const inSnapshot of [false, true]) test(`history reload retains a concurrent completed reply exactly once (snapshot includes it: ${inSnapshot})`, async () => {
@@ -91,26 +91,126 @@ test('Antigravity keeps a first draft awaiting sign-in without sending to any Pi
   const calls = [];
   const session = { id: 'agy', engine: 'antigravity', antigravity: { authRequired: true } };
   invoke = (method, ...args) => { calls.push([method, ...args]); return Promise.resolve(method === 'createSession' ? session : { defaults: { model: piModel } }); };
-  await store.startSession('draft for later');
+  const att = { kind: 'image', mimeType: 'image/png', data: 'aW1hZ2U=', name: 'image.png' };
+  const sending = store.startSession('draft for later', [att]);
+  const pendingId = store.getState().activeId;
+  await sending;
   assert.equal(store.getState().activeId, session.id);
   assert.equal(store.getState().composerDrafts.agy.text, 'draft for later');
-  assert.deepEqual(calls, [['createSession', { engine: 'antigravity', environmentId: 'local', cwd: '/tmp', prompt: 'draft for later' }],
-    ['updateDefaults', { environmentId: 'local', engine: 'antigravity' }]]);
+  assert.equal(store.getState().composerDrafts.agy.attachments[0].data, att.data);
+  assert.deepEqual(calls, [['createSession', { engine: 'antigravity', environmentId: 'local', cwd: '/tmp', prompt: 'draft for later', creationId: pendingId }],
+    ['focusSession', session.id], ['updateDefaults', { environmentId: 'local', engine: 'antigravity' }]]);
   store.setDraft({ environmentId: 'ssh:host' });
   assert.equal(store.getState().draft.engine, 'antigravity');
   assert.equal(store.getState().draft.model, null);
   store.setDraft({ cwd: '/remote/work' });
   const remote = { id: 'agy-ssh', engine: 'antigravity', antigravity: { authRequired: true, canSignIn: false } };
   invoke = (method, ...args) => { calls.push([method, ...args]); return Promise.resolve(method === 'createSession' ? remote : { defaults: { model: piModel } }); };
-  await store.startSession('draft for the SSH host');
+  const sendingRemote = store.startSession('draft for the SSH host');
+  const pendingRemote = store.getState().activeId;
+  await sendingRemote;
   assert.equal(store.getState().composerDrafts[remote.id].text, 'draft for the SSH host');
   assert.deepEqual(calls.find(([method, args]) => method === 'createSession' && args.environmentId === 'ssh:host')[1],
-    { engine: 'antigravity', environmentId: 'ssh:host', cwd: '/remote/work', prompt: 'draft for the SSH host' });
+    { engine: 'antigravity', environmentId: 'ssh:host', cwd: '/remote/work', prompt: 'draft for the SSH host', creationId: pendingRemote });
   store.setDraft({ engine: 'pi' });
   assert.deepEqual(store.getState().draft.model, piModel);
   store.set({ questions: { [session.id]: [{ method: 'select', requestId: 'permission', options: ['Allow once'] }] } });
   await assert.rejects(store.sendPrompt(session.id, 'Allow once'), /Choose a permission option/);
   assert.ok(calls.every(([method]) => method !== 'answer' && method !== 'prompt'));
+});
+
+test('Antigravity startup progress and failure stay with the saved conversation and its draft', async () => {
+  reset();
+  const created = deferred(), calls = [];
+  store.set({ composerDrafts: {}, notices: [], environments: [{ id: 'ssh:host', label: 'Dev host' }] });
+  store.setDraft({ engine: 'antigravity', environmentId: 'ssh:host', cwd: '/work' });
+  invoke = (method, ...args) => { calls.push([method, ...args]); return method === 'createSession' ? created.promise : Promise.resolve(null); };
+  const file = { kind: 'file', name: 'readme.txt', data: 'aW1hZ2U=' };
+  const task = store.startSession('first draft', [file]);
+  const creationId = store.getState().activeId;
+  assert.equal(store.getState().pendingSessions[creationId].phase, 'preparing');
+  assert.equal(store.getState().pendingSessions[creationId].environmentLabel, 'Dev host');
+  store.setDraft({ environmentId: 'local' });
+  receive({ channel: 'status', payload: { id: 'saved', creationId, status: 'connecting', phase: 'opening' } });
+  assert.equal(store.getState().pendingSessions[creationId].phase, 'opening');
+  assert.equal(store.getState().pendingSessions[creationId].environmentId, 'ssh:host');
+  receive({ channel: 'status', payload: { id: 'saved', creationId, status: 'error', message: 'Could not open Antigravity' } });
+  created.resolve({ id: 'saved', engine: 'antigravity', status: 'error', statusMessage: 'Could not open Antigravity' });
+  await task;
+  assert.equal(store.getState().activeId, 'saved');
+  assert.deepEqual(store.getState().pendingSessions, {});
+  assert.deepEqual(store.getState().sessions.map(s => s.status), ['error']);
+  assert.deepEqual(store.getState().notices, [], 'the error is shown on the conversation, not duplicated in a toast');
+  assert.equal(store.getState().composerDrafts.saved.text, 'first draft');
+  assert.equal(store.getState().composerDrafts.saved.attachments[0].data, file.data);
+  await store.api('reconnect', 'saved');
+  receive({ channel: 'status', payload: { id: 'saved', status: 'connected', phase: null } });
+  assert.ok(!calls.some(([method]) => method === 'prompt'), 'reconnect must not send a draft');
+  await store.sendPrompt('saved', 'first draft', [file]);
+  assert.deepEqual(calls.at(-1), ['prompt', 'saved', 'first draft', [file]]);
+  assert.equal(calls.filter(([method]) => method === 'createSession').length, 1);
+});
+
+test('background readiness blocks only a known failure on the selected machine', async () => {
+  reset();
+  const local = deferred(), remote = deferred(), calls = [];
+  store.setDraft({ engine: 'antigravity' });
+  invoke = (method, ...args) => {
+    calls.push([method, ...args]);
+    return method === 'antigravityReadiness' ? (args[0] === 'local' ? local.promise : remote.promise)
+      : Promise.resolve(method === 'createSession' ? { id: 'ready', engine: 'antigravity', status: 'connected' } : null);
+  };
+  const checkingLocal = store.refreshAntigravityReadiness('local');
+  assert.equal(store.refreshAntigravityReadiness('local'), checkingLocal);
+  const checkingRemote = store.refreshAntigravityReadiness('ssh:host');
+  remote.resolve('unreachable');
+  await checkingRemote;
+  await store.startSession('while the local check is still running');
+  assert.deepEqual(calls.find(([method]) => method === 'prompt'), ['prompt', 'ready', 'while the local check is still running', []]);
+  local.resolve('signedOut');
+  await checkingLocal;
+  await assert.rejects(store.startSession('local draft'), /Sign in to Antigravity/);
+  store.setDraft({ environmentId: 'ssh:host' });
+  await assert.rejects(store.startSession('remote draft'), /Can’t reach/);
+  assert.equal(calls.filter(([method]) => method === 'createSession').length, 1);
+});
+
+test('completing sign-in in Settings supersedes a stale background check', async () => {
+  reset();
+  const oldCheck = deferred(), newCheck = deferred();
+  let probes = 0;
+  invoke = () => (++probes === 1 ? oldCheck.promise : newCheck.promise);
+  const old = store.refreshAntigravityReadiness('local');
+  store.reportAntigravityAccount('local', { installed: true, signedIn: true });
+  assert.equal(store.getState().antigravityReadiness.local, 'ready');
+  const current = store.refreshAntigravityReadiness('local');
+  oldCheck.resolve('signedOut');
+  await old;
+  assert.equal(store.getState().antigravityReadiness.local, 'ready');
+  assert.equal(store.refreshAntigravityReadiness('local'), current);
+  newCheck.resolve('ready');
+  await current;
+});
+
+test('a rejected first Antigravity prompt does not overwrite a newer draft', async () => {
+  reset();
+  store.set({ composerDrafts: {}, notices: [] });
+  store.setDraft({ engine: 'antigravity' });
+  const sending = deferred(), reachedPrompt = deferred();
+  invoke = method => {
+    if (method === 'prompt') { reachedPrompt.resolve(); return sending.promise; }
+    return Promise.resolve(method === 'createSession' ? { id: 'agy', engine: 'antigravity', status: 'connected' } : null);
+  };
+  const task = store.startSession('original', [{ kind: 'file', name: 'original.txt', data: 'AA==' }]);
+  await reachedPrompt.promise;
+  store.setComposerDraft('agy', 'text', 'newer');
+  sending.reject(new Error('Connection lost'));
+  await task;
+  const draft = store.getState().composerDrafts.agy;
+  assert.equal(draft.text, 'newer');
+  assert.deepEqual(draft.attachments, []);
+  assert.equal(draft.recoveries[0].text, 'original');
+  assert.equal(draft.recoveries[0].attachments[0].name, 'original.txt');
 });
 
 test('failed first prompt does not redirect a different active conversation', async () => {

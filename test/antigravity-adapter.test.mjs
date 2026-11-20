@@ -13,6 +13,9 @@ import { PiSession } from '../core/pi-session.mjs';
 import { localRelayTransport } from '../core/transports.mjs';
 import { SessionManager } from '../app/main/session-manager.mjs';
 import { prepareRemote } from '../app/main/remote-setup.mjs';
+import { installAntigravityCli } from '../app/main/antigravity.mjs';
+import { readHistory } from '../agent/pidesk-history.mjs';
+import { antigravityTurnSpeed, usageOf } from '../app/renderer/src/transcript.js';
 
 const adapter = fileURLToPath(new URL('../agent/pidesk-antigravity.mjs', import.meta.url));
 const fake = fileURLToPath(new URL('./fixtures/fake-agy-acp-antigravity.mjs', import.meta.url));
@@ -94,6 +97,83 @@ function fixture(t, scenario = {}, signedIn = false) {
 const event = type => r => r.type === type;
 const lastAssistant = messages => messages.findLast(m => m.role === 'assistant');
 const fileEntries = path => parseLines(readFileSync(path, 'utf8'));
+const authOptions = ({ authRequired, canSignIn, options }) => ({ authRequired, canSignIn, options });
+
+test('Settings checks and signs in without creating a conversation or exposing CLI session details', { timeout: 12000 }, async t => {
+  const f = fixture(t);
+  const account = async mode => JSON.parse((await exec(process.execPath, [adapter, `--account-${mode}`, f.config.bin], { cwd: f.cwd, timeout: 5000 })).stdout);
+  assert.deepEqual(await account('check'), { antigravityAccount: { signedIn: false, canSignIn: true } });
+  assert.equal(f.calls('authenticate').length, 0);
+  assert.deepEqual(await account('login'), { antigravityAccount: { signedIn: true, canSignIn: true } });
+  assert.deepEqual(await account('check'), { antigravityAccount: { signedIn: true, canSignIn: true } });
+  assert.equal(f.calls('session/list').length, 3);
+  assert.equal(f.calls('authenticate').length, 1);
+  assert.equal(f.calls('session/new').length, 0);
+  assert.equal(existsSync(f.config.sessionsDir), false);
+});
+
+test('installer runs only the official HTTPS installer on the chosen host', async () => {
+  const env = { kind: 'ssh', host: 'fixture-host', label: 'Host' };
+  let calls = 0;
+  await installAntigravityCli(env, { run: async (target, script, options) => {
+    calls++;
+    assert.equal(target, env);
+    assert.match(script, /--proto '=https' --proto-redir '=https'/);
+    assert.match(script, /https:\/\/antigravity\.google\/cli\/install\.sh/);
+    assert.match(script, /-o "\$installer"/);
+    assert.match(script, /\n\/bin\/bash "\$installer"$/);
+    assert.doesNotMatch(script, /sudo|agy acp --login|openExternal/);
+    assert.equal(options.timeout, 240000);
+  } });
+  assert.equal(calls, 1);
+});
+
+test('standby negotiates once and only creates a transcript and ACP session on activation', { timeout: 12000 }, async t => {
+  const f = fixture(t, {}, true);
+  const cwd = join(f.cwd, 'conversation-folder');
+  mkdirSync(cwd);
+  f.setScenario({ workspace: cwd });
+  const peer = f.start(null, { standby: true });
+  const [a, b] = await Promise.all([peer.request('get_state'), peer.request('get_state')]);
+  assert.deepEqual(a, b);
+  assert.equal(a.antigravity.standby, true);
+  assert.equal(a.sessionFile, null);
+  assert.equal(existsSync(f.config.sessionsDir), false);
+  assert.deepEqual(f.log().filter(r => r.method).map(r => r.method), ['initialize']);
+  assert.match((await peer.rpc('prompt', { message: 'must not send' })).error, /Open the Antigravity conversation first/);
+  assert.match((await peer.rpc('antigravity_activate', { cwd: 'relative' })).error, /Invalid Antigravity workspace/);
+  const [active, same] = await Promise.all([
+    peer.request('antigravity_activate', { cwd }), peer.request('antigravity_activate', { cwd }),
+  ]);
+  assert.deepEqual(active, same);
+  assert.equal(active.antigravity.standby, undefined);
+  assert.equal(fileEntries(active.sessionFile)[0].cwd, cwd);
+  assert.equal(f.log()[0].boot.cwd, f.cwd);
+  assert.deepEqual(f.log().filter(r => r.method).map(r => r.method), ['initialize', 'session/new']);
+  assert.equal(f.calls('session/new')[0].params.cwd, cwd);
+});
+
+test('negotiates image input, CLI commands and context, and persists turn speed without fake usage', { timeout: 12000 }, async t => {
+  const f = fixture(t, { photo: true, telemetry: true }, true);
+  const peer = f.start(null, { bypassPermissions: true });
+  const state = await peer.request('get_state');
+  assert.equal(state.antigravity.image, true);
+  assert.equal(state.antigravity.permissionMode, 'bypassPermissions');
+  assert.deepEqual(f.log()[0].boot.argv, ['acp', '--dangerously-skip-permissions']);
+  assert.deepEqual((await peer.request('get_commands')).commands, [{ name: 'test-skill', description: 'Test skill', source: 'antigravity', argumentHint: '<input>' }]);
+  assert.deepEqual(await peer.request('get_session_stats'), { contextUsage: { tokens: 250, contextWindow: 1000, percent: 25 } });
+  const image = { type: 'image', mimeType: 'image/png', data: 'aW1hZ2U=' };
+  await peer.request('prompt', { message: '', images: [image] });
+  await peer.next(event('agent_settled'));
+  assert.deepEqual(f.calls('session/prompt')[0].params.prompt, [image]);
+  assert.equal(peer.events.some(event('extension_ui_request')), false);
+  const { messages } = await readHistory(state.sessionFile);
+  const reply = lastAssistant(messages);
+  assert.ok(antigravityTurnSpeed(reply)?.tps > 0);
+  assert.equal(usageOf(messages).calls, 0);
+  assert.equal(reply.usage, undefined);
+  assert.equal(antigravityTurnSpeed({ ...reply, stopReason: 'aborted' }), null);
+});
 
 async function ask(peer, message) {
   const from = peer.events.length;
@@ -111,7 +191,7 @@ test('negotiates ACP v1 as Pi Desktop, handles personal auth and serializes conc
   const peer = f.start();
   const [a, b] = await Promise.all([peer.request('get_state'), peer.request('get_state')]);
   assert.deepEqual(a, b);
-  assert.deepEqual(a.antigravity, { authRequired: true, canSignIn: true, options: [] });
+  assert.deepEqual(authOptions(a.antigravity), { authRequired: true, canSignIn: true, options: [] });
   assert.equal(a.engine, 'antigravity');
   assert.equal(a.isCompacting, false);
   assert.equal(a.pendingMessageCount, 0);
@@ -206,7 +286,7 @@ test('ignores optional unsupported config/auth methods without a model or API fa
   const f = fixture(t, { oauth: false, noOptions: true });
   const peer = f.start();
   const required = await peer.request('get_state');
-  assert.deepEqual(required.antigravity, { authRequired: true, canSignIn: false, options: [] });
+  assert.deepEqual(authOptions(required.antigravity), { authRequired: true, canSignIn: false, options: [] });
   assert.equal((await peer.rpc('antigravity_login')).success, false);
   assert.equal((await peer.rpc('prompt', { message: 'simple' })).success, false);
   assert.equal(f.calls('authenticate').length, 0);
@@ -216,7 +296,7 @@ test('ignores optional unsupported config/auth methods without a model or API fa
   const cached = f.start(required.sessionFile);
   const state = await cached.request('get_state');
   assert.equal(state.sessionFile, required.sessionFile);
-  assert.deepEqual(state.antigravity, { authRequired: false, canSignIn: false, options: [] });
+  assert.deepEqual(authOptions(state.antigravity), { authRequired: false, canSignIn: false, options: [] });
   assert.equal(state.model, undefined);
   await cached.request('prompt', { message: 'simple' });
   await cached.next(event('agent_settled'));
@@ -229,7 +309,7 @@ test('an SSH session never starts browser login and can reopen with the host CLI
   const f = fixture(t);
   const original = f.start(undefined, { remote: true });
   const state = await original.request('get_state');
-  assert.deepEqual(state.antigravity, { authRequired: true, canSignIn: false, options: [] });
+  assert.deepEqual(authOptions(state.antigravity), { authRequired: true, canSignIn: false, options: [] });
   assert.match((await original.rpc('antigravity_login')).error, /on the SSH host/);
   assert.equal(f.calls('authenticate').length, 0);
   assert.equal(f.calls('session/prompt').length, 0);
@@ -418,27 +498,23 @@ test('SSH deploys the adapter, prompts for host-side login, and reattaches a run
   writeFileSync(ssh, `#!/bin/sh\nfor a do prev=$last; last=$a; [ "$a" != '-R' ] || exit 97; done\n[ "$prev" = 'agy-test-host' ] || exit 98\nexport HOME=${shellQuote(home)} GEMINI_API_KEY=fixture-remote-secret\nexec /bin/sh -c "$last"\n`, { mode: 0o700 });
   writeFileSync(remoteNode, `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec ${shellQuote(process.execPath)} "$@"\n`, { mode: 0o700 });
   writeFileSync(join(home, '.local/bin/agy'), readFileSync(f.config.bin), { mode: 0o700 });
-  // An intact fake Pi install keeps this deploy hermetic (no npm, curl or Node downloads).
-  const pi = join(root, 'pi/node_modules/@earendil-works/pi-coding-agent');
-  mkdirSync(join(pi, 'dist/bundle'), { recursive: true });
-  writeFileSync(join(pi, 'package.json'), '{"version":"1.2.3"}');
-  writeFileSync(join(pi, 'dist/bundle/cli.js'), '// fixture');
+  // There is deliberately no Pi package on this SSH host.
   const originalEnv = { PATH: process.env.PATH, PIDESK_NO_SSH_MUX: process.env.PIDESK_NO_SSH_MUX };
   process.env.PATH = `${tools}:${process.env.PATH}`;
   process.env.PIDESK_NO_SSH_MUX = '1';
   const env = { id: 'ssh:agy-fixture', kind: 'ssh', host: 'agy-test-host', label: 'Mock SSH', enabled: true, added: true };
-  const store = { sessions: [], settings: { providers: [], environments: { [env.id]: { root, added: true } } },
+  const store = { sessions: [], settings: { defaults: { antigravityBypassPermissions: false }, providers: [], environments: { [env.id]: { root, added: true } } },
     saveSettings() {}, saveSessions() {}, touchRecent() {} };
   const manager = new SessionManager({ store, environments: () => [env], piVersion: '1.2.3', relayPath: relay,
     bridgePath: fileURLToPath(new URL('../agent/pidesk-bridge.js', import.meta.url)),
     local: { node: process.execPath, agentDir: join(f.cwd, 'unused-local'), runDir: join(f.cwd, 'unused-run') },
     remoteSetup: (target, options) => prepareRemote(target, options, { probe: async () => ({ home, hostname: env.host, nodes: [{ path: remoteNode, version: process.version }], disks: [] }) }),
   });
-  manager.providerHosts = async () => [];
+  manager.providerHosts = async () => assert.fail('Antigravity must not load Pi providers');
   f.onCleanup(async () => {
     try {
       for (const record of store.sessions) await manager.stopRelay(env, record.id, { requireTree: true });
-      await exec(ssh, [env.host, `PIDESK_RUN_DIR=${shellQuote(join(root, 'run'))} ${shellQuote(remoteNode)} ${shellQuote(join(root, 'ext/pidesk-relay.mjs'))} shutdown`]).catch(() => {});
+      await exec(ssh, [env.host, `PIDESK_RUN_DIR=${shellQuote(join(root, 'run'))} ${shellQuote(remoteNode)} ${shellQuote(join(root, 'antigravity/pidesk-relay.mjs'))} shutdown`]).catch(() => {});
     } finally {
       await manager.shutdown();
       for (const [key, value] of Object.entries(originalEnv)) { if (value === undefined) delete process.env[key]; else process.env[key] = value; }
@@ -449,7 +525,8 @@ test('SSH deploys the adapter, prompts for host-side login, and reattaches a run
   assert.equal(record.antigravity.authRequired, true);
   assert.equal(record.antigravity.canSignIn, false);
   assert.ok(record.piSessionFile.startsWith(join(root, 'agent/sessions/antigravity')));
-  assert.deepEqual(readFileSync(join(root, 'ext/pidesk-antigravity.mjs')), readFileSync(adapter));
+  assert.deepEqual(readFileSync(join(root, 'antigravity/pidesk-antigravity.mjs')), readFileSync(adapter));
+  assert.equal(existsSync(join(root, 'pi')), false);
   await assert.rejects(manager.antigravityLogin(record.id), /agy acp --login/);
   await assert.rejects(manager.prompt(record.id, 'before sign-in'), /Sign in with Google/);
   writeFileSync(join(f.cwd, '.pidesk-fake-agy-cache.json'), JSON.stringify({ signedIn: true }));
@@ -473,4 +550,5 @@ test('SSH deploys the adapter, prompts for host-side login, and reattaches a run
   assert.equal(f.calls('session/prompt').length, 1);
   assert.equal(f.calls('session/cancel').length, 1);
   assert.equal(manager.list()[0].egressPort, undefined);
+  assert.deepEqual((await manager.historyPage(record.id)).messages.filter(m => m.role === 'user').map(m => m.content[0].text), ['waiting for permission']);
 });

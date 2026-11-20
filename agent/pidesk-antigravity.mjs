@@ -4,6 +4,7 @@ import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, closeSync, constants, fstatSync, fsyncSync, mkdirSync, openSync, readFileSync, realpathSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 
 const ENGINE = 'antigravity';
@@ -13,6 +14,7 @@ const CONTROL_MS = 12000;
 const LOGIN_MS = 120000;
 const ABORT_MS = 6000;
 const PERMISSION_MS = 90000;
+const STANDBY_MS = 120000; // safety net if Desktop exits without stopping its SSH spare
 const MAX_LINE = 8 * 1024 * 1024;
 const has = (obj, key) => Object.hasOwn(obj, key);
 const text = value => typeof value === 'string' && value.length > 0;
@@ -142,7 +144,7 @@ class AcpError extends Error {
   constructor(error, method) {
     const code = Number.isInteger(error?.code) ? error.code : null;
     const what = {
-      initialize: 'initialize', authenticate: 'complete sign-in', 'session/new': 'start a session',
+      initialize: 'initialize', authenticate: 'complete sign-in', 'session/list': 'check sign-in', 'session/new': 'start a session',
       'session/load': 'load the original session', 'session/resume': 'resume the original session',
       'session/set_config_option': 'change session settings', 'session/prompt': 'complete the prompt',
     }[method];
@@ -156,7 +158,8 @@ class AcpError extends Error {
 
 class AcpPeer {
   constructor(config, env, onRecord, onDisconnect) {
-    try { this.child = spawn(config.bin, ['acp'], { cwd: config.cwd, env: cliEnv(env), stdio: ['pipe', 'pipe', 'ignore'] }); }
+    const args = ['acp', ...(config.bypassPermissions ? ['--dangerously-skip-permissions'] : [])];
+    try { this.child = spawn(config.bin, args, { cwd: config.cwd, env: cliEnv(env), stdio: ['pipe', 'pipe', 'ignore'] }); }
     catch { throw new Error('Could not start the configured Antigravity CLI.'); }
     this.pending = new Map();
     this.nextId = 0;
@@ -232,6 +235,36 @@ class AcpPeer {
   }
 }
 
+const initParams = version => ({ protocolVersion: 1, clientCapabilities: {},
+  clientInfo: { name: 'pi-desktop', title: 'Pi Desktop', version: version ?? '0.0.0' } });
+const personalAuth = init => Array.isArray(init?.authMethods) && init.authMethods.some(m => m?.id === AUTH_METHOD && (m.type == null || m.type === 'agent'));
+
+// Settings can probe or authenticate without opening a chat. session/list is read-only;
+// its result (including the user's conversation metadata) never leaves this process.
+async function account({ bin, cwd, login, version }) {
+  if (!isAbsolute(bin ?? '')) throw new Error('Missing Antigravity CLI.');
+  const peer = new AcpPeer({ bin, cwd }, process.env, (p, r) => {
+    if (rpcId(r.id)) p.send({ id: r.id, error: { code: -32601, message: 'Method not supported' } });
+  }, () => {});
+  let canSignIn = false;
+  try {
+    const { result: init } = await peer.request('initialize', initParams(version));
+    if (init?.protocolVersion !== 1) throw new Error('The Antigravity CLI did not negotiate ACP version 1.');
+    canSignIn = personalAuth(init);
+    const canCheck = object(init.agentCapabilities?.sessionCapabilities?.list);
+    if (login) {
+      if (!canSignIn) return { signedIn: null, canSignIn };
+      await peer.request('authenticate', { methodId: AUTH_METHOD }, LOGIN_MS);
+    }
+    if (canCheck) await peer.request('session/list', {});
+    return { signedIn: canCheck || login ? true : null, canSignIn };
+  } catch (error) {
+    if (error.authRequired) return { signedIn: false, canSignIn };
+    if (error.code === -32601 && !login) return { signedIn: null, canSignIn };
+    throw error;
+  } finally { await peer.close(new Error('Account check finished.')); }
+}
+
 function selectConfig(options) {
   const seen = new Set();
   return (Array.isArray(options) ? options : []).flatMap(o => {
@@ -258,11 +291,23 @@ const cancelled = { outcome: { outcome: 'cancelled' } };
 const shownContent = content => (Array.isArray(content) ? content : []).flatMap(block =>
   block?.type === 'content' && block.content?.type === 'text' && typeof block.content.text === 'string' ? [{ type: 'text', text: block.content.text }] : []);
 const shownPaths = locations => (Array.isArray(locations) ? locations : []).flatMap(location => text(location?.path) ? [location.path] : []);
+const image = block => block?.type === 'image' && /^image\/(?:png|jpeg|gif|webp)$/.test(block.mimeType) && text(block.data);
+const slashCommands = list => (Array.isArray(list) ? list : []).slice(0, 256).flatMap(c =>
+  /^[\w:.-]{1,120}$/.test(c?.name ?? '') ? [{ name: c.name, description: typeof c.description === 'string' ? c.description.slice(0, 400) : '', source: ENGINE,
+    ...(text(c.input?.hint) ? { argumentHint: c.input.hint.slice(0, 200) } : {}) }] : []);
+const contextOf = ({ used, size }) => Number.isSafeInteger(used) && used >= 0 && Number.isSafeInteger(size) && size > 0
+  ? { tokens: used, contextWindow: size, percent: 100 * used / size } : null;
+const estimateOutput = blocks => Math.max(0, Math.round(blocks.reduce((n, block) => {
+  const printed = block.type === 'text' ? block.text : block.type === 'thinking' ? block.thinking : '';
+  const cjk = (printed.match(/[\u3000-\u30ff\u3400-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/g) ?? []).length;
+  return n + cjk + (printed.length - cjk) / 4;
+}, 0)));
 
 class AntigravityAdapter {
   constructor({ boot, write, env = process.env }) {
-    const { bin, cwd, sessionsDir, sessionFile, recordId, remote, clientVersion } = boot?.antigravity ?? {};
-    this.config = { bin, cwd, sessionsDir, sessionFile, recordId, remote: remote === true, clientVersion };
+    const { bin, cwd, sessionsDir, sessionFile, recordId, remote, clientVersion, bypassPermissions, standby } = boot?.antigravity ?? {};
+    this.config = { bin, cwd, sessionsDir, sessionFile, recordId, remote: remote === true, clientVersion, bypassPermissions: bypassPermissions === true };
+    this.standby = standby === true && sessionFile == null;
     this.write = write;
     this.env = env;
     this.controls = Promise.resolve();
@@ -271,6 +316,8 @@ class AntigravityAdapter {
     this.authRequired = false;
     this.canSignIn = false;
     this.options = [];
+    this.commands = [];
+    this.contextUsage = null;
     this.configSeq = 0;
     this.closed = false;
   }
@@ -300,18 +347,24 @@ class AntigravityAdapter {
           return this.#state();
         };
         if (this.peer && !this.peer.closed && (this.sessionId || this.authRequired)) return ready();
-        return this.#serial(async () => { await this.#ensureReady(); return ready(); });
+        return this.#serial(async () => {
+          if (this.standby) await this.#initialize();
+          else await this.#ensureReady();
+          return ready();
+        });
       }
+      case 'antigravity_activate': return this.#serial(() => this.#activate(r.cwd));
       case 'antigravity_login': {
         if (!this.login) this.login = this.#serial(() => this.#signIn()).finally(() => { this.login = null; });
         return this.login;
       }
       case 'antigravity_set_config': return this.#serial(() => this.#setConfig(r.configId, r.value));
       case 'prompt': {
-        if (r.images != null && (!Array.isArray(r.images) || r.images.length)) throw new Error('Antigravity only supports text prompts in Pi Desktop.');
-        if (!text(r.message) || !r.message.trim()) throw new Error('Enter a text prompt for Antigravity.');
+        const images = r.images ?? [];
+        if (!Array.isArray(images) || !images.every(image)) throw new Error('Choose a PNG, JPEG, GIF, or WebP image for Antigravity.');
+        if (!(text(r.message) && r.message.trim()) && !images.length) throw new Error('Enter a message for Antigravity.');
         const epoch = this.cancelEpoch;
-        return this.#serial(() => this.#prompt(r.message, epoch));
+        return this.#serial(() => this.#prompt(r.message ?? '', images, epoch));
       }
       case 'abort': return this.#abort();
       case 'abort_bash': case 'clear_queue': case 'set_session_name': return {};
@@ -320,8 +373,8 @@ class AntigravityAdapter {
         const tr = this.#transcript(false);
         return { entries: tr?.publicEntries() ?? [], leafId: tr?.leafId ?? null };
       }
-      case 'get_session_stats': return null;
-      case 'get_commands': return { commands: [] };
+      case 'get_session_stats': return this.contextUsage ? { contextUsage: this.contextUsage } : null;
+      case 'get_commands': return { commands: this.commands };
       default: throw new Error('This command is not supported by the Antigravity adapter.');
     }
   }
@@ -340,7 +393,12 @@ class AntigravityAdapter {
     return this.transcript;
   }
 
-  #antigravityState() { return { authRequired: this.authRequired, canSignIn: this.canSignIn, options: this.options }; }
+  #antigravityState() {
+    return { authRequired: this.authRequired, canSignIn: this.canSignIn, options: this.options,
+      image: this.capabilities?.promptCapabilities?.image === true,
+      permissionMode: this.config.bypassPermissions ? 'bypassPermissions' : 'confirm', commands: this.commands, contextUsage: this.contextUsage,
+      ...(this.standby ? { standby: true } : {}) };
+  }
   #model() {
     const id = this.options.find(o => o.category === 'model')?.currentValue;
     return id ? { provider: ENGINE, id } : null;
@@ -355,6 +413,8 @@ class AntigravityAdapter {
     this.sessionId = null;
     this.authRequired = true;
     this.options = [];
+    this.commands = [];
+    this.contextUsage = null;
     this.#updateState();
   }
   #replaceOptions(options, seq) {
@@ -375,9 +435,7 @@ class AntigravityAdapter {
     this.configSeq = 0;
     let init;
     try {
-      ({ result: init } = await peer.request('initialize', {
-        protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'pi-desktop', title: 'Pi Desktop', version: this.config.clientVersion ?? '0.0.0' },
-      }));
+      ({ result: init } = await peer.request('initialize', initParams(this.config.clientVersion)));
     } catch (error) {
       if (!error.authRequired) peer.close(error);
       throw error;
@@ -387,11 +445,22 @@ class AntigravityAdapter {
       peer.close(error); throw error;
     }
     this.capabilities = init.agentCapabilities ?? {};
-    this.canSignIn = !this.config.remote && Array.isArray(init.authMethods) && init.authMethods.some(m => m?.id === AUTH_METHOD && (m.type == null || m.type === 'agent'));
+    this.canSignIn = !this.config.remote && personalAuth(init);
     return this.capabilities;
   }
 
+  async #activate(cwd) {
+    if (!text(cwd) || !isAbsolute(cwd) || (!this.standby && cwd !== this.config.cwd)) throw new Error('Invalid Antigravity workspace.');
+    // ACP's session/new takes the session's own working directory. A No-folder
+    // spare can run in the shared root until the first message names its folder.
+    this.config.cwd = cwd;
+    this.standby = false;
+    await this.#ensureReady();
+    return this.#state();
+  }
+
   async #ensureReady() {
+    if (this.standby) throw new Error('Open the Antigravity conversation first.');
     const tr = this.#transcript();
     if (this.peer && !this.peer.closed && (this.sessionId || this.authRequired)) return;
     if (tr.binding?.creating) throw new Error('The original Antigravity session ID was not saved. No replacement was started.');
@@ -407,9 +476,10 @@ class AntigravityAdapter {
     const method = !saved ? 'session/new' : object(this.capabilities.sessionCapabilities?.resume) ? 'session/resume' :
       this.capabilities.loadSession === true ? 'session/load' : null;
     if (!method) throw new Error('The Antigravity CLI cannot resume this session. No replacement was started.');
-    const opening = { saved, latest: null };
+    const opening = { saved, latest: null, metadata: new Map() };
     this.opening = opening;
     try {
+      this.write({ type: 'antigravity_opening' });
       if (!saved) tr.bind({ creating: true });
       const { result, seq } = await peer.request(method, { cwd: this.config.cwd, mcpServers: [], ...(saved ? { sessionId: saved } : {}) });
       const sessionId = saved ?? result?.sessionId;
@@ -420,6 +490,9 @@ class AntigravityAdapter {
       this.sessionId = sessionId;
       this.authRequired = false;
       this.options = [];
+      const metadata = opening.metadata.get(sessionId);
+      this.commands = metadata?.commands ?? [];
+      this.contextUsage = metadata?.contextUsage ?? null;
       const early = opening.latest?.id === sessionId ? opening.latest : null;
       if (early && (early.seq > seq || !Array.isArray(result?.configOptions))) this.#replaceOptions(early.options, early.seq);
       else if (Array.isArray(result?.configOptions)) this.#replaceOptions(result.configOptions, seq);
@@ -460,19 +533,24 @@ class AntigravityAdapter {
     return this.#state();
   }
 
-  async #prompt(message, epoch) {
+  async #prompt(message, images, epoch) {
     if (this.turn) throw new Error('Antigravity is already responding; stop this turn before sending another prompt.');
     if (this.cancelEpoch !== epoch) throw new Error('The Antigravity prompt was cancelled before it started.');
     await this.#ensureReady();
     if (this.closed || this.cancelEpoch !== epoch) throw new Error('The Antigravity prompt was cancelled before it started.');
     if (!this.sessionId) throw new Error('Sign in to Antigravity before sending a prompt.');
-    const user = { role: 'user', content: [{ type: 'text', text: message }], timestamp: Date.now() };
+    if (images.length && this.capabilities?.promptCapabilities?.image !== true) throw new Error('This Antigravity CLI does not accept image prompts.');
+    const prompt = [...(message ? [{ type: 'text', text: message }] : []), ...images.map(({ mimeType, data }) => ({ type: 'image', mimeType, data }))];
+    // The ACP line reader and the relay both have finite record sizes.
+    if (Buffer.byteLength(JSON.stringify(prompt)) > 6 * 1024 * 1024) throw new Error('Antigravity prompts must be smaller than 6 MB after encoding.');
+    const user = { role: 'user', content: prompt, timestamp: Date.now() };
     this.transcript.append([{ type: 'message', message: user }]);
     const turn = { sessionId: this.sessionId, startedAt: Math.max(Date.now(), user.timestamp + 1), tools: new Map(), content: [], model: this.#model()?.id };
     this.turn = turn;
     this.write({ type: 'agent_start' });
     this.#message(user);
     this.write({ type: 'message_start', message: this.#assistant(turn, []) });
+    turn.requestedAt = performance.now();
     turn.done = this.peer.request('session/prompt', { sessionId: turn.sessionId, prompt: user.content }, null).then(
       ({ result }) => {
         const reason = STOP.get(result?.stopReason);
@@ -552,7 +630,10 @@ class AntigravityAdapter {
     this.#cancelPermissions();
     this.#endBlock(turn);
     for (const tool of turn.tools.values()) if (!tool.message) this.#toolEnd(tool, true, stopReason === 'aborted' ? 'Interrupted.' : 'Antigravity did not report tool completion.');
-    let message = { ...this.#assistant(turn, turn.content), stopReason, ...(errorMessage ? { errorMessage } : {}) };
+    // ACP does not expose individual model request timestamps or token counts.
+    // Keep elapsed turn time separate from the provider metering used by Pi.
+    const __agyTurn = { durationMs: Math.max(1, Math.round(performance.now() - turn.requestedAt)), tokenEstimate: estimateOutput(turn.content) };
+    let message = { ...this.#assistant(turn, turn.content), __agyTurn, stopReason, ...(errorMessage ? { errorMessage } : {}) };
     const results = [...turn.tools.values()].map(t => t.message);
     try { this.transcript.append([message, ...results].map(message => ({ type: 'message', message }))); }
     catch { message = { ...message, stopReason: 'error', errorMessage: 'Could not save this turn to the Antigravity transcript.' }; }
@@ -598,6 +679,17 @@ class AntigravityAdapter {
         if (!Array.isArray(update.configOptions)) return;
         if (this.opening && (!this.opening.saved || this.opening.saved === params.sessionId)) this.opening.latest = { id: params.sessionId, options: update.configOptions, seq };
         else if (params.sessionId === this.sessionId) this.#replaceOptions(update.configOptions, seq);
+      }
+      if (update.sessionUpdate === 'available_commands_update' || update.sessionUpdate === 'usage_update') {
+        const patch = update.sessionUpdate === 'usage_update' ? { contextUsage: contextOf(update) }
+          : { commands: slashCommands(update.availableCommands) };
+        if (this.opening && (!this.opening.saved || this.opening.saved === params.sessionId) &&
+          (this.opening.metadata.has(params.sessionId) || this.opening.metadata.size < 8)) {
+          this.opening.metadata.set(params.sessionId, { ...this.opening.metadata.get(params.sessionId), ...patch });
+        } else if (params.sessionId === this.sessionId) {
+          Object.assign(this, patch);
+          this.#updateState();
+        }
       }
       // session/load replays history as session/update. The local Pi file is authoritative
       // for the UI, so only an active prompt can append/emit messages and tools.
@@ -650,7 +742,7 @@ class AntigravityAdapter {
     this.sessionId = null;
     this.#cancelPermissions();
     if (!this.closed) {
-      this.authRequired = false; this.canSignIn = false; this.options = [];
+      this.authRequired = false; this.canSignIn = false; this.options = []; this.commands = []; this.contextUsage = null;
       this.#updateState();
     }
   }
@@ -671,7 +763,12 @@ class AntigravityAdapter {
 
 let isMain = false;
 try { isMain = !!process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href; } catch { /* imported */ }
-if (isMain) {
+if (isMain && ['--account-check', '--account-login'].includes(process.argv[2])) {
+  try {
+    const result = await account({ bin: process.argv[3], cwd: process.cwd(), login: process.argv[2] === '--account-login', version: process.argv[4] });
+    output(process.stdout, { antigravityAccount: result });
+  } catch (error) { output(process.stdout, { antigravityAccountError: error.message }); }
+} else if (isMain) {
   let boot;
   try { boot = JSON.parse(process.env.PIDESK_BOOT ?? '{}'); } catch { boot = {}; }
   delete process.env.PIDESK_BOOT;
@@ -683,6 +780,7 @@ if (isMain) {
     process.stdin.destroy();
     adapter.close().then(() => process.stdout.end(), () => { process.exitCode = 1; process.stdout.end(); });
   };
+  if (adapter.standby) setTimeout(() => { if (adapter.standby) shutdown(); }, STANDBY_MS).unref();
   readLines(process.stdin, line => {
     try { void adapter.handle(JSON.parse(line)); } catch { /* malformed parent input */ }
   }, shutdown);

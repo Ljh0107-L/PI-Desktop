@@ -36,12 +36,14 @@ ChatGPT subscription sign-in is no longer included. Existing subscription conver
 
 ## Antigravity CLI
 
-Install Google's [official Antigravity CLI](https://antigravity.google/docs/getting-started?tab=cli) on the machine that runs the conversation and check that `agy acp --help` works. In a new conversation, select **Local** or an added **SSH host**, then **Antigravity CLI → Open Antigravity**.
+Open **Settings → Antigravity**, select this Mac or an added SSH host, and choose **Install CLI** if needed. Pi Desktop runs Google's [official installer](https://antigravity.google/docs/getting-started?tab=cli) on the selected machine without opening a browser. Then choose **Antigravity CLI** as the engine of a new conversation and send a message.
 
-- **Local:** Select **Sign in with Google** if prompted, or use your existing CLI login.
-- **SSH:** In the host terminal, run `agy acp --login` as the SSH user, complete Google's verification, then select **Reconnect**. The host needs direct access to Antigravity. Pi Desktop does not forward your Mac's login, API keys, or model proxy to the CLI.
+- **Local:** Reuse the CLI's existing login or choose **Sign in with Google** in Settings. Google may open a browser for OAuth.
+- **SSH:** Choose **Sign in using Terminal** in Settings. Pi Desktop runs `agy acp --login` on that host; follow Google's verification instructions in the embedded terminal. The remote user needs direct access to Antigravity. Pi Desktop does not forward your Mac's credentials, API keys or model proxy. SSH conversations use a lightweight bridge and do not need a Pi package on the host.
+- **Quota:** Choose **View quota in Terminal** in Settings, then type or paste `/usage` in the embedded Antigravity CLI. **Copy /usage** copies the command without running it.
+- **Tool permissions:** Antigravity defaults to its native bypass mode, which lets tools execute with the selected account's access without asking first. Disable **Bypass tool permissions** in Settings to review requests. A change takes effect before the next message without interrupting the current turn.
 
-The [official ACP server](https://antigravity.google/docs/ide/extensions/acp/) owns the session, model/effort options, permissions, and quota. Pi Desktop can reopen the same Antigravity conversation; a running SSH session keeps working during a disconnect. The [Google account's plan](https://antigravity.google/docs/plans/) and the ACP client determine which models are offered; Google's third-party models aren't available to all ACP clients. Text, streamed replies and tool updates, permission prompts, and Stop work on both environments. Attachments, Pi Ultra, Pi Compact, and Rewind/history editing/forking are not supported for this engine.
+On the new conversation screen, the composer links to Settings if the selected machine needs installation or sign-in. Your draft stays in place and is never sent automatically after signing in. Pi Desktop starts `agy acp` in the background and opens a CLI session only when you start the conversation. Unused standby processes are discarded. The [official ACP server](https://antigravity.google/docs/ide/extensions/acp/) determines the available models, reasoning options, slash commands and image support. Text and file attachments, streamed replies and tool updates, Stop, and reopening the same conversation work on both environments. A running SSH session keeps working during a disconnect. The inspector shows context only when ACP reports it, and estimated turn TPS includes tool time; it isn't model decode speed or a billed token count. Pi Ultra, Pi Compact, and Rewind/history editing/forking are specific to Pi and are not offered in Antigravity conversations.
 
 ## How it works
 

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createComposerSizer } from '../app/renderer/src/composer-size.js';
+import { antigravityPromptFits } from '../app/renderer/src/antigravity-prompt.js';
 import test from 'node:test';
 import {
   createComposerDraft, draftReadToken, updateComposerDraft,
@@ -22,6 +23,22 @@ test('composer sizing never collapses the focused editor to measure it', () => {
   assert.equal(editor.style.height, '32px');
   assert.ok(!writes.includes('auto'));
   sizing.destroy(); assert.ok(removed);
+});
+
+test('Antigravity checks combined encoded image size before sending', () => {
+  const image = { kind: 'image', mimeType: 'image/png', data: 'AAAA'.repeat(1024 * 1024) }; // 3 MiB raw
+  const file = { kind: 'file', data: image.data }; // uploaded separately
+  assert.equal(antigravityPromptFits('Check this', [file, image]), true);
+  assert.equal(antigravityPromptFits('Check these', [image, image]), false);
+});
+
+test('Antigravity counts UTF-8 text, JSON escapes and image metadata in the message budget', () => {
+  const text = '🌱 中文\n"quote"';
+  const mimeType = 'image/png';
+  const overhead = Buffer.byteLength(JSON.stringify([{ type: 'text', text }, { type: 'image', mimeType, data: '' }]));
+  const data = 'A'.repeat(6 * 1024 * 1024 - overhead);
+  assert.equal(antigravityPromptFits(text, [{ kind: 'image', mimeType, data }]), true);
+  assert.equal(antigravityPromptFits(text + '界', [{ kind: 'image', mimeType, data }]), false);
 });
 
 const image = { kind: 'image', key: 'old', data: 'old image' };

@@ -14,7 +14,11 @@ window.pidesk.subscribe(({ channel, payload }) => {
   if (channel === 'term-data') byTermId.get(payload.id)?.term.write(payload.data);
   if (channel === 'term-exit') {
     const entry = byTermId.get(payload.id);
-    if (entry) { entry.exited = true; entry.term.write('\r\n\x1b[2m[process exited — press Enter to restart]\x1b[0m\r\n'); }
+    if (entry) {
+      entry.exited = true;
+      if (entry.onExit) entry.onExit(payload.exitCode);
+      else entry.term.write('\r\n\x1b[2m[process exited — press Enter to restart]\x1b[0m\r\n');
+    }
   }
 });
 
@@ -24,15 +28,20 @@ async function start(sessionId, entry) {
   byTermId.set(entry.termId, entry);
 }
 
-function terminalFor(sessionId) {
-  let entry = terms.get(sessionId);
-  if (entry) return entry;
+function makeTerminal() {
   const term = new Terminal({
     fontFamily: 'SF Mono, ui-monospace, Menlo, monospace', fontSize: 12.5, lineHeight: 1.25, cursorBlink: true, allowProposedApi: true,
     theme: { background: '#161616', foreground: '#e6e4df', cursor: '#e8714e', selectionBackground: 'rgba(232,113,78,.3)', black: '#1e1e1e', brightBlack: '#6b6b6b' },
   });
   const fit = new FitAddon();
   term.loadAddon(fit);
+  return { term, fit };
+}
+
+function terminalFor(sessionId) {
+  let entry = terms.get(sessionId);
+  if (entry) return entry;
+  const { term, fit } = makeTerminal();
   const el = document.createElement('div');
   el.className = 'terminal-host';
   entry = { term, fit, el, termId: null, exited: false, opened: false };
@@ -51,6 +60,41 @@ export function closeTerminal(sessionId) {
   if (entry.termId) api('termClose', entry.termId);
   entry.term.dispose();
   terms.delete(sessionId);
+}
+
+// Short-lived CLI process inside Settings. Keep Google device codes and quota
+// output in the terminal only, not in the session transcript or notifications.
+export function AntigravityTerminal({ environmentId, action, onExit }) {
+  const host = useRef(null);
+  const [error, setError] = useState(null);
+  useEffect(() => {
+    let disposed = false, id;
+    const { term, fit } = makeTerminal();
+    term.open(host.current);
+    const refit = () => { try { fit.fit(); } catch { /* hidden */ } };
+    refit();
+    term.focus();
+    term.onData(data => { if (id) api('termWrite', id, data).catch(() => {}); });
+    term.onResize(({ cols, rows }) => { if (id) api('termResize', id, cols, rows).catch(() => {}); });
+    const observer = new ResizeObserver(refit);
+    observer.observe(host.current);
+    api('termOpenAntigravity', environmentId, action, term.cols, term.rows).then(termId => {
+      if (disposed) { api('termClose', termId).catch(() => {}); return; }
+      id = termId;
+      byTermId.set(id, { term, onExit: code => {
+        term.write(`\r\n\x1b[2m[Antigravity exited${code ? ` with code ${code}` : ''}]\x1b[0m\r\n`);
+        onExit?.(code);
+      } });
+      return api('termReady', id);
+    }).catch(err => { if (!disposed) setError(err.message.replace(/^Error invoking remote method '[^']+': (Error: )?/, '')); });
+    return () => {
+      disposed = true;
+      observer.disconnect();
+      if (id) { byTermId.delete(id); api('termClose', id).catch(() => {}); }
+      term.dispose();
+    };
+  }, [environmentId, action, onExit]);
+  return <>{error && <p className="agy-settings-error" role="alert">{error}</p>}<div className="agy-settings-terminal" ref={host} /></>;
 }
 
 export function TerminalPanel({ session }) {

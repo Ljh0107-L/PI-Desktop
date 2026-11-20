@@ -18,7 +18,7 @@ import { SPEEDS, speedOptions } from '../../agent/pidesk-speed.mjs';
 import { readHistory } from '../../agent/pidesk-history.mjs';
 import { historyEvent } from '../../core/history-view.mjs';
 import { CLAUDE_CODE_VERSION, CLAUDE_EFFORTS, clampClaudeEffort, claudeBuiltinBaseUrl, claudeEffort, ensureLocalClaude, isClaudeCodeModel, prepareRemoteClaude, resolveClaudeEffort } from './claude-code.mjs';
-import { ANTIGRAVITY_ENGINE, ANTIGRAVITY_REMOTE_LOGIN, antigravityBoot, antigravityInstallMessage, findAntigravityCli, findRemoteAntigravityCli } from './antigravity.mjs';
+import { ANTIGRAVITY_ENGINE, ANTIGRAVITY_REMOTE_LOGIN, antigravityAccount, antigravityBoot, antigravityInstallMessage, findAntigravityCli, findRemoteAntigravityCli, installAntigravityCli } from './antigravity.mjs';
 
 const PI_THINKING_LEVELS = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
 function clampPiThinkingLevel(model, level) {
@@ -115,6 +115,11 @@ export class SessionManager extends EventEmitter {
   runtimes = new Map();   // session id -> { session, status, streaming, questions: Map, starting, lastSeq }
   prepared = new Map();   // environment id -> Promise<remote facts>
   preparing = new Map();  // in-flight setup; force/provider changes must not race deployments
+  antigravityPrepared = new Map();
+  antigravityBins = new Map();
+  antigravityInstalls = new Map();
+  antigravityAccounts = new Map();
+  #antigravityCreations = new WeakMap(); // correlate foreground startup with the new-session placeholder
   stopping = new Map();   // do not reattach while a hard stop of this session is pending
   updateRestartFailed = new Set(); // don't silently reattach to a process the update couldn't replace
   catalogCache = null;
@@ -171,13 +176,18 @@ export class SessionManager extends EventEmitter {
   #localRelay(args) {
     return new Promise((resolve, reject) => execFile(this.local.node, [this.relayPath, ...args], { env: { ...process.env, ...this.local.extraEnv, PIDESK_RUN_DIR: this.local.runDir }, timeout: 15000 }, (error, stdout) => error ? reject(error) : resolve(stdout)));
   }
-  async relaySessions(env) {
+  async relaySessions(env, engine) {
     if (env.kind === 'local') return JSON.parse((await this.#localRelay(['list'])).trim().split('\n').pop()).sessions ?? [];
-    return listRelaySessions(env, await this.prepare(env.id));
+    if (engine === undefined) {
+      const records = this.store.sessions.filter(s => s.environmentId === env.id && !s.archived);
+      if (records.length && records.every(isAntigravity)) engine = ANTIGRAVITY_ENGINE;
+    }
+    return listRelaySessions(env, await this.prepare(env.id, { engine }));
   }
   async stopRelay(env, id, options) {
     if (env.kind === 'local') return this.#localRelay([stopRelayCommand(options), id]);
-    return stopRelaySession(env, await this.prepare(env.id), id, options);
+    const engine = this.#recordOf(id)?.engine ?? options?.engine;
+    return stopRelaySession(env, await this.prepare(env.id, { engine }), id, options);
   }
 
   // ---------------------------------------------------------------- providers and models
@@ -203,7 +213,7 @@ export class SessionManager extends EventEmitter {
     this.invalidateCatalog();
     this.prepared.clear();
     if (this.egress) this.providerHosts().then(hosts => this.egress?.allow(hosts)).catch(() => {});
-    for (const key of [...this.spares.keys()]) this.#dropSpare(key);
+    for (const [key, spare] of this.spares) if (!isAntigravity(spare.record)) this.#dropSpare(key);
     for (const [id, runtime] of this.runtimes) {
       if (runtime.status !== 'connected') continue;
       // A Claude Code conversation gets its endpoint and key again (a new key restarts Claude Code, resumed).
@@ -423,9 +433,10 @@ export class SessionManager extends EventEmitter {
   }
 
   // ---------------------------------------------------------------- environments
-  prepare(envId, { force = false } = {}) {
+  prepare(envId, { force = false, engine } = {}) {
     const env = this.env(envId);
     if (env.kind === 'local') return Promise.resolve({ ready: true });
+    if (engine === ANTIGRAVITY_ENGINE) return this.#prepareAntigravityRemote(env, force);
     // All callers, including forced refreshes, share one deployment. Its loop refreshes
     // reachability after provider edits before *any* waiter can use stale setup facts.
     const active = this.preparing.get(envId);
@@ -465,6 +476,34 @@ export class SessionManager extends EventEmitter {
     return promise;
   }
 
+  #prepareAntigravityRemote(env, force) {
+    const cached = this.antigravityPrepared.get(env.id);
+    if (cached && (!force || !cached.ready)) return cached.promise;
+    const saved = this.store.settings.environments[env.id] ?? {};
+    const progress = (status, fields) => this.emit('environment', { id: env.id, engine: ANTIGRAVITY_ENGINE, status, ...fields });
+    const entry = { ready: false, promise: null };
+    entry.promise = this.remoteSetup(env, {
+      engine: ANTIGRAVITY_ENGINE, root: saved.root, cacheDir: this.cacheDir, bridgePath: this.bridgePath, relayPath: this.relayPath,
+      onProgress: message => progress('preparing', { message }),
+    }).then(facts => {
+      const current = this.store.settings.environments[env.id];
+      if (current?.added && !current.root) {
+        this.store.settings.environments[env.id] = { ...current, root: facts.root };
+        this.store.saveSettings();
+        this.emit('environments-changed');
+      }
+      entry.ready = true;
+      progress('ready', { facts });
+      return facts;
+    }).catch(error => {
+      this.antigravityPrepared.delete(env.id);
+      progress('error', { message: error.message });
+      throw error;
+    });
+    this.antigravityPrepared.set(env.id, entry);
+    return entry.promise;
+  }
+
   async #egressFor(hosts, { required = false } = {}) {
     if (!hosts.length && !required) return null;
     if (!this.egress) {
@@ -489,6 +528,72 @@ export class SessionManager extends EventEmitter {
     const env = this.env(environmentId);
     return { installed: !!await this.#findAntigravity(env) };
   }
+
+  antigravityInstall(environmentId) {
+    const env = this.env(environmentId);
+    if (this.antigravityInstalls.has(env.id)) return this.antigravityInstalls.get(env.id);
+    const install = (async () => {
+      this.antigravityBins.delete(env.id);
+      if (!await this.#findAntigravity(env)) await installAntigravityCli(env);
+      this.antigravityBins.delete(env.id);
+      if (!await this.#findAntigravity(env)) throw new Error(antigravityInstallMessage(env));
+      return { installed: true };
+    })().finally(() => this.antigravityInstalls.delete(env.id));
+    this.antigravityInstalls.set(env.id, install);
+    return install;
+  }
+
+  async antigravityReadiness(environmentId) {
+    const env = this.env(environmentId);
+    try { if (!await this.#findAntigravity(env)) return 'missing'; }
+    catch { return env.kind === 'ssh' ? 'unreachable' : 'unknown'; }
+    try {
+      const { installed, signedIn } = await this.#readAntigravityAccount(env);
+      return !installed ? 'missing' : signedIn === true ? 'ready' : signedIn === false ? 'signedOut' : 'unknown';
+    } catch { return 'unknown'; } // A CLI without account reporting can still start a conversation.
+  }
+
+  async antigravityAccount(environmentId, { login = false } = {}) {
+    const env = this.env(environmentId);
+    const result = await this.#readAntigravityAccount(env, login);
+    if (result.signedIn) {
+      // Only an explicit account action should invalidate standby/reconnect an open chat.
+      for (const [key, spare] of this.spares) {
+        if (isAntigravity(spare.record) && spare.record.environmentId === env.id) this.#dropSpare(key);
+      }
+      const record = this.#recordOf(this.focused);
+      const runtime = this.runtimes.get(this.focused);
+      if (isAntigravity(record) && record.environmentId === env.id && runtime?.antigravity?.authRequired) this.reconnect(record.id).catch(() => {});
+    }
+    return result;
+  }
+
+  async #readAntigravityAccount(env, login = false) {
+    if (login && env.kind !== 'local') throw new Error(ANTIGRAVITY_REMOTE_LOGIN);
+    const active = this.antigravityAccounts.get(env.id);
+    if (active) {
+      if (!login || active.login) return active.promise;
+      await active.promise.catch(() => {});
+      return this.#readAntigravityAccount(env, login);
+    }
+    const promise = (async () => {
+      const bin = await this.#findAntigravity(env);
+      if (!bin) return { installed: false };
+      const facts = env.kind === 'ssh' ? await this.prepare(env.id, { engine: ANTIGRAVITY_ENGINE }) : null;
+      return antigravityAccount(env, { bin, local: this.local, facts, login });
+    })().finally(() => this.antigravityAccounts.delete(env.id));
+    this.antigravityAccounts.set(env.id, { login, promise });
+    return promise;
+  }
+
+  async antigravityTerminal(environmentId, action) {
+    if (!['login', 'usage'].includes(action)) throw new Error('Unknown Antigravity terminal action.');
+    const env = this.env(environmentId);
+    return { env, bin: await this.#antigravityBinary(env), args: action === 'login' ? ['acp', '--login'] : [] };
+  }
+
+  antigravityPermissionMode() { return this.store.settings.defaults?.antigravityBypassPermissions === false ? 'confirm' : 'bypassPermissions'; }
+
   async antigravityLogin(id) {
     if (isAntigravity(this.record(id)) && this.env(this.record(id).environmentId).kind !== 'local') throw new Error(ANTIGRAVITY_REMOTE_LOGIN);
     return this.#antigravityAction(id, 'antigravity_login', {}, 240000);
@@ -498,9 +603,8 @@ export class SessionManager extends EventEmitter {
   async reconnect(id) {
     const record = this.record(id);
     const runtime = this.runtimes.get(id);
-    if (isAntigravity(record) && runtime?.session && runtime.antigravity?.authRequired) {
-      // The user may have signed in through the official CLI in a terminal. A fresh
-      // ACP process reads the credential cache; reattaching would keep stale auth state.
+    if (isAntigravity(record) && runtime?.session && (runtime.antigravity?.authRequired || runtime.antigravity?.permissionMode !== this.antigravityPermissionMode())) {
+      // A fresh ACP process reads updated credentials and the chosen permission mode.
       if (runtime.antigravityRequest || runtime.streaming) throw new Error('Wait for the current Antigravity operation to finish.');
       await this.#hardStop(record, runtime, runtime.session);
     } else await this.close(id);
@@ -526,7 +630,19 @@ export class SessionManager extends EventEmitter {
   }
 
   #findAntigravity(env) {
-    return env.kind === 'local' ? this.antigravityCli() : this.antigravityRemoteCli(env);
+    if (env.kind === 'local') return this.antigravityCli();
+    const cached = this.antigravityBins.get(env.id);
+    if (cached?.expires > Date.now()) return cached.promise;
+    const entry = { expires: Infinity, promise: null };
+    entry.promise = Promise.resolve().then(() => this.antigravityRemoteCli(env)).then(bin => {
+      entry.expires = Date.now() + (bin ? 60000 : 3000);
+      return bin;
+    }, error => {
+      if (this.antigravityBins.get(env.id) === entry) this.antigravityBins.delete(env.id);
+      throw error;
+    });
+    this.antigravityBins.set(env.id, entry);
+    return entry.promise;
   }
   async #antigravityBinary(env) {
     const bin = await this.#findAntigravity(env);
@@ -540,7 +656,9 @@ export class SessionManager extends EventEmitter {
   #view(record) {
     const runtime = this.runtimes.get(record.id);
     const engine = ['cursor', CLAUDE_ENGINE, ANTIGRAVITY_ENGINE].includes(record.engine) ? record.engine : 'pi';
-    return { ...record, engine, ...(isAntigravity(record) ? { antigravity: runtime?.antigravity } : {}), status: runtime?.status ?? 'idle', phase: runtime?.phase ?? null, streaming: !!runtime?.streaming, compacting: isCompacting(runtime), pendingQuestions: runtime ? [...runtime.questions.values()] : [] };
+    return { ...record, engine, ...(isAntigravity(record) ? { antigravity: runtime?.antigravity,
+      ...(runtime?.status === 'error' && runtime.error ? { statusMessage: runtime.error } : {}) } : {}),
+      status: runtime?.status ?? 'idle', phase: runtime?.phase ?? null, streaming: !!runtime?.streaming, compacting: isCompacting(runtime), pendingQuestions: runtime ? [...runtime.questions.values()] : [] };
   }
   record(id) {
     const record = this.store.sessions.find(s => s.id === id);
@@ -585,32 +703,45 @@ export class SessionManager extends EventEmitter {
   // While the user is on the new-session screen, start a Pi in advance where the next conversation will
   // run; the first message then adopts it instead of waiting for SSH + Pi start-up. With No folder the
   // spare runs in the root and moves into the conversation's own directory when the first message names it.
-  spares = new Map(); // `${environmentId}\n${cwd}` (or projectlessSpareKey) -> { id, record, timer }
+  spares = new Map(); // per engine/environment/workspace -> { id, record, timer }
+  warmSequence = 0;
+  #spareKey(environmentId, cwd, engine) {
+    const target = cwd ? `${environmentId}\n${cwd}` : projectlessSpareKey(environmentId);
+    return engine === ANTIGRAVITY_ENGINE ? `antigravity\n${target}` : target;
+  }
   async prewarm({ environmentId, cwd: chosen, model, thinkingLevel, speed, noFolder, engine }) {
-    if (engine === ANTIGRAVITY_ENGINE || !environmentId || isRetiredProvider(model?.provider)) return false;
+    const seq = ++this.warmSequence;
+    if (!environmentId) return false;
     const env = this.environments().find(e => e.id === environmentId);
     if (!env || (env.kind === 'ssh' && !env.enabled)) return false;
+    const antigravity = engine === ANTIGRAVITY_ENGINE;
+    if (!antigravity && isRetiredProvider(model?.provider)) return false;
     // Claude Code: install the binary there in advance (the first message would otherwise wait for it).
     if (engine === CLAUDE_ENGINE) { this.prepareClaude(environmentId).catch(() => {}); return true; }
+    const bin = antigravity ? await this.#findAntigravity(env) : null;
+    if (antigravity && (!bin || seq !== this.warmSequence)) return false;
     const cwd = chosen || await this.projectlessRoot(environmentId).catch(() => null);
-    if (!cwd) return false;
-    const key = chosen ? `${environmentId}\n${cwd}` : projectlessSpareKey(environmentId);
+    if (!cwd || seq !== this.warmSequence) return false;
+    const key = this.#spareKey(environmentId, chosen, engine);
     for (const [k] of this.spares) if (k !== key) this.#dropSpare(k);
     const existing = this.spares.get(key);
     if (existing) { this.#armSpare(key, existing); return true; }
-    const record = { id: randomUUID(), title: 'New session', environmentId, environmentLabel: env.label, cwd, noFolder: (!chosen || noFolder) || undefined, model, thinkingLevel: thinkingLevel ?? 'medium', ...speedField(speed), spare: true };
-    const spare = { id: record.id, record };
+    const options = antigravity ? { engine } : { model, thinkingLevel: thinkingLevel ?? 'medium', ...speedField(speed) };
+    const record = { id: randomUUID(), title: 'New session', environmentId, environmentLabel: env.label, cwd, noFolder: (!chosen || noFolder) || undefined, ...options, spare: true };
+    const spare = { id: record.id, record, bin };
     this.spares.set(key, spare);
     this.#armSpare(key, spare);
-    this.ensureStarted(record.id, record).catch(() => {
+    this.ensureStarted(record.id, record, bin).catch(() => {
       // A cancelled start may finish after another spare has taken the same key.
       if (this.spares.get(key) === spare) this.#dropSpare(key);
     });
     return true;
   }
   #armSpare(key, spare) {
+    const antigravity = isAntigravity(spare.record);
+    if (antigravity && spare.timer) return; // the adapter also has a fixed lifetime while in standby
     clearTimeout(spare.timer);
-    spare.timer = setTimeout(() => this.#dropSpare(key), 10 * 60 * 1000);
+    spare.timer = setTimeout(() => this.#dropSpare(key), antigravity ? 90000 : 10 * 60 * 1000);
     spare.timer.unref?.();
   }
   #dropSpare(key) {
@@ -621,10 +752,10 @@ export class SessionManager extends EventEmitter {
   }
   async #stopSpare(spare) {
     clearTimeout(spare.timer);
-    // Wait for any in-flight attach to finish before stopping the relay's Pi.
+    // Wait for any in-flight attach to finish before stopping the relay process.
     await this.close(spare.id);
     const env = this.environments().find(e => e.id === spare.record.environmentId);
-    if (env) await this.stopRelay(env, spare.id).catch(() => {});
+    if (env) await this.stopRelay(env, spare.id, { engine: spare.record.engine }).catch(() => {});
   }
   // ---------------------------------------------------------------- No folder
   // The shared root of No-folder conversations: ~/Pi on this Mac, ~/pi on a host.
@@ -680,8 +811,9 @@ export class SessionManager extends EventEmitter {
     if (result?.cancelled) throw new Error('Moving the pre-warmed Pi was cancelled.');
   }
 
-  async create({ environmentId, cwd: chosen, model, thinkingLevel, speed, ultra, prompt, engine, effort, ultracode }) {
+  async create({ environmentId, cwd: chosen, model, thinkingLevel, speed, ultra, prompt, engine, effort, ultracode, creationId }) {
     const antigravity = engine === ANTIGRAVITY_ENGINE;
+    creationId = antigravity && typeof creationId === 'string' && /^pending:\d{1,15}$/.test(creationId) ? creationId : null;
     if (!antigravity && isRetiredProvider(model?.provider)) throw new Error(RETIRED_PROVIDER_MESSAGE);
     const claude = engine === CLAUDE_ENGINE;
     let claudeModel = null;
@@ -697,13 +829,18 @@ export class SessionManager extends EventEmitter {
       title: 'New session', environmentId, environmentLabel: env.label, cwd, noFolder: noFolder || undefined,
       project: noFolder ? 'No folder' : env.kind === 'local' ? basename(cwd) : remoteBase(cwd),
     };
-    const spareKey = noFolder ? projectlessSpareKey(environmentId) : `${environmentId}\n${cwd}`;
-    const spare = claude || antigravity ? null : this.spares.get(spareKey); // spares are Pi processes
+    const spareKey = this.#spareKey(environmentId, chosen, engine);
+    const spare = claude ? null : this.spares.get(spareKey);
     if (spare) {
       this.spares.delete(spareKey);
       clearTimeout(spare.timer);
-      try { return await this.#adopt(spare.record, fields, { model, thinkingLevel, speed, ultra }); }
-      catch { await this.#stopSpare(spare); } // the warm Pi failed or could not move: start a fresh one below
+      if (antigravity) {
+        const adopted = await this.#adoptAntigravity(spare, fields, antigravityBin, creationId);
+        if (adopted) return adopted;
+      } else {
+        try { return await this.#adopt(spare.record, fields, { model, thinkingLevel, speed, ultra }); }
+        catch { await this.#stopSpare(spare); } // the warm Pi failed or could not move: start a fresh one below
+      }
     }
     const clampedEffort = claude && effort ? clampClaudeEffort(claudeModel, effort) : null;
     const piModel = !claude && !antigravity ? await this.#modelInfo(model) : null;
@@ -715,7 +852,15 @@ export class SessionManager extends EventEmitter {
     const options = antigravity ? { engine: ANTIGRAVITY_ENGINE } : { model, thinkingLevel: effectiveThinking, ...speedField(speed), ...engineFields };
     const record = { id: randomUUID(), ...fields, ...options, createdAt: Date.now(), updatedAt: Date.now() };
     this.#add(record);
-    await this.ensureStarted(record.id, undefined, antigravityBin);
+    return this.#finishCreate(record, creationId, () => this.ensureStarted(record.id, undefined, antigravityBin));
+  }
+  async #finishCreate(record, creationId, start) {
+    if (creationId) this.#antigravityCreations.set(record, creationId);
+    try { await start(); }
+    catch (error) {
+      // The renderer can retry this saved conversation rather than create another one.
+      if (!creationId || this.#recordOf(record.id) !== record || this.runtimes.get(record.id)?.status !== 'error') throw error;
+    } finally { this.#antigravityCreations.delete(record); }
     return this.#view(record);
   }
   #add(record) {
@@ -724,6 +869,34 @@ export class SessionManager extends EventEmitter {
     this.store.saveSessions();
     this.emit('sessions');
   }
+  async #adoptAntigravity(spare, fields, bin, creationId) {
+    // Use the already initialized CLI on the same relay connection. Before
+    // activation, a failed or stale spare is safe to discard without a binding.
+    const { id, record } = spare;
+    const runtime = this.runtimes.get(id);
+    const session = bin !== spare.bin ? null : runtime?.status === 'connected' ? runtime.session
+      : await runtime?.starting?.catch(() => null);
+    if (!session || !this.#current(record, runtime) || runtime.session !== session || runtime.status !== 'connected' ||
+      !runtime.antigravity?.standby || runtime.antigravity.permissionMode !== this.antigravityPermissionMode()) {
+      await this.#stopSpare(spare);
+      return null;
+    }
+    Object.assign(record, fields, { createdAt: Date.now(), updatedAt: Date.now() });
+    delete record.spare;
+    // Persist the ID before dispatching session/new. If activation is interrupted,
+    // reconnect the same record instead of creating a replacement CLI conversation.
+    try { this.#add(record); }
+    catch (error) { await this.#stopSpare(spare); throw error; }
+    return this.#finishCreate(record, creationId, () => this.#startRuntime(record, runtime, async () => {
+      try { return this.#configureAntigravity(record, runtime, session, await this.#activateAntigravity(record, session)); }
+      catch (error) {
+        await session.stop().catch(() => {});
+        if (runtime.session === session) runtime.session = null;
+        throw error;
+      }
+    }, 'opening'));
+  }
+
   // Take over a pre-warmed Pi. No folder: it runs in the root, so it first moves into the conversation's
   // directory; that starts a fresh session there, so the model and effort are compared against Pi's state.
   async #adopt(spareRecord, fields, { model, thinkingLevel, speed, ultra }) {
@@ -756,7 +929,10 @@ export class SessionManager extends EventEmitter {
     if (Object.hasOwn(patch, 'phase')) runtime.phase = patch.phase;
     // Pre-warming is an implementation detail, not a visible conversation. In particular,
     // changing folders deliberately stops its connection and must not show an error toast.
-    if (!record.spare && this.#current(record, runtime)) this.emit('status', { id: record.id, ...patch });
+    if (!record.spare && this.#current(record, runtime)) {
+      const creationId = this.#antigravityCreations.get(record);
+      this.emit('status', { id: record.id, ...patch, ...(creationId ? { creationId } : {}) });
+    }
   }
 
   // Connect (or reconnect) a session. SSH sessions live in the host's relay, so a dropped connection is
@@ -775,11 +951,17 @@ export class SessionManager extends EventEmitter {
       runtime = { session: null, status: 'idle', streaming: false, questions: new Map(), starting: null, lastSeq: null, retry: 0, retryTimer: null, closing: false, autoReconnect: false };
       this.runtimes.set(id, runtime);
     }
+    return this.#startRuntime(record, runtime, () => this.#start(record, runtime, antigravityBin));
+  }
+
+  #startRuntime(record, runtime, start, phase = 'connecting') {
     clearTimeout(runtime.retryTimer);
     runtime.closing = false;
     runtime.status = runtime.autoReconnect ? 'reconnecting' : 'connecting';
-    this.#status(record, runtime, { status: runtime.status, phase: 'connecting' });
-    runtime.starting = this.#start(record, runtime, antigravityBin).then(session => {
+    runtime.starting = Promise.resolve().then(() => {
+      this.#assertCurrent(record, runtime);
+      return start();
+    }).then(session => {
       this.#assertCurrent(record, runtime);
       runtime.status = 'connected'; runtime.starting = null; runtime.retry = 0; runtime.lastUsed = Date.now();
       this.#status(record, runtime, { status: 'connected', phase: null, streaming: runtime.streaming, compacting: isCompacting(runtime) });
@@ -795,6 +977,7 @@ export class SessionManager extends EventEmitter {
       else { runtime.status = 'error'; runtime.error = error.message; this.#status(record, runtime, { status: 'error', phase: null, message: error.message }); }
       throw error;
     });
+    this.#status(record, runtime, { status: runtime.status, phase });
     return runtime.starting;
   }
 
@@ -814,6 +997,7 @@ export class SessionManager extends EventEmitter {
     const claude = isClaude(record), antigravity = isAntigravity(record);
     runtime.engine = antigravity ? ANTIGRAVITY_ENGINE : claude ? CLAUDE_ENGINE : 'pi';
     const agy = antigravity ? antigravityBin ?? await this.#antigravityBinary(env) : null;
+    const bypass = antigravity && this.antigravityPermissionMode() === 'bypassPermissions';
     this.#assertCurrent(record, runtime);
     // Claude Code: its endpoint and key first (a clear error before any setup), then its binary there.
     const claudeConfig = claude ? await this.claudeConfig(record) : null;
@@ -825,7 +1009,7 @@ export class SessionManager extends EventEmitter {
       mkdirSync(this.local.agentDir, { recursive: true });
       let spawn;
       if (antigravity) {
-        boot = antigravityBoot(agy, record, join(this.local.agentDir, 'sessions'));
+        boot = antigravityBoot(agy, record, join(this.local.agentDir, 'sessions'), false, bypass);
         const adapter = fileURLToPath(new URL('../../agent/pidesk-antigravity.mjs', import.meta.url));
         spawn = { cwd: record.cwd, env: { ...this.local.extraEnv }, argv: [this.local.node, adapter] };
       } else if (claude) {
@@ -837,8 +1021,8 @@ export class SessionManager extends EventEmitter {
       const transport = localRelayTransport({ node: this.local.node, relayPath: this.relayPath, runDir: this.local.runDir, extraEnv: this.local.extraEnv });
       session = new PiSession({ id: record.id, boot, transport, relay: { sinceSeq: runtime.lastSeq, spawn } });
     } else {
-      this.#status(record, runtime, { status: runtime.status, phase: 'preparing' });
-      const facts = await this.prepare(env.id);
+      this.#status(record, runtime, { status: runtime.status, phase: 'preparing', ...(antigravity ? { message: 'Preparing the Antigravity SSH bridge…' } : {}) });
+      const facts = await this.prepare(env.id, { engine: record.engine });
       const layout = claude ? await this.prepareClaude(env.id, claudeProgress) : null;
       // A running relay Pi retains its proxy environment. Even if a fresh probe now says the
       // endpoint is reachable, reconnect the old fixed forward rather than strand that Pi.
@@ -851,8 +1035,8 @@ export class SessionManager extends EventEmitter {
       let spawn;
       if (antigravity) {
         // Only remote paths and the conversation identity cross SSH; agy uses the host's own login.
-        boot = antigravityBoot(agy, record, `${facts.agentDir}/sessions`, true);
-        spawn = { cwd: record.cwd, env: { TMPDIR: facts.tmpDir }, argv: [facts.node, `${facts.root}/ext/pidesk-antigravity.mjs`] };
+        boot = antigravityBoot(agy, record, `${facts.agentDir}/sessions`, true, bypass);
+        spawn = { cwd: record.cwd, env: { TMPDIR: facts.tmpDir }, argv: [facts.node, facts.adapter ?? `${facts.root}/ext/pidesk-antigravity.mjs`] };
       } else if (claude) {
         boot = { claudeCode: { ...claudeConfig, bin: layout.bin, configDir: layout.configDir, sessionsDir: `${facts.agentDir}/sessions`, sessionFile: record.piSessionFile ?? null, cwd: record.cwd, env: this.claudeEnv } };
         spawn = { cwd: record.cwd, env: { TMPDIR: facts.tmpDir, ...(egress ? egressEnv(egress.remotePort) : {}) }, argv: [facts.node, `${facts.root}/ext/pidesk-claude.mjs`] };
@@ -906,16 +1090,13 @@ export class SessionManager extends EventEmitter {
       this.#status(record, runtime, { status: runtime.status, phase: 'connecting' });
       await session.start({ readyTimeout: 90000 });
       this.#assertCurrent(record, runtime);
-      this.#status(record, runtime, { status: runtime.status, phase: 'configuring' });
       if (antigravity) {
-        const state = session.initialState;
-        runtime.lastSeq = session.lastSeq;
-        runtime.autoReconnect = true;
-        runtime.streaming = !!state.isStreaming;
-        runtime.antigravity = state.antigravity;
-        this.#save(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId });
-        return session;
+        const state = !record.spare && session.initialState.antigravity?.standby
+          ? await this.#activateAntigravity(record, session) // Desktop relaunched during handoff
+          : session.initialState;
+        return this.#configureAntigravity(record, runtime, session, state);
       }
+      this.#status(record, runtime, { status: runtime.status, phase: 'configuring' });
       if (claude) return await this.#configureClaude(record, runtime, session);
       return await this.#configureSession(record, runtime, session, bootVersion, JSON.stringify(boot.config));
     } catch (error) {
@@ -928,10 +1109,27 @@ export class SessionManager extends EventEmitter {
         const alive = await this.relaySessions(env).then(list => list.some(s => s.id === record.id && s.alive), () => true);
         if (!alive) { delete record.egressPort; this.#save(record, {}); }
       }
-      // Re-check the Claude Code install next time (it may have been removed from the machine).
+      // Re-check the CLI next time (it may have been removed from the machine).
       if (claude) this.claudeInstalls.delete(env.id);
+      if (antigravity) this.antigravityBins.delete(env.id);
       throw error;
     }
+  }
+
+  #activateAntigravity(record, session) {
+    return session.request('antigravity_activate', { cwd: record.cwd }, { timeout: 30000 });
+  }
+
+  #configureAntigravity(record, runtime, session, state) {
+    this.#assertCurrent(record, runtime);
+    if (!state.antigravity || !!state.antigravity.standby !== !!record.spare) throw new Error('Unexpected Antigravity startup state.');
+    session.initialState = state;
+    runtime.lastSeq = session.lastSeq;
+    runtime.autoReconnect = !record.spare;
+    runtime.streaming = !!state.isStreaming;
+    runtime.antigravity = state.antigravity;
+    if (!record.spare) this.#save(record, { piSessionFile: state.sessionFile, piSessionId: state.sessionId });
+    return session;
   }
 
   async #configureClaude(record, runtime, session) {
@@ -997,8 +1195,6 @@ export class SessionManager extends EventEmitter {
 
   // After the app starts, re-attach to sessions that kept running in a relay (this machine's or a host's).
   async resumeRemote({ skip = new Set() } = {}) {
-    // Set up every added host in the background now, so the first message there doesn't pay for it.
-    for (const env of this.environments().filter(e => e.kind === 'ssh' && e.added && e.enabled)) this.prepare(env.id).catch(() => {});
     const byEnv = new Map();
     for (const record of this.store.sessions.filter(s => !s.archived && !skip.has(s.id))) {
       if (!byEnv.has(record.environmentId)) byEnv.set(record.environmentId, []);
@@ -1007,7 +1203,8 @@ export class SessionManager extends EventEmitter {
     await Promise.all([...byEnv].map(async ([envId, records]) => {
       try {
         const env = this.env(envId);
-        const alive = new Set((await this.relaySessions(env)).filter(s => s.alive).map(s => s.id));
+        const engine = records.every(isAntigravity) ? ANTIGRAVITY_ENGINE : undefined;
+        const alive = new Set((await this.relaySessions(env, engine)).filter(s => s.alive).map(s => s.id));
         // A Cursor CLI still running from an older version is stopped, not re-attached.
         await Promise.all(records.filter(r => alive.has(r.id)).map(r => (r.engine === 'cursor' ? this.stopRelay(env, r.id) : this.ensureStarted(r.id)).catch(() => {})));
       } catch { /* host unreachable: sessions stay idle until opened */ }
@@ -1033,6 +1230,10 @@ export class SessionManager extends EventEmitter {
         runtime.questions.delete(id);
         this.emit('question-resolved', { id: record.id, requestId: id });
       }
+      return;
+    }
+    if (isAntigravity(record) && event.type === 'antigravity_opening') {
+      if (runtime.status === 'connecting' && !record.spare && runtime.phase !== 'opening') this.#status(record, runtime, { status: runtime.status, phase: 'opening' });
       return;
     }
     if (isAntigravity(record) && event.type === 'antigravity_state') {
@@ -1142,17 +1343,34 @@ export class SessionManager extends EventEmitter {
   async prompt(id, text, attachments = [], { interrupt = false } = {}) {
     const record = this.record(id);
     if (isAntigravity(record)) {
-      if (attachments.length) throw new Error('Antigravity CLI conversations currently accept text only.');
-      const session = await this.ensureStarted(id);
-      const runtime = this.runtimes.get(id);
+      let session = await this.ensureStarted(id);
+      let runtime = this.runtimes.get(id);
       this.#assertCurrent(record, runtime);
       if (runtime.session !== session || this.stopping.has(id)) throw new Error('The Antigravity connection changed. No message was sent.');
       if (runtime.antigravity?.authRequired) throw new Error('Sign in with Google before sending a message to Antigravity.');
-      if (runtime?.antigravityRequest) throw new Error('Wait for the current Antigravity operation to finish.');
-      // Antigravity owns its session options and permissions. Never send Pi setup prompts or retry a turn here.
-      const sent = await session.prompt(text);
-      if (record.title === 'New session' && text.trim() && this.#current(record, runtime) && runtime.session === session) {
-        const title = titleFrom(text);
+      if (runtime.streaming || runtime.antigravityRequest) throw new Error('Wait for the current Antigravity operation to finish.');
+      // Existing SSH adapters keep their launch flags. Apply the new default on
+      // the next turn without replaying old prompts or interrupting active tools.
+      if ((runtime.antigravity?.permissionMode ?? 'confirm') !== this.antigravityPermissionMode()) {
+        await this.reconnect(id);
+        session = await this.ensureStarted(id);
+        runtime = this.runtimes.get(id);
+      }
+      this.#assertCurrent(record, runtime);
+      if (runtime.session !== session || runtime.antigravity?.authRequired ||
+        (runtime.antigravity?.permissionMode ?? 'confirm') !== this.antigravityPermissionMode()) throw new Error('Antigravity settings changed. No message was sent; try again.');
+      const images = attachments.filter(a => a.kind === 'image').map(a => ({ type: 'image', data: a.data, mimeType: a.mimeType }));
+      if (images.length && runtime.antigravity?.image !== true) throw new Error('This Antigravity CLI does not accept image prompts.');
+      const files = attachments.filter(a => a.kind === 'file');
+      const paths = files.length ? await this.#placeFiles(record, files) : [];
+      this.#assertCurrent(record, runtime);
+      if (runtime.session !== session || this.stopping.has(id) || runtime.streaming || runtime.antigravityRequest) throw new Error('Antigravity is busy. No message was sent.');
+      if (runtime.antigravity?.authRequired || (runtime.antigravity?.permissionMode ?? 'confirm') !== this.antigravityPermissionMode()) throw new Error('Antigravity settings changed. No message was sent; try again.');
+      const message = paths.length ? `${text}${text ? '\n\n' : ''}Attached files:\n${paths.map(path => `- ${path}`).join('\n')}` : text;
+      // Antigravity owns session options and permissions. No Pi setup prompts or automatic turn retry.
+      const sent = await session.prompt(message, images.length ? { images } : {});
+      if (record.title === 'New session' && (text.trim() || attachments.length) && this.#current(record, runtime) && runtime.session === session) {
+        const title = titleFrom(text || attachments[0]?.name || 'Attachment');
         this.#save(record, { title });
       }
       return sent;
@@ -1255,7 +1473,7 @@ export class SessionManager extends EventEmitter {
         return path;
       });
     }
-    const facts = await this.prepare(env.id);
+    const facts = await this.prepare(env.id, { engine: record.engine });
     const paths = [];
     for (const [i, f] of files.entries()) {
       const dir = `${facts.root}/uploads/${record.id}/${batch}/${i + 1}`;
@@ -1450,14 +1668,14 @@ export class SessionManager extends EventEmitter {
       catch (error) { if (error.code === 'ENOENT' && !options.cursor && !options.ref) return { messages: [], next: null }; throw error; }
     }
     const readRemote = async facts => {
-      const reader = `${facts.root}/ext/pidesk-history.mjs`;
+      const reader = facts.history ?? `${facts.root}/${isAntigravity(record) ? 'antigravity' : 'ext'}/pidesk-history.mjs`;
       return JSON.parse(await runSsh(env, `${shellQuote(facts.node)} ${shellQuote(reader)} ${shellQuote(record.piSessionFile)} ${shellQuote(encoded)}`, { timeout: 30000 }));
     };
     // A validated path hint lets history open while provider discovery/Pi startup runs in parallel.
     // Missing or stale installs fall back to the normal versioned deployment, never a full-file read.
-    const hint = readInstallHint(env, this.store.settings.environments?.[env.id]?.root, this.cacheDir);
+    const hint = readInstallHint(env, this.store.settings.environments?.[env.id]?.root, this.cacheDir, record.engine);
     if (hint) { try { return await readRemote(hint); } catch { /* first upgrade or moved runtime */ } }
-    return readRemote(await this.prepare(env.id));
+    return readRemote(await this.prepare(env.id, { engine: record.engine }));
   }
 
   // Full visible history: the active branch of the session tree, including messages from before any
@@ -1513,14 +1731,14 @@ export class SessionManager extends EventEmitter {
   touch(id) { const runtime = this.runtimes.get(id); if (runtime) runtime.lastUsed = Date.now(); }
   // Likely to be opened soon (hovered in the sidebar): start its Pi now.
   warm(id) {
-    if (!this.store.sessions.some(s => s.id === id && !isAntigravity(s))) return false;
+    if (!this.store.sessions.some(s => s.id === id && (!isAntigravity(s) || !!s.piSessionFile))) return false;
     this.ensureStarted(id).then(() => this.touch(id), () => {});
     return true;
   }
   // A spare Pi in the open conversation's folder, so Fork (and a new session there) adopts a running Pi.
   async warmFolder(id) {
     const record = this.store.sessions.find(s => s.id === id);
-    if (!record || record.archived || record.engine === 'cursor') return false;
+    if (!record || record.archived || record.engine === 'cursor' || isAntigravity(record)) return false;
     return this.prewarm({ environmentId: record.environmentId, cwd: record.cwd, model: record.model, thinkingLevel: record.thinkingLevel, speed: record.speed, noFolder: record.noFolder, engine: record.engine });
   }
   #idle(runtime) {
@@ -1675,6 +1893,7 @@ export class SessionManager extends EventEmitter {
     if (runtime?.status !== 'connected') return [];
     const { commands } = await runtime.session.request('get_commands').catch(() => ({ commands: [] }));
     // Claude Code's own commands and skills (including its /goal) are all the user's to run.
+    if (runtime.engine === ANTIGRAVITY_ENGINE) return commands;
     if (runtime.engine === CLAUDE_ENGINE) return commands.filter(c => !c.name.startsWith('pidesk-')).map(c => ({ name: c.name, description: c.description ?? '', source: 'claude-code', ...(c.argumentHint ? { argumentHint: c.argumentHint } : {}) }));
     return commands.filter(c => !c.name.startsWith('pidesk-') && c.name !== 'goal').map(c => ({ name: c.name, description: c.description ?? '', source: c.source }));
   }
@@ -1726,6 +1945,7 @@ export class SessionManager extends EventEmitter {
 
   async shutdown() {
     clearInterval(this.sweeper);
+    this.warmSequence++; // an outstanding folder/binary probe must not start a new spare on quit
     const spares = [...this.spares.values()];
     this.spares.clear();
     await Promise.all(spares.map(spare => this.#stopSpare(spare)));

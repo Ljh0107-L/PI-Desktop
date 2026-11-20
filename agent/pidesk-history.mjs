@@ -76,10 +76,10 @@ export function projectEntry(entry, ref, { preview = true, omitted = false } = {
   if (placeholder) {
     state.clipped = true;
     out = { role: message.role, timestamp: message.timestamp, stopReason: message.stopReason, toolName: message.toolName, toolCallId: message.toolCallId,
-      content: [] };
+      content: [], ...(message.provider === 'antigravity' ? { provider: message.provider } : {}) };
   }
   // Usage/timing are compact metadata, not excerpts; never calculate costs from truncated fields.
-  for (const key of ['usage', '__timing', '__speed', '__usageProvenance']) if (message[key] && bytes(message[key]) < 8192) out[key] = message[key];
+  for (const key of ['usage', '__timing', '__speed', '__usageProvenance', '__agyTurn']) if (message[key] && bytes(message[key]) < 8192) out[key] = message[key];
   return { ...out, __entryId: entry.id, ...(omitted && message.stopReason === 'error' ? { __retryOmitted: true } : {}),
     __history: { ref, truncated: state.clipped, ...(state.deferredContent ? { deferredContent: state.deferredContent } : {}), ...(placeholder ? { placeholder: true } : {}) } };
 }

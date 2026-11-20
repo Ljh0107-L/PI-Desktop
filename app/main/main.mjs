@@ -45,20 +45,20 @@ const migrateConnections = () => { for (const v of Object.values(store?.settings
 const environments = () => (migrateConnections(), listEnvironments({ sshConfig: process.env.PIDESK_SSH_CONFIG, customHosts: store?.settings.customHosts ?? [], state: store?.settings.environments ?? {} }));
 
 // Resolve and inspect paths on the session's own machine, including remote ~/ paths.
-async function targetFilePreview(environmentId, cwd, operation, rel = '') {
+async function targetFilePreview(environmentId, cwd, operation, rel = '', engine) {
   if (!cwd) return operation === 'search' ? { path: '', files: [] } : { path: '', entries: [] };
   const env = manager.env(environmentId);
   if (env.kind === 'local') return filePreview(operation, cwd, rel);
   // Sessions already prepare Node on the host; reuse that runtime instead of parsing
   // ls output or relying on platform-specific shell utilities for binary-safe reads.
-  const { node } = await manager.prepare(environmentId);
+  const { node } = await manager.prepare(environmentId, { engine });
   const output = await runSsh(env, remoteFilePreviewScript(node, operation, cwd, rel), { timeout: operation === 'read' ? 60000 : 30000 });
   return decodeRemoteFilePreview(output);
 }
 
 async function sessionFilePreview(id, operation, rel = '') {
   const record = manager.record(id);
-  return targetFilePreview(record.environmentId, record.cwd, operation, rel);
+  return targetFilePreview(record.environmentId, record.cwd, operation, rel, record.engine);
 }
 
 // Save a file from the session's machine to this Mac, through a save dialog that starts in Downloads.
@@ -74,7 +74,7 @@ async function downloadSessionFile(id, rel) {
     target = choice.filePath;
   }
   if (env.kind === 'local') return downloadLocal(record.cwd, rel, target);
-  const { node } = await manager.prepare(record.environmentId);
+  const { node } = await manager.prepare(record.environmentId, { engine: record.engine });
   return downloadRemote(env, node, record.cwd, rel, target);
 }
 
@@ -146,18 +146,18 @@ const api = {
   },
   environments: () => environments(),
   // SSH connections the user works with (Settings → Connections).
-  addConnections(ids) {
+  addConnections(ids, engine = store.settings.defaults.engine) {
     for (const id of ids) store.settings.environments[id] = { ...store.settings.environments[id], added: true, enabled: true };
     store.saveSettings();
-    for (const id of ids) manager.prepare(id).catch(() => {});
+    if (engine !== 'antigravity') for (const id of ids) manager.prepare(id).catch(() => {});
     return environments();
   },
-  addManualConnection({ label, host, port, identityFile }) {
+  addManualConnection({ label, host, port, identityFile }, engine) {
     const clean = String(host ?? '').trim();
     if (!/^([A-Za-z0-9._-]+@)?[A-Za-z0-9._-]+$/.test(clean)) throw new Error('Enter a host like user@example.com');
     const id = 'manual-' + (label || clean).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') + '-' + Date.now().toString(36).slice(-4);
     store.settings.customHosts = [...(store.settings.customHosts ?? []), { id, label: (label || clean).trim(), host: clean, port: port ? Number(port) : undefined, identityFile: identityFile?.trim() || undefined }];
-    return api.addConnections([`ssh:${id}`]);
+    return api.addConnections([`ssh:${id}`], engine);
   },
   removeConnection(id) {
     const { root, ...rest } = store.settings.environments[id] ?? {};
@@ -171,7 +171,7 @@ const api = {
     store.saveSettings();
     return environments();
   },
-  prepareEnvironment: (id, force) => manager.prepare(id, { force }).then(facts => ({ ok: true, facts }), error => ({ ok: false, error: error.message })),
+  prepareEnvironment: (id, force, engine) => manager.prepare(id, { force, engine }).then(facts => ({ ok: true, facts }), error => ({ ok: false, error: error.message })),
   async listDir(environmentId, path) {
     const env = manager.env(environmentId);
     if (env.kind === 'ssh') return listRemoteDir(env, path);
@@ -247,7 +247,9 @@ const api = {
   setUltracode: (id, on) => manager.setUltracode(id, on),
   claudeCodeInfo: () => manager.claudeCodeInfo(),
   antigravityInfo: environmentId => manager.antigravityInfo(environmentId),
-  antigravityLogin: id => manager.antigravityLogin(id),
+  antigravityReadiness: environmentId => manager.antigravityReadiness(environmentId),
+  antigravityAccount: (environmentId, login) => manager.antigravityAccount(environmentId, { login: login === true }),
+  antigravityInstall: environmentId => manager.antigravityInstall(environmentId),
   antigravitySetConfig: (id, configId, value) => manager.antigravitySetConfig(id, configId, value),
   prepareClaudeCode: environmentId => manager.prepareClaude(environmentId).then(layout => ({ ok: true, version: manager.claudeCodeInfo().version, bin: layout.bin }), error => ({ ok: false, error: error.message })),
   agents: id => manager.agents(id),
@@ -298,6 +300,11 @@ const api = {
   usageSummary: () => usage.summary(),
   // Terminal panel
   termOpen(id, cols, rows) { const record = manager.record(id); return terminals.open({ env: manager.env(record.environmentId), cwd: record.cwd, cols, rows }); },
+  async termOpenAntigravity(environmentId, action, cols, rows) {
+    const { env, ...command } = await manager.antigravityTerminal(environmentId, action);
+    return terminals.open({ env, command, cwd: app.getPath('home'), cols, rows });
+  },
+  termReady: termId => terminals.ready(termId),
   termWrite: (termId, data) => terminals.write(termId, data),
   termResize: (termId, cols, rows) => terminals.resize(termId, cols, rows),
   termClose: termId => terminals.close(termId),
@@ -327,7 +334,7 @@ const api = {
   async gitReview(id, request = {}) {
     const record = manager.record(id), env = manager.env(record.environmentId);
     if (env.kind === 'local') return gitReview(record.cwd, request);
-    const { node } = await manager.prepare(record.environmentId);
+    const { node } = await manager.prepare(record.environmentId, { engine: record.engine });
     return decodeGitReview(await runSsh(env, remoteGitReviewScript(node, record.cwd, request), { timeout: 120000 }));
   },
   appearance(theme) {
@@ -342,7 +349,7 @@ const api = {
   listFiles: (id, rel = '') => sessionFilePreview(id, 'list', rel),
   searchFiles: (target, query = '') => typeof target === 'string'
     ? sessionFilePreview(target, 'search', query)
-    : targetFilePreview(target?.environmentId ?? 'local', target?.cwd ?? '', 'search', query),
+    : targetFilePreview(target?.environmentId ?? 'local', target?.cwd ?? '', 'search', query, target?.engine),
   readFile: (id, rel) => sessionFilePreview(id, 'read', rel),
   downloadFile: (id, rel) => downloadSessionFile(id, rel),
   showInFolder: path => shell.showItemInFolder(path),

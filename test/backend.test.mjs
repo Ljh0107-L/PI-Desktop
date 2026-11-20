@@ -78,6 +78,56 @@ test('Antigravity discovery prefers the official installer location without runn
   assert.equal(findAntigravityCli({ home, path }), join(install, 'agy'));
 });
 
+test('Antigravity readiness is read-only and does not throw away a healthy standby', { timeout: 12000 }, async t => {
+  const f = await fixture(t);
+  const cwd = realpathSync(f.dir), bin = join(cwd, 'agy');
+  const fake = resolve('test/fixtures/fake-agy-acp-antigravity.mjs');
+  const scenario = join(cwd, '.pidesk-agy-scenario.json');
+  const manager = managerFor(t, f, {}, { antigravityCli: () => existsSync(bin) ? bin : null,
+    antigravityRemoteCli: async () => { throw new Error('connection refused'); } });
+  assert.equal(await manager.antigravityReadiness('local'), 'missing');
+  assert.equal(await manager.antigravityReadiness('remote'), 'unreachable');
+  writeFileSync(bin, `#!/bin/sh\nexport PIDESK_AGY_FIXTURE_DIR=${shellQuote(cwd)}\nELECTRON_RUN_AS_NODE=1 exec ${shellQuote(process.execPath)} ${shellQuote(fake)} "$@"\n`, { mode: 0o700 });
+  writeFileSync(scenario, '{}');
+  await manager.prewarm({ engine: 'antigravity', environmentId: 'local', cwd });
+  const [spare] = manager.spares.values();
+  await manager.ensureStarted(spare.id, spare.record);
+  assert.equal(await manager.antigravityReadiness('local'), 'signedOut');
+  writeFileSync(join(cwd, '.pidesk-fake-agy-cache.json'), '{"signedIn":true}');
+  assert.equal(await manager.antigravityReadiness('local'), 'ready');
+  writeFileSync(scenario, '{"list":false}');
+  assert.equal(await manager.antigravityReadiness('local'), 'unknown');
+  assert.equal([...manager.spares.values()][0], spare);
+  assert.deepEqual(manager.store.sessions, []);
+  const trace = readFileSync(join(cwd, '.pidesk-fake-agy.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(new Set(trace.filter(r => r.method).map(r => r.method)), new Set(['initialize', 'session/list']));
+});
+
+test('Antigravity keeps a failed startup on the same record and reconnects without sending', { timeout: 12000 }, async t => {
+  const f = await fixture(t);
+  const cwd = realpathSync(f.dir), bin = join(cwd, 'agy');
+  const fake = resolve('test/fixtures/fake-agy-acp-antigravity.mjs');
+  const scenario = join(cwd, '.pidesk-agy-scenario.json');
+  writeFileSync(bin, `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec ${shellQuote(process.execPath)} ${shellQuote(fake)} "$@"\n`, { mode: 0o700 });
+  writeFileSync(scenario, '{"badProtocol":true}');
+  writeFileSync(join(cwd, '.pidesk-fake-agy-cache.json'), '{"signedIn":true}');
+  const manager = managerFor(t, f, {}, { antigravityCli: () => bin });
+  const progress = []; manager.on('status', status => progress.push(status));
+  const creationId = 'pending:1';
+  const record = await manager.create({ engine: 'antigravity', environmentId: 'local', cwd, creationId });
+  assert.equal(record.status, 'error');
+  assert.match(record.statusMessage, /did not negotiate ACP/);
+  assert.ok(progress.some(p => p.phase === 'starting' && p.creationId === creationId));
+  assert.equal(progress.at(-1).creationId, creationId);
+  writeFileSync(scenario, '{}');
+  progress.length = 0;
+  await manager.reconnect(record.id);
+  assert.deepEqual(manager.list().map(s => [s.id, s.status]), [[record.id, 'connected']]);
+  assert.ok(progress.some(p => p.phase === 'opening' && !p.creationId));
+  const trace = readFileSync(join(cwd, '.pidesk-fake-agy.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(trace.filter(r => r.method).map(r => r.method), ['initialize', 'initialize', 'session/new']);
+});
+
 test('Antigravity runs through the local relay, gates permissions and reopens the same CLI session', { timeout: 15000 }, async t => {
   const f = await fixture(t);
   const cwd = realpathSync(f.dir), bin = join(cwd, 'agy');
@@ -91,23 +141,45 @@ test('Antigravity runs through the local relay, gates permissions and reopens th
   const engine = 'antigravity', args = { engine, cwd, model: { provider: 'paid', id: 'model' }, ultra: true, speed: 'ultrafast' };
   await assert.rejects(manager.create({ ...args, environmentId: 'remote' }), /agy\) was not found/);
   assert.deepEqual(manager.store.sessions, []);
-  assert.equal(await manager.prewarm({ ...args, environmentId: 'local' }), false);
+  assert.equal(await manager.prewarm({ ...args, environmentId: 'local' }), true);
+  const [spare] = manager.spares.values();
+  const prewarmed = await manager.ensureStarted(spare.id, spare.record);
+  assert.equal(prewarmed.initialState.antigravity.standby, true);
+  assert.equal(manager.store.sessions.length, 0, 'prewarm must not create a conversation');
+  assert.equal(existsSync(join(f.dir, 'sessions')), false);
+  assert.deepEqual(trace().filter(row => row.method).map(row => row.method), ['initialize']);
   const session = await manager.create({ ...args, environmentId: 'local' });
+  assert.equal(session.id, spare.id);
+  assert.equal(await manager.ensureStarted(session.id), prewarmed, 'reuse both the ACP child and the relay attachment');
+  assert.equal(trace().filter(row => row.boot).length, 1);
+  assert.equal(trace().filter(row => row.method === 'initialize').length, 1);
+  assert.equal(session.antigravity.standby, undefined);
+  assert.equal(prewarmed.initialState.sessionFile, session.piSessionFile);
   assert.equal(session.engine, engine);
   assert.equal(session.model, undefined);
   assert.equal(session.speed, undefined);
   assert.equal(session.ultra, undefined);
   assert.equal(session.antigravity.authRequired, true);
+  assert.equal(session.antigravity.permissionMode, 'bypassPermissions');
+  assert.deepEqual(trace()[0].boot.argv, ['acp', '--dangerously-skip-permissions']);
   await assert.rejects(manager.prompt(session.id, 'not logged in'), /Sign in with Google/);
   assert.equal(trace().some(row => ['authenticate', 'session/prompt'].includes(row.method)), false);
   assert.equal((await manager.antigravityLogin(session.id)).authRequired, false);
   const config = await manager.antigravitySetConfig(session.id, 'model', 'mock-gemini-pro');
   assert.equal(config.options.find(o => o.id === 'model').currentValue, 'mock-gemini-pro');
-  await assert.rejects(manager.prompt(session.id, 'with file', [{ kind: 'file' }]), /text only/);
+  const connected = await manager.ensureStarted(session.id);
+  const settled = connected.nextSettled(5000);
+  await manager.prompt(session.id, 'with file', [{ kind: 'file', name: 'test.txt', data: 'aW1hZ2U=' }]);
+  await settled;
+  assert.match(trace().find(row => row.method === 'session/prompt').params.prompt[0].text, /Attached files:\n- .*\/test\.txt/);
+  assert.deepEqual(manager.list()[0].pendingQuestions, []);
+  manager.store.settings.defaults = { antigravityBypassPermissions: false };
   const questionReceived = once(manager, 'question');
   assert.deepEqual(await manager.prompt(session.id, 'permission test'), { disposition: 'started' });
   const [{ question }] = await questionReceived;
   assert.equal(question.permission, true);
+  assert.deepEqual(trace().filter(row => row.boot).at(-1).boot.argv, ['acp']);
+  assert.equal(manager.list()[0].antigravity.permissionMode, 'confirm');
   assert.throws(() => manager.answer(session.id, question.requestId, { confirmed: true }), /Choose one/);
   assert.equal((await f.relay('list')).sessions.find(s => s.id === session.id).pendingUi, 1);
   const resolved = once(manager, 'question-resolved');
@@ -116,12 +188,12 @@ test('Antigravity runs through the local relay, gates permissions and reopens th
   assert.deepEqual(manager.list()[0].pendingQuestions, []);
   assert.equal((await f.relay('list')).sessions.find(s => s.id === session.id).pendingUi, 0);
   assert.equal(trace()[0].boot.env.includes('GEMINI_API_KEY'), false);
-  assert.deepEqual(trace().filter(row => row.method === 'session/prompt').map(row => row.params.prompt[0].text), ['permission test']);
+  assert.equal(trace().filter(row => row.method === 'session/prompt').at(-1).params.prompt[0].text, 'permission test');
   await assert.rejects(manager.compact(session.id), /not available/);
   await assert.rejects(manager.fork(session.id), /not available/);
 
   const original = await manager.historyPage(session.id);
-  assert.equal(original.messages.filter(m => m.role === 'user').length, 1);
+  assert.equal(original.messages.filter(m => m.role === 'user').length, 2);
   await manager.close(session.id);
   await f.relay('stop', session.id);
   // Simulate a crash before the initial transcript path was registered by Desktop.
@@ -132,6 +204,51 @@ test('Antigravity runs through the local relay, gates permissions and reopens th
   assert.deepEqual((await manager.historyPage(session.id)).messages, original.messages);
   assert.equal(trace().filter(row => row.method === 'session/new').length, 2, 'auth rejection + successful new, never another new on resume');
   assert.equal(trace().find(row => row.method === 'session/resume').params.sessionId, 'fake-acp/session?exact=1');
+});
+
+test('a pre-warmed No-folder Antigravity opens in the first prompt’s workspace', { timeout: 12000 }, async t => {
+  const f = await fixture(t);
+  const parent = realpathSync(f.dir), root = join(parent, 'projectless'), bin = join(parent, 'agy');
+  mkdirSync(root);
+  const fake = resolve('test/fixtures/fake-agy-acp-antigravity.mjs');
+  writeFileSync(bin, `#!/bin/sh\nexport PIDESK_AGY_FIXTURE_DIR=${shellQuote(parent)}\nELECTRON_RUN_AS_NODE=1 exec ${shellQuote(process.execPath)} ${shellQuote(fake)} "$@"\n`, { mode: 0o700 });
+  const scenario = join(parent, '.pidesk-agy-scenario.json');
+  writeFileSync(scenario, '{}');
+  const manager = managerFor(t, f, {}, { antigravityCli: () => bin });
+  manager.projectlessRoot = async () => root;
+  manager.store.saveSessions = () => writeFileSync(scenario, JSON.stringify({ workspace: manager.store.sessions[0].cwd }));
+  const draft = { engine: 'antigravity', environmentId: 'local' };
+  assert.equal(await manager.prewarm(draft), true);
+  const [spare] = manager.spares.values();
+  const record = await manager.create({ ...draft, prompt: 'Startup workspace' });
+  assert.equal(record.id, spare.id);
+  assert.ok(record.cwd.startsWith(root + '/'));
+  assert.match(record.cwd, /\/\d{4}-\d{2}-\d{2}\/startup-workspace$/);
+  assert.equal(record.noFolder, true);
+  const trace = readFileSync(join(parent, '.pidesk-fake-agy.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(trace[0].boot.cwd, root);
+  assert.deepEqual(trace.filter(r => r.method).map(r => [r.method, r.params?.cwd]), [['initialize', undefined], ['session/new', record.cwd]]);
+});
+
+test('Antigravity discards an unused standby if its permission launch mode changed', { timeout: 12000 }, async t => {
+  const f = await fixture(t);
+  const cwd = realpathSync(f.dir), bin = join(cwd, 'agy');
+  const fake = resolve('test/fixtures/fake-agy-acp-antigravity.mjs');
+  writeFileSync(bin, `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec ${shellQuote(process.execPath)} ${shellQuote(fake)} "$@"\n`, { mode: 0o700 });
+  writeFileSync(join(cwd, '.pidesk-agy-scenario.json'), '{}');
+  const manager = managerFor(t, f, {}, { antigravityCli: () => bin });
+  const draft = { engine: 'antigravity', environmentId: 'local', cwd };
+  assert.equal(await manager.prewarm(draft), true);
+  const [spare] = manager.spares.values();
+  await manager.ensureStarted(spare.id, spare.record);
+  manager.store.settings.defaults = { antigravityBypassPermissions: false };
+  const record = await manager.create(draft);
+  assert.notEqual(record.id, spare.id);
+  assert.equal(record.antigravity.permissionMode, 'confirm');
+  assert.equal((await f.relay('list')).sessions.find(s => s.id === spare.id)?.alive, false);
+  const trace = readFileSync(join(cwd, '.pidesk-fake-agy.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
+  assert.deepEqual(trace.filter(r => r.boot).map(r => r.boot.argv), [['acp', '--dangerously-skip-permissions'], ['acp']]);
+  assert.equal(trace.filter(r => r.method === 'session/new').length, 1, 'only the real conversation opens a CLI session');
 });
 
 test('cancelling a starting spare is silent and cannot drop its replacement', { timeout: 15000 }, async t => {

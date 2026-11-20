@@ -2,12 +2,15 @@
 // scenario and stands in for the CLI's own credential and session cache.
 import assert from 'node:assert/strict';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 
-assert.deepEqual(process.argv.slice(2), ['acp']);
-const scenarioFile = '.pidesk-agy-scenario.json';
-const cacheFile = '.pidesk-fake-agy-cache.json';
-const logFile = '.pidesk-fake-agy.jsonl';
+const bypass = process.argv.includes('--dangerously-skip-permissions');
+assert.deepEqual(process.argv.slice(2), ['acp', ...(bypass ? ['--dangerously-skip-permissions'] : [])]);
+const fixture = process.env.PIDESK_AGY_FIXTURE_DIR ?? process.cwd();
+const scenarioFile = join(fixture, '.pidesk-agy-scenario.json');
+const cacheFile = join(fixture, '.pidesk-fake-agy-cache.json');
+const logFile = join(fixture, '.pidesk-fake-agy.jsonl');
 const scenario = () => JSON.parse(readFileSync(scenarioFile, 'utf8'));
 const cache = () => existsSync(cacheFile) ? JSON.parse(readFileSync(cacheFile, 'utf8')) : {};
 const save = value => writeFileSync(cacheFile, JSON.stringify(value));
@@ -45,8 +48,9 @@ lines.on('line', line => {
       assert.equal(r.params.clientInfo.name, 'pi-desktop');
       assert.equal(r.params.clientInfo.title, 'Pi Desktop');
       assert.deepEqual(r.params.clientCapabilities, {});
-      const { resume, unsupportedResume, oauth } = scenario();
-      reply(r.id, { protocolVersion: 1, agentCapabilities: { loadSession: !unsupportedResume, ...(resume ? { sessionCapabilities: { resume: {} } } : {}) },
+      const { resume, unsupportedResume, oauth, photo, list, badProtocol } = scenario();
+      reply(r.id, { protocolVersion: badProtocol ? 2 : 1, agentCapabilities: { loadSession: !unsupportedResume, promptCapabilities: { image: photo === true },
+        sessionCapabilities: { ...(resume ? { resume: {} } : {}), ...(list !== false ? { list: {} } : {}) } },
         authMethods: oauth === false ? [{ id: 'api-key' }] : [{ id: 'oauth-personal', name: 'Sign in with Google', ...(oauth === 'terminal' ? { type: 'terminal' } : {}) }] });
       break;
     }
@@ -56,18 +60,27 @@ lines.on('line', line => {
       save({ ...cache(), signedIn: true });
       reply(r.id);
       break;
+    case 'session/list':
+      assert.deepEqual(r.params, {});
+      if (cache().signedIn) reply(r.id, { sessions: [{ sessionId: SESSION, title: 'fixture-private-session-name' }] });
+      else authRequired(r.id);
+      break;
     case 'session/new': {
-      assert.equal(r.params.cwd, process.cwd());
+      assert.equal(r.params.cwd, scenario().workspace ?? process.cwd());
       assert.deepEqual(r.params.mcpServers, []);
       if (scenario().newFailure) { error(r.id, -32000, 'fixture-private-non-auth-server-error'); break; }
       if (!cache().signedIn) { authRequired(r.id); break; }
       assert.equal(cache().session, undefined, 'client tried to replace an existing CLI session');
       save({ ...cache(), session: SESSION });
+      if (scenario().telemetry) {
+        update('available_commands_update', { availableCommands: [{ name: 'test-skill', description: 'Test skill', input: { hint: '<input>' } }] });
+        update('usage_update', { used: 250, size: 1000, cost: { amount: 99, currency: 'USD' } });
+      }
       reply(r.id, { sessionId: SESSION, ...config() });
       break;
     }
     case 'session/load': case 'session/resume': {
-      assert.deepEqual(r.params, { cwd: process.cwd(), mcpServers: [], sessionId: SESSION });
+      assert.deepEqual(r.params, { cwd: scenario().workspace ?? process.cwd(), mcpServers: [], sessionId: SESSION });
       if (!cache().signedIn || scenario().expireResume) { authRequired(r.id); break; }
       if (scenario().missingSession || cache().session !== SESSION) { error(r.id, -32002, 'fixture-private-stale-session-data'); break; }
       if (r.method === 'session/load') {
@@ -93,15 +106,20 @@ lines.on('line', line => {
       break;
     case 'session/prompt': {
       assert.equal(r.params.sessionId, SESSION);
+      assert.equal(turn, undefined);
+      if (r.params.prompt.some(p => p.type === 'image')) {
+        assert.equal(scenario().photo, true);
+        assert.deepEqual(r.params.prompt.at(-1), { type: 'image', mimeType: 'image/png', data: 'aW1hZ2U=' });
+        chunk('Image received.'); reply(r.id, { stopReason: 'end_turn' }); break;
+      }
       assert.equal(r.params.prompt.length, 1);
       assert.equal(r.params.prompt[0].type, 'text');
-      assert.equal(turn, undefined);
       const text = r.params.prompt[0].text;
       if (text === 'expire') {
         save({ ...cache(), signedIn: false });
         authRequired(r.id); break;
       }
-      if (text === 'simple') { chunk('No settings needed.'); reply(r.id, { stopReason: 'end_turn' }); break; }
+      if (text === 'simple' || bypass) { chunk('No settings needed.'); reply(r.id, { stopReason: 'end_turn' }); break; }
       turn = { id: r.id, permission: `permission-${++nextPermission}`, text };
       chunk('foreign session should be ignored', 'wrong-session');
       chunk('Hello 🪐'); chunk('\u2028world');

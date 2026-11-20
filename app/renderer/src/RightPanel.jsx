@@ -1,8 +1,9 @@
 import { useEffect, useId, useMemo, useState } from 'react';
 import { Icon } from './Icons.jsx';
 import { Spinner, useResizable } from './ui.jsx';
-import { formatTokens, speedDisplay, speedReply, speedTier, usageOf } from './transcript.js';
+import { antigravityTurnSpeed, formatTokens, speedDisplay, speedReply, speedTier, usageOf } from './transcript.js';
 import { stopBackgroundJob, useStore } from './store.js';
+import { openAntigravitySettings } from './Antigravity.jsx';
 import { subagentBatches, visibleSubagentBatches } from './subagent-state.js';
 import { SubagentDetail, SubagentList } from './Subagents.jsx';
 import { backgroundElapsed, sortedBackgroundJobs } from './background-jobs.js';
@@ -24,7 +25,22 @@ function Card({ title, children, open: initial = true, aside }) {
 // Speed and token usage per turn, where a turn is one model call (one assistant message): the last turn's
 // speed with a trend of recent turns, and input / cached / output tokens for the last turn and the session.
 // Figures update as each turn finishes.
-export function UsageMetrics({ transcript }) {
+export function UsageMetrics({ transcript, antigravity }) {
+  if (antigravity) {
+    const reply = (transcript?.messages ?? []).findLast(m => antigravityTurnSpeed(m));
+    const speed = antigravityTurnSpeed(reply);
+    if (!speed) return null;
+    return <div className="usage">
+      <div className="usage-speed">
+        <div className="usage-speed-metric">
+          <div className="usage-speed-value"><b>~{speed.tps >= 100 ? Math.round(speed.tps) : speed.tps.toFixed(1)}</b><span>tok/s</span></div>
+          <span className="usage-speed-kind">Turn TPS (estimated)</span>
+        </div>
+        <span className="muted">{(speed.durationMs / 1000).toFixed(1)}s</span>
+      </div>
+      <p className="agy-speed-description">Visible output and reasoning over the full turn, including tool time. Not model decode speed or billed usage.</p>
+    </div>;
+  }
   const messages = (transcript?.messages ?? []).filter(m => m.role === 'assistant' && m.usage && !['error', 'aborted', 'pending', 'deferred'].includes(m.stopReason));
   if (!messages.length) return null;
   const lastMessage = messages.at(-1);
@@ -63,8 +79,8 @@ export function UsageMetrics({ transcript }) {
   );
 }
 
-function UsageCard({ transcript }) {
-  const body = UsageMetrics({ transcript });
+function UsageCard({ transcript, antigravity }) {
+  const body = UsageMetrics({ transcript, antigravity });
   if (!body) return null;
   return <Card title="Usage">{body}</Card>;
 }
@@ -146,7 +162,8 @@ export function RightPanel({ session }) {
   const batch = batches.find(b => b.callId === selection?.callId);
   const task = Number.isInteger(selection?.taskIndex) ? batch?.tasks.find(task => task.index === selection.taskIndex) : null;
   const [detailWidth, detailHandle] = useResizable('subagent-inspector', 480, 300, 680, 'left');
-  const context = stats?.contextUsage;
+  const antigravity = session.engine === 'antigravity';
+  const context = antigravity ? session.antigravity?.contextUsage : stats?.contextUsage;
   const percent = Number.isFinite(context?.percent) ? context.percent : null;
   const contextLabel = Number.isFinite(context?.tokens)
     ? `${formatTokens(context.tokens)} / ${Number.isFinite(context?.contextWindow) ? formatTokens(context.contextWindow) : '—'}`
@@ -156,11 +173,17 @@ export function RightPanel({ session }) {
   </aside>;
   return (
     <aside className="right-panel">
-      <Card title="Context" aside={<>
+      {(!antigravity || context) && <Card title="Context" aside={<>
         <span className="muted" title="Context usage reported by the agent">{contextLabel}</span>
         {percent != null && <span className={`meter ${percent > 100 ? 'over' : ''}`} title={`${Math.round(percent)}% of the context window`}><span style={{ width: `${Math.max(0, Math.min(100, percent))}%` }} /></span>}
-      </>} />
-      <UsageCard transcript={transcript} />
+      </>} />}
+      <UsageCard transcript={transcript} antigravity={antigravity} />
+      {antigravity && <Card title="Antigravity">
+        <div className="agy-account-panel">
+          {!context && <p className="muted">The CLI hasn’t reported context usage.</p>}
+          <button type="button" className="button small" onClick={() => openAntigravitySettings(session.environmentId)}><Icon name="key" size={14} /> Account &amp; quota</button>
+        </div>
+      </Card>}
       <BackgroundJobs key={session.id} sessionId={session.id} />
       {usesPiAgents && <SubagentList sessionId={session.id} batches={batches} selectedCallId={selection?.callId} />}
     </aside>
